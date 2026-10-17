@@ -175,7 +175,7 @@ export interface HoldHighlight {
   quality?: number;
 }
 
-export type GuidePose = 'idle' | 'wave' | 'point' | 'clap' | 'cheer' | 'think';
+export type GuidePose = 'idle' | 'wave' | 'point' | 'clap' | 'cheer' | 'think' | 'belay';
 
 export interface GuideState {
   /** Wall-local position on the floor/mats in front of the wall (x, depth). */
@@ -220,6 +220,10 @@ export interface RendererAPI {
   setCameraMode(mode: CameraMode, opts?: { instant?: boolean; focus?: Vec2 }): void;
   /** Extra framing hint for 'follow' (e.g. the point being dragged), null to clear. */
   setCameraFocusHint(p: Vec2 | null): void;
+  /** 'editor' camera: straight-on view centred on `center` showing `metersVisible` of wall height (pinch-zoom/pan). */
+  setEditorView(center: Vec2, metersVisible: number): void;
+  /** Offscreen-rendered 3/4 portrait of an animal head (PNG data URL, cached). Used by the locker + guide bubble. */
+  portrait(head: HeadId, size?: number): string;
 
   /** Project a wall-local point (at `depth` m from the wall) to canvas CSS pixels. */
   wallToScreen(p: Vec2, depth?: number): ScreenPoint;
@@ -239,6 +243,35 @@ export interface RendererAPI {
   frame(dt: number): void;
   dispose(): void;
 }
+
+// ═══════════════════ CHARACTER (src/render/climber.ts, guide.ts, rope-mesh.ts, portrait.ts, heads/) ═══════════════════
+// Used internally by the renderer (GameRenderer). Exact exported API:
+//
+//   climber.ts   export class ClimberModel extends THREE.Group {
+//                  constructor(opts?: { head?: HeadId; colorway?: ColorwayId; chalk?: ChalkId });
+//                  setSkin(head: HeadId, colorway: ColorwayId, chalk: ChalkId): void;
+//                  setHarness(on: boolean): void;                 // rope mode: harness, belay loop, tie-in knot
+//                  pose(state: ClimberState, frame: WallFrame, dt: number): void;  // IK + secondary animation
+//                  setLookTarget(p: Vec2 | null): void;           // wall-local point the head turns toward
+//                  getHarnessWorld(out: THREE.Vector3): THREE.Vector3;  // rope tie-in point (world)
+//                  getLimbWorld(limb: LimbId, out: THREE.Vector3): THREE.Vector3;
+//                  celebrate(): void;                             // one-shot send celebration
+//                  dispose(): void;
+//                }
+//   guide.ts     export class GuideModel extends THREE.Group {    // Steini: full body + ibex head + staff outfit
+//                  constructor();
+//                  setState(g: GuideState, frame: WallFrame, dt: number): void;
+//                  getHandWorld(hand: 'L' | 'R', out: THREE.Vector3): THREE.Vector3;  // belay hand for the rope
+//                  dispose(): void;
+//                }
+//   rope-mesh.ts export class RopeMesh extends THREE.Object3D {   // dynamic rope tube with sag + slack
+//                  constructor(color?: string);
+//                  setPath(points: THREE.Vector3[] | null): void; // world points: belayer hand → draws → harness
+//                  update(dt: number): void;
+//                  dispose(): void;
+//                }
+//   portrait.ts  export function renderPortrait(renderer: THREE.WebGLRenderer, head: HeadId, size?: number): string;
+//   heads/index.ts export function createHead(id: HeadId): THREE.Group;  // origin = neck joint, +Y up, faces +Z
 
 // ═══════════════════════════════ INPUT (src/input) ═══════════════════════════════
 
@@ -333,6 +366,7 @@ export interface ResultsProps {
   rank?: number | null;
   unlocks?: { kind: 'head' | 'colorway' | 'chalk'; id: string; name: string }[];
   canContinue: boolean; // "NEXT BOULDER" vs only retry/menu
+  tip?: string; // Steini's tip after a fall
 }
 
 export interface ScreenProps {
@@ -341,7 +375,7 @@ export interface ScreenProps {
   modes: { profile: Profile; dailyKey: string; dailyBest?: number };
   name: { current: string };
   hud: { run: RunInfo };
-  preview: { boulder: BoulderDef; run: RunInfo };
+  preview: { boulder: BoulderDef; run: RunInfo; tip?: string };
   pause: { run: RunInfo };
   results: ResultsProps;
   leaderboard: { mode: LeaderboardMode; entries: ScoreEntry[] | null; me: string; isGlobal: boolean; dailyKey: string };
@@ -385,6 +419,9 @@ export interface UIAPI {
 
   /** Generic modal confirm. */
   confirm(title: string, body: string, ok?: string, cancel?: string): Promise<boolean>;
+
+  /** Provides 3D head portraits (data URLs) for the locker, profile chip and guide bubble. */
+  setPortraitProvider(fn: (head: HeadId) => string): void;
 }
 
 // ═══════════════════════════════ NET (src/net) ═══════════════════════════════

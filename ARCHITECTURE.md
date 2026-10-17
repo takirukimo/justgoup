@@ -92,7 +92,8 @@ All gameplay is in **wall-local 2D meters** (`src/core/types.ts`). The 3D view i
 ```ts
 // src/game
 import { ClimberSim } from './game/climber-sim';                 // new ClimberSim(boulder, opts?: SimOptions) implements ClimberSimAPI
-import { generateBoulder, generateRopeRoute, tutorialBoulder, dailyBoulder, todayKey } from './game/generator';
+import { generateBoulder, generateRopeRoute, tutorialBoulder, dailyBoulder, todayKey, TUTORIAL_SEQUENCE } from './game/generator';
+// TUTORIAL_SEQUENCE: { limb: LimbId; holdId: string; teach: 'hand'|'foot'|'hips'|'shake'|'match' }[] — scripted moves on tutorialBoulder()
 import { planBeta, nextHint, estimateGrade } from './game/solver';
 import { scoreSend, parTime, runGradeFor, scoreRope } from './game/scoring';
 import { RopeSystem } from './game/rope';                         // new RopeSystem(boulder)
@@ -107,6 +108,7 @@ import { GameUI } from './ui/ui';                                 // new GameUI(
 import { GameAudio } from './audio/audio';                        // new GameAudio() implements AudioAPI
 // src/tutorial
 import { runIntro, runTutorial } from './tutorial/tutorial';
+import { TIPS, randomTip } from './tutorial/tips';                  // Steini's climbing tips (string[])
 // src/net
 import { createBackend } from './net/backend';                    // Promise<BackendAPI>
 import { loadProfile, saveProfile, evaluateUnlocks } from './net/profile';

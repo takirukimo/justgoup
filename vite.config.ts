@@ -7,6 +7,8 @@ import { viteSingleFile } from 'vite-plugin-singlefile';
 export default defineConfig(({ mode }) => ({
   base: './',
   plugins: mode === 'single' ? [viteSingleFile()] : [],
+  // Separate dep caches let several dev servers run side by side (VITE_CACHE_DIR=node_modules/.vite-x).
+  cacheDir: process.env.VITE_CACHE_DIR || 'node_modules/.vite',
   build: {
     outDir: mode === 'single' ? 'dist-single' : 'dist',
     target: 'es2022',
