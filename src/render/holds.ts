@@ -468,12 +468,14 @@ function ensureColor(g: THREE.BufferGeometry): void {
 /**
  * Cached hold geometry in hold-local space, real size (meters).
  * lod 1 = background detail (fewer segments, no bolt) for the neighbouring walls.
+ * lod 2 = deco holds on the main wall (two thirds of the segments, no bolt): dimmed and never
+ *         touched, they don't need the route holds' tessellation at phone resolution.
  */
-export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 | 1 = 0): HoldGeometry {
+export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 | 1 | 2 = 0): HoldGeometry {
   const variant = Math.abs(seed) % HOLD_VARIANTS;
   const sb = Math.max(1, Math.round(size * 200));
   const key = `${type}:${variant}:${sb}:${lod}`;
-  const segU = (n: number) => (lod ? Math.max(8, Math.round(n * 0.5)) : n);
+  const segU = (n: number) => (lod === 1 ? Math.max(8, Math.round(n * 0.5)) : lod === 2 ? Math.max(10, Math.round(n * 0.66)) : n);
   geoUsed.set(key, geoEpoch);
   const hit = geoCache.get(key);
   if (hit) {
@@ -508,10 +510,10 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 
       break;
     }
     case 'pocket':
-      built = lathe(POCKET, { seg: lod ? 12 : 22, sx: rng.range(1.0, 1.25), sy: rng.range(0.8, 0.95), holeShift: rng.range(0.08, 0.2), noise, noiseAmp: 0.06 });
+      built = lathe(POCKET, { seg: lod === 1 ? 12 : lod === 2 ? 16 : 22, sx: rng.range(1.0, 1.25), sy: rng.range(0.8, 0.95), holeShift: rng.range(0.08, 0.2), noise, noiseAmp: 0.06 });
       break;
     case 'foot':
-      built = lathe(FOOT, { seg: lod ? 9 : 14, sx: rng.range(1.1, 1.5), sy: rng.range(0.7, 0.95), holeShift: 0, noise: makeNoise(rng, 1.5, 4), noiseAmp: 0.14 });
+      built = lathe(FOOT, { seg: lod === 1 ? 9 : lod === 2 ? 11 : 14, sx: rng.range(1.1, 1.5), sy: rng.range(0.7, 0.95), holeShift: 0, noise: makeNoise(rng, 1.5, 4), noiseAmp: 0.14 });
       boltScale = 0.55;
       break;
     case 'volume':
@@ -574,13 +576,56 @@ export function holdMatrix(h: HoldDef, frame: WallFrame, out: THREE.Matrix4): TH
   return out.compose(_v, _q, new THREE.Vector3(1, 1, 1));
 }
 
-/** Deco colour: slightly desaturated and darker so the route pops. */
-export function decoColor(hex: string, out = new THREE.Color()): THREE.Color {
+const _hsl = { h: 0, s: 0, l: 0 };
+/** Hold colours are judged in display (sRGB) terms: that is how the wall + palette were authored. */
+const SRGB = THREE.SRGBColorSpace;
+
+/** Lightness the charcoal wall reads at (HSL). Deco holds are pulled toward it so they recede. */
+const WALL_L = 0.17;
+
+/**
+ * Deco colour: desaturated, and its lightness compressed toward the wall's (bright whites dim,
+ * blacks lift a touch) so holds of other routes recede behind the current one. With a dark
+ * `routeHex` (black route on a dark wall) the deco holds recede further still.
+ */
+export function decoColor(hex: string, out = new THREE.Color(), routeHex?: string): THREE.Color {
+  let k = 0.56;
+  if (routeHex) {
+    out.set(routeHex).getHSL(_hsl, SRGB);
+    if (_hsl.l < 0.25) k = 0.4;
+  }
   out.set(hex);
-  const hsl = { h: 0, s: 0, l: 0 };
-  out.getHSL(hsl);
-  out.setHSL(hsl.h, hsl.s * 0.62, hsl.l * 0.7);
+  out.getHSL(_hsl, SRGB);
+  out.setHSL(_hsl.h, _hsl.s * 0.5, WALL_L + (_hsl.l - WALL_L) * k, SRGB);
   return out;
+}
+
+/** Look of a route hold of colour `hex`: albedo, finish and the edge light that separates it from the wall. */
+export interface RouteHoldLook {
+  color: THREE.Color;
+  roughness: number;
+  edgeColor: THREE.Color;
+  edgeStrength: number;
+  edgePower: number;
+  lift: number;
+}
+
+export function routeHoldLook(hex: string): RouteHoldLook {
+  const color = new THREE.Color(hex);
+  color.getHSL(_hsl, SRGB);
+  const { h, s, l } = _hsl;
+  if (l < 0.25) {
+    // black on a charcoal wall: glossy plastic + a cool chalky edge light carry the silhouette
+    color.setHSL(h, s, Math.max(l, 0.12), SRGB);
+    return { color, roughness: 0.3, edgeColor: new THREE.Color('#B4C2D2'), edgeStrength: 0.42, edgePower: 3.0, lift: 0 };
+  }
+  if (s < 0.2 && l > 0.75) {
+    // white already pops: just a warm hairline
+    return { color, roughness: 0.5, edgeColor: new THREE.Color('#FFF1DE'), edgeStrength: 0.1, edgePower: 3.6, lift: 0.02 };
+  }
+  color.setHSL(h, Math.min(1, s * 1.08), l, SRGB);
+  const edgeColor = color.clone().lerp(new THREE.Color(0xffffff), 0.5);
+  return { color, roughness: 0.48, edgeColor, edgeStrength: 0.3, edgePower: 2.8, lift: 0.07 };
 }
 
 // ───────────────────────────── per-boulder hold set ─────────────────────────────
@@ -588,6 +633,8 @@ export function decoColor(hex: string, out = new THREE.Color()): THREE.Color {
 export interface HoldSetOptions {
   /** Build every hold as its own mesh (editor), instead of merging deco holds. */
   separateAll?: boolean;
+  /** Merged deco holds cast key-light shadows (default true; off below 'high' quality). */
+  decoShadows?: boolean;
   gradeText?: string;
   name?: string;
 }
@@ -611,7 +658,7 @@ export class HoldSet {
 
   constructor(private frame: WallFrame) {
     this.group.name = 'holds';
-    this.decoMat = createSurfaceMaterial({ roughness: 0.66, normalMap: speckleNormal(), normalScale: 0.35, normalRepeat: 22, envMapIntensity: 0.45 });
+    this.decoMat = createSurfaceMaterial({ roughness: 0.74, normalMap: speckleNormal(), normalScale: 0.35, normalRepeat: 22, envMapIntensity: 0.32 });
     this.aoMat = new THREE.MeshBasicMaterial({
       color: 0x000000,
       map: softBlobTexture(),
@@ -631,22 +678,31 @@ export class HoldSet {
     const deco: { h: HoldDef; g: HoldGeometry }[] = [];
     const m = new THREE.Matrix4();
     for (const h of holds) {
-      const g = holdGeometry(h.type, h.seed, h.size);
+      const mergedDeco = h.role === 'deco' && !opts.separateAll;
+      const g = holdGeometry(h.type, h.seed, h.size, mergedDeco ? 2 : 0);
       this.holds.set(h.id, h);
       this.geoms.set(h.id, g);
       if (h.role === 'deco' && !opts.separateAll) {
         deco.push({ h, g });
         continue;
       }
+      const look = h.role === 'deco' ? null : routeHoldLook(h.color);
       const mat = createSurfaceMaterial({
-        color: h.role === 'deco' ? decoColor(h.color) : new THREE.Color(h.color),
-        roughness: 0.58,
+        color: look ? look.color : decoColor(h.color, undefined, boulder.color),
+        roughness: look ? look.roughness : 0.74,
         normalMap: speckleNormal(),
         normalScale: 0.38,
         normalRepeat: 22,
         rim: true,
-        envMapIntensity: 0.55,
+        envMapIntensity: look ? 0.6 : 0.32,
       });
+      if (look) {
+        const u = mat.userData.surf;
+        u.uEdgeColor.value.copy(look.edgeColor);
+        u.uEdgeStrength.value = look.edgeStrength;
+        u.uEdgePower.value = look.edgePower;
+        u.uLift.value = look.lift;
+      }
       this.routeMats.push(mat);
       const mesh = new THREE.Mesh(g.geo, mat);
       holdMatrix(h, this.frame, m);
@@ -665,7 +721,7 @@ export class HoldSet {
         const geo = g.geo.clone();
         holdMatrix(h, this.frame, m);
         geo.applyMatrix4(m);
-        decoColor(h.color, col);
+        decoColor(h.color, col, boulder.color);
         const c = geo.getAttribute('color') as THREE.BufferAttribute;
         for (let i = 0; i < c.count; i++) c.setXYZ(i, c.getX(i) * col.r, c.getY(i) * col.g, c.getZ(i) * col.b);
         parts.push(geo);
@@ -674,7 +730,7 @@ export class HoldSet {
       for (const p of parts) p.dispose();
       if (merged) {
         this.decoMesh = new THREE.Mesh(merged, this.decoMat);
-        this.decoMesh.castShadow = true;
+        this.decoMesh.castShadow = opts.decoShadows !== false;
         this.decoMesh.receiveShadow = true;
         this.decoMesh.name = 'holds:deco';
         this.group.add(this.decoMesh);
@@ -747,14 +803,14 @@ export class HoldSet {
     const rng = new Rng(boulder.seed ^ 0x7a9e5);
     for (const h of starts) {
       const g = this.geoms.get(h.id);
-      const below = (g ? Math.max(g.halfX, g.halfY) * 0.85 : h.size) + 0.045;
-      const w = 0.17;
+      const below = (g ? Math.max(g.halfX, g.halfY) * 0.85 : h.size) + 0.05;
+      const w = 0.21;
       quads.push({ cx: h.x + rng.range(-0.02, 0.02), cy: h.y - below, w, h: w / atlas.aspect.start, rot: rng.range(-0.1, 0.1), r: atlas.start });
     }
     for (const h of tops) {
       const g = this.geoms.get(h.id);
-      const above = (g ? Math.max(g.halfX, g.halfY) * 0.85 : h.size) + 0.05;
-      const w = 0.15;
+      const above = (g ? Math.max(g.halfX, g.halfY) * 0.85 : h.size) + 0.055;
+      const w = 0.19;
       quads.push({ cx: h.x + rng.range(-0.02, 0.02), cy: h.y + above, w, h: w / atlas.aspect.top, rot: rng.range(-0.08, 0.08), r: atlas.top });
     }
     if (starts.length) {
@@ -793,6 +849,11 @@ export class HoldSet {
     this.tapeMesh.renderOrder = 2;
     this.tapeMesh.name = 'holds:tape';
     this.group.add(this.tapeMesh);
+  }
+
+  /** Toggle key-light shadows of the merged deco holds (quality changes). */
+  setDecoShadows(on: boolean): void {
+    if (this.decoMesh) this.decoMesh.castShadow = on;
   }
 
   /** Rim glow on a route hold mesh (highlights). strength 0 = off. */

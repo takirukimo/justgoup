@@ -207,6 +207,7 @@ const AX_X = new THREE.Vector3(1, 0, 0);
 const AX_Y = new THREE.Vector3(0, 1, 0);
 const AX_Z = new THREE.Vector3(0, 0, 1);
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
+const DEG2 = Math.PI / 180;
 
 /** Orthonormal basis with Y = yAxis and Z as close to zHint as possible → quaternion. */
 function basisQuat(yAxis: THREE.Vector3, zHint: THREE.Vector3, out: THREE.Quaternion): THREE.Quaternion {
@@ -3238,10 +3239,31 @@ export class ClimberModel extends THREE.Group {
       this.rawC.copy(this.rawP).addScaledVector(WORLD_UP, 0.49).addScaledVector(this.Nh, -0.13 * (1 - st));
       this.rawC.addScaledVector(frame.right, -Math.sin(this.time * 0.85) * 0.008 * st);
     } else if (ph === 'hanging') {
-      // sit in the harness under the rope: torso upright, leaning back off the wall a little
-      this.v0.subVectors(this.rawC, this.rawP).normalize();
-      this.v0.multiplyScalar(0.25).addScaledVector(WORLD_UP, 0.75).addScaledVector(Nw, 0.12).normalize();
+      // sit in the harness under the rope: torso upright, leaning back off the wall a little. The
+      // sim's swinging spine may point anywhere (even head-down right after the catch): only its
+      // sideways lean is kept, never more than ~25° off upright.
+      this.v0.subVectors(this.rawC, this.rawP);
+      this.v0.y = 0;
+      const lean = Math.min(1, this.v0.length() / BODY.spine);
+      if (lean > 1e-4) this.v0.normalize();
+      this.v0.multiplyScalar(0.42 * lean).addScaledVector(WORLD_UP, 1).addScaledVector(Nw, 0.12).normalize();
       this.rawC.copy(this.rawP).addScaledVector(this.v0, BODY.spine);
+    } else if (ph === 'falling') {
+      // the rope catches the harness, so the sim's spine can whip past horizontal: keep the torso
+      // within 50° of upright so a fall never reads as a head-first dive
+      this.v0.subVectors(this.rawC, this.rawP);
+      const len = this.v0.length();
+      if (len > 1e-5) {
+        this.v0.multiplyScalar(1 / len);
+        const cosMax = Math.cos(50 * DEG2);
+        if (this.v0.y < cosMax) {
+          this.v1.copy(this.v0).addScaledVector(WORLD_UP, -this.v0.y);
+          if (this.v1.lengthSq() < 1e-6) this.v1.copy(Nw);
+          this.v1.normalize();
+          this.v0.copy(WORLD_UP).multiplyScalar(cosMax).addScaledVector(this.v1, Math.sqrt(1 - cosMax * cosMax));
+          this.rawC.copy(this.rawP).addScaledVector(this.v0, len);
+        }
+      }
     }
 
     // smoothing (phase dependent); big jumps snap
@@ -3360,7 +3382,11 @@ export class ClimberModel extends THREE.Group {
     // phase-specific targets
     let ropeK = 0;
     if (ph === 'falling') {
+      // arms up and out from the (upright-clamped) shoulders, flailing — never wherever a tumbling
+      // sim skeleton left them, so a fall can't read upside down
       const w = 8.5;
+      this.v1.copy(S).addScaledVector(WORLD_UP, 0.34).addScaledVector(this.goal.chestRight, side * 0.36).addScaledVector(Nw, 0.16);
+      this.v0.lerp(this.v1, 0.75);
       this.v0.addScaledVector(Rw, Math.sin(t * w + s * 2.1) * 0.11 * side).addScaledVector(Uw, Math.cos(t * w * 1.27 + s) * 0.1);
       shape = SHAPE_OPEN;
     } else if (ph === 'landed') {
@@ -3375,6 +3401,9 @@ export class ClimberModel extends THREE.Group {
       hg.jointTarget = st > 0.5;
       shape = SHAPE_FREE;
     } else if (ph === 'hanging') {
+      // until the hands find the rope they stay up by the shoulders (not on the tumbling sim limbs)
+      this.v1.copy(S).addScaledVector(WORLD_UP, 0.28).addScaledVector(this.goal.chestRight, side * 0.3).addScaledVector(Nw, 0.12);
+      this.v0.lerp(this.v1, 0.8);
       ropeK = sstep(0.55, 1.1, this.phaseT);
     }
     this.sRope[s] += (ropeK - this.sRope[s]) * (snap ? 1 : dampK(8, d));
@@ -3514,14 +3543,20 @@ export class ClimberModel extends THREE.Group {
       this.v0.y = GAME.padHeight + ANKLE_H + 0.004;
       fg.jointTarget = true;
     } else if (ph === 'hanging' && state.pelvisDepth < 0.85) {
-      // feet against the wall, legs bent: the classic post-whipper sit
+      // feet against the wall, legs bent: the classic post-whipper sit. They swing in from below
+      // the hips (never from wherever the tumbling sim skeleton left them).
       mode = 'wall';
+      this.v0.copy(Hp).addScaledVector(WORLD_UP, -(THIGH + SHIN) * 0.86).addScaledVector(this.Nh, 0.14);
       this.p2.x = state.pelvis.x + side * 0.17;
       this.p2.y = state.pelvis.y - 0.36;
       frame.toWorld(this.p2, 0.03, this.v1);
       this.v0.lerp(this.v1, sstep(0.3, 0.9, this.phaseT));
-    } else if (ph === 'falling') {
-      this.v0.addScaledVector(Uw, Math.sin(t * 9.5 + s * 2.4) * 0.07).addScaledVector(Rw, Math.cos(t * 7.3 + s) * 0.04 * side);
+    } else if (ph === 'falling' || ph === 'hanging') {
+      // legs hang below the hips (slightly forward, knees soft), whatever the sim skeleton does
+      this.v1.copy(Hp).addScaledVector(WORLD_UP, -(THIGH + SHIN) * 0.86).addScaledVector(this.Nh, 0.14).addScaledVector(g.pelvisRight, side * 0.06);
+      this.v0.lerp(this.v1, 0.85);
+      const kick = ph === 'falling' ? 1 : 0.35;
+      this.v0.addScaledVector(Uw, Math.sin(t * 9.5 + s * 2.4) * 0.07 * kick).addScaledVector(Rw, Math.cos(t * 7.3 + s) * 0.04 * side * kick);
       mode = 'dangle';
     }
 

@@ -1,14 +1,23 @@
 // Camera rig: one PerspectiveCamera driven by per-mode target poses and critically damped
 // springs (smooth, overshoot-free transitions between modes), plus layered shake.
 //
-//  title     slow cinematic orbit, subject low in frame (title UI sits on top)
+//  title     slow cinematic orbit composing the climber AND Steini (when he is on the mats) in the
+//            band the title UI leaves free (logo ≈ top 30%, buttons ≈ bottom 30%); with a negative
+//            titleFraming.lift (locker close-up) it keeps the classic lifted orbit
 //  intro     scripted fly-in from the gym entrance (playIntro() → Promise) handing over to title
 //  preview   pulled back to frame the whole problem (portrait fit with margins)
-//  follow    frames the climber: CoM + lookahead toward the dragged limb, slightly below looking
-//            up, ~12° yaw for depth, climber ≈ 60% of the screen height
+//  follow    decision framing: both feet + the next ~1.1–1.5 m of route above the higher hand
+//            (look-ahead toward the next route hold / the dragged limb's target), fitted exactly
+//            between the HUD bands, climber ≈ 45–55% of the screen height, slightly below looking
+//            up (mild heroic angle), ~12° yaw for depth. While a limb is dragged the framing only
+//            grows (never breathes in and out under the finger). Falls / rope catches frame the
+//            whole body inside the HUD-safe band.
 //  editor    straight-on, narrow FOV, setEditorView(center, metersVisible)
 //  celebrate swing around the climber
-//  fall      dramatic lagging follow
+//  fall      dramatic lagging follow (body kept inside the HUD-safe band)
+//
+// Framing is solved, not guessed: for a fixed view direction, fitVertical() finds the camera
+// distance + height that put a bottom and a top world point exactly on chosen screen rows.
 
 import * as THREE from 'three';
 import type { CameraMode } from '../core/contracts';
@@ -21,7 +30,17 @@ export interface CameraContext {
   boulder: BoulderDef | null;
   state: ClimberState | null;
   ceiling: number;
+  /** Steini on the mats (wall-local x + depth from the wall), or null when hidden. */
+  guide?: { x: number; depth: number } | null;
 }
+
+/** Screen bands the input layer / HUD reserve in follow mode (fractions of 844 px). */
+const HUD_SAFE = { top: 76 / 844, bottom: 98 / 844 };
+/** Route the player must see above the higher hand (m): default, and the most a hint can add. */
+const LOOK_AHEAD = 1.1;
+const LOOK_AHEAD_MAX = 1.55;
+/** Lowest camera height (world y): above the crash pads. */
+const CAM_MIN_Y = 0.75;
 
 interface ModeTuning {
   pos: number; // smooth time (s)
@@ -33,7 +52,7 @@ const TUNING: Record<CameraMode, ModeTuning> = {
   title: { pos: 1.4, look: 1.1, fov: 1.2 },
   intro: { pos: 0.05, look: 0.05, fov: 0.3 },
   preview: { pos: 0.75, look: 0.6, fov: 0.7 },
-  follow: { pos: 0.42, look: 0.26, fov: 0.6 },
+  follow: { pos: 0.34, look: 0.24, fov: 0.6 },
   editor: { pos: 0.16, look: 0.12, fov: 0.25 },
   celebrate: { pos: 0.8, look: 0.4, fov: 0.8 },
   fall: { pos: 0.55, look: 0.22, fov: 0.5 },
@@ -95,7 +114,15 @@ export class CameraRig {
   private up = new SpringVec3();
   private fov = new SpringNum(42);
   private roll = new SpringNum(0);
-  private span = new SpringNum(3.4); // follow: visible wall height (m)
+  // follow: framed wall-local extents (bottom / top / centre x, m), springing toward the target
+  private fBot = new SpringNum(0.2);
+  private fTop = new SpringNum(3.2);
+  private fX = new SpringNum(0);
+  private fYaw = new SpringNum(0);
+  private followFresh = true;
+  private wasDragging = false;
+  /** follow: the climber is in the air (falling on the rope): the rig tracks faster. */
+  private followAir = false;
 
   private tPos = new THREE.Vector3();
   private tLook = new THREE.Vector3();
@@ -132,6 +159,13 @@ export class CameraRig {
   private shakeOff = new THREE.Vector3();
   private readonly WORLD_UP = new THREE.Vector3(0, 1, 0);
   private bbox = { minX: 0, maxX: 0, minY: 0, maxY: 0 };
+  private fwd = new THREE.Vector3();
+  private camUp = new THREE.Vector3();
+  private camRight = new THREE.Vector3();
+  private pB = new THREE.Vector3();
+  private pT = new THREE.Vector3();
+  private fit = { dist: 0, h: 0 };
+  private pts: THREE.Vector3[] = Array.from({ length: 8 }, () => new THREE.Vector3());
   private introPts: THREE.Vector3[] = [];
 
   constructor(aspect = 390 / 844) {
@@ -157,6 +191,7 @@ export class CameraRig {
     this.focusOverride = opts?.focus ?? null;
     if (changed) {
       this.modeTime = 0;
+      if (mode === 'follow') this.followFresh = true;
       this.transition = mode === 'editor' ? 0.35 : 1.25;
       if (mode === 'celebrate') this.celebrateSign = this.camera.position.x >= 0 ? 1 : -1;
     }
@@ -266,51 +301,37 @@ export class CameraRig {
     const t = this.time;
     switch (this.mode) {
       case 'follow': {
-        let cx = 0;
-        let cy = 1.6;
-        let depth = 0.3;
-        let bw = 0.8;
-        let bh = 1.9;
-        if (state) {
-          this.climberBox(state);
-          const b = this.bbox;
-          cx = (b.minX + b.maxX) / 2 * 0.6 + state.com.x * 0.4;
-          cy = (b.minY + b.maxY) / 2 * 0.55 + state.com.y * 0.45 + 0.12;
-          bw = b.maxX - b.minX;
-          bh = b.maxY - b.minY;
-          depth = state.pelvisDepth * 0.55;
-        }
-        const hint = this.focusHint ?? this.focusOverride;
-        if (hint) {
-          cx += clamp(hint.x - cx, -0.9, 0.9) * 0.32;
-          cy += clamp(hint.y - cy, -0.9, 1.1) * 0.32;
-        }
-        const span = clamp(Math.max(bh / 0.6, (bw + 0.5) / aspect, 3.0), 3.0, 5.2);
-        this.span.step(span, 0.9, this.lastDt);
-        // never waste the bottom of the frame on crash pads: keep the frame's lower edge near the kicker
-        cy = Math.max(cy, this.span.value * 0.5 - 0.15);
-        this.tFov = 46;
-        const dist = this.distanceFor(this.span.value, this.tFov);
-        const yaw = 12 + clamp(state ? state.velocity.x * 2 : 0, -4, 4);
-        this.viewDir(frame, 0.55, yaw, -7, this.dir);
-        frame.toWorldXYZ(cx, cy, depth, this.tLook);
-        this.tPos.copy(this.tLook).addScaledVector(this.dir, dist);
-        this.tUp.copy(this.WORLD_UP);
-        this.tRoll = 0;
+        this.followTarget(ctx, aspect);
         break;
       }
       case 'fall': {
-        const s = state;
-        const cx = s ? s.com.x : 0;
-        const cy = s ? Math.max(0.9, s.com.y) : 1.2;
-        const depth = s ? s.pelvisDepth * 0.6 : 0.4;
-        this.tFov = 50;
-        const dist = this.distanceFor(4.6, this.tFov);
-        this.viewDir(frame, 0.45, 16, -12, this.dir);
-        frame.toWorldXYZ(cx, cy, depth, this.tLook);
-        this.tPos.copy(this.tLook).addScaledVector(this.dir, dist);
+        // boulder fall: lagging, lower and wider; the whole body (and the pad once landed) stays
+        // inside the HUD-safe band
+        this.tFov = 48;
+        let bot = 0.0;
+        let top = 3.0;
+        let cx = 0;
+        let depth = 0.4;
+        if (state) {
+          this.climberBox(state);
+          const b = this.bbox;
+          cx = (b.minX + b.maxX) / 2;
+          depth = state.pelvisDepth * 0.6;
+          bot = Math.min(b.minY - 0.45, state.phase === 'landed' ? 0.05 : Infinity);
+          top = b.maxY + 0.6;
+        }
+        const minSpan = 3.0;
+        if (top - bot < minSpan) {
+          const m = (minSpan - (top - bot)) / 2;
+          top += m;
+          bot -= m;
+        }
+        const ins = this.safeInsets();
+        frame.toWorldXYZ(cx, bot, depth, this.pB);
+        frame.toWorldXYZ(cx, top, depth, this.pT);
+        this.solveAboveFloor(frame, 0.45, 16, -10, ins, 1.9, aspect);
         this.tUp.copy(this.WORLD_UP);
-        this.tRoll = s && s.phase === 'falling' ? 2.5 * DEG : 0;
+        this.tRoll = state && state.phase === 'falling' ? 2.5 * DEG : 0;
         break;
       }
       case 'preview': {
@@ -370,13 +391,275 @@ export class CameraRig {
 
     // keep the camera inside the hall and above the pads (except straight-on editor views)
     if (this.mode !== 'editor') {
-      this.tPos.y = clamp(this.tPos.y, 0.75, ctx.ceiling - 0.6);
+      this.tPos.y = clamp(this.tPos.y, CAM_MIN_Y, ctx.ceiling - 0.6);
       this.tPos.x = clamp(this.tPos.x, -11.5, 11.5);
       this.tPos.z = Math.min(this.tPos.z, 27);
     }
   }
 
+  /**
+   * Follow-mode screen insets: the bands the input layer keeps free of limb handles (the HUD bars
+   * live inside them), plus a hair of air. Larger app insets are honoured only up to ~2% more.
+   */
+  private safeInsets(): { top: number; bottom: number } {
+    const v = this.viewInsets;
+    return {
+      top: clamp(v.top, HUD_SAFE.top, HUD_SAFE.top + 0.02) + 0.01,
+      bottom: clamp(v.bottom, HUD_SAFE.bottom, HUD_SAFE.bottom + 0.02) + 0.01,
+    };
+  }
+
+  /** Camera basis (forward / up / right) for a view direction `dir` (subject → camera), up = world up. */
+  private basis(dir: THREE.Vector3): void {
+    this.fwd.copy(dir).negate();
+    this.camRight.crossVectors(this.fwd, this.WORLD_UP).normalize();
+    this.camUp.crossVectors(this.camRight, this.fwd).normalize();
+  }
+
+  /**
+   * For the current basis, the camera distance (along forward, measured at B) and height offset
+   * (along camera up) that put world point B on NDC row nB and T on row nT (nT > nB).
+   */
+  private fitVertical(B: THREE.Vector3, T: THREE.Vector3, nB: number, nT: number, tanH: number): { dist: number; h: number } {
+    this.v1.subVectors(T, B);
+    const yT = this.v1.dot(this.camUp);
+    const zT = this.v1.dot(this.fwd);
+    const dist = Math.max(1.2, (yT - tanH * nT * zT) / (tanH * (nT - nB)));
+    this.fit.dist = dist;
+    this.fit.h = -nB * tanH * dist;
+    return this.fit;
+  }
+
+  /**
+   * Frames B (bottom) and T (top) between the screen insets with the current basis + tFov, making
+   * sure at least `minWidth` m of wall is visible across. Writes tPos / tLook.
+   */
+  private solveFrame(B: THREE.Vector3, T: THREE.Vector3, ins: { top: number; bottom: number }, minWidth: number, aspect: number): void {
+    const tanH = Math.tan((this.tFov * DEG) / 2);
+    const nT = 1 - 2 * ins.top;
+    const nB = -1 + 2 * ins.bottom;
+    const f = this.fitVertical(B, T, nB, nT, tanH);
+    let dist = f.dist;
+    let h = f.h;
+    const dW = minWidth / 2 / (tanH * aspect);
+    if (dW > dist) {
+      // width-limited: back off and share the spare rows evenly above and below
+      this.v1.subVectors(T, B);
+      const yT = this.v1.dot(this.camUp);
+      const zT = this.v1.dot(this.fwd);
+      dist = dW;
+      const hB = -nB * tanH * dist;
+      const hT = yT - nT * tanH * (zT + dist);
+      h = (hB + hT) / 2;
+    }
+    this.tPos.copy(B).addScaledVector(this.fwd, -dist).addScaledVector(this.camUp, h);
+    this.tLook.copy(this.tPos).addScaledVector(this.fwd, dist);
+  }
+
+  /**
+   * Gameplay framing. Target extents (wall-local): from just below the lower foot to LOOK_AHEAD
+   * above the higher hand (more toward a dragged limb's target / the next route hold), centred on
+   * the body with a pull toward the focus. The extents spring on their own; while a limb is
+   * dragged they only grow, so the wall never slides under the finger.
+   */
+  private followTarget(ctx: CameraContext, aspect: number): void {
+    const { frame, state } = ctx;
+    const dt = this.lastDt;
+    let bot = 0.2;
+    let top = 3.0;
+    let cx = 0;
+    let minX = -0.45;
+    let maxX = 0.45;
+    let dragging = false;
+    let airborne = false;
+    const hint = this.focusHint ?? this.focusOverride;
+    if (state) {
+      this.climberBox(state);
+      const b = this.bbox;
+      const L = state.limbs;
+      dragging = L.LH.dragging || L.RH.dragging || L.LF.dragging || L.RF.dragging;
+      airborne = state.phase === 'falling' || state.phase === 'hanging' || state.phase === 'landed';
+      cx = ((b.minX + b.maxX) / 2) * 0.6 + state.com.x * 0.4;
+      minX = b.minX;
+      maxX = b.maxX;
+      if (!airborne) {
+        const handTop = Math.max(L.LH.pos.y, L.RH.pos.y);
+        // on steep overhangs the route above leans toward the lens and needs fewer meters
+        const ahead = LOOK_AHEAD - 0.1 * smoothstep(15, 40, frame.angleDeg);
+        bot = Math.min(b.minY, L.LF.pos.y, L.RF.pos.y) - 0.18;
+        top = Math.max(b.maxY + 0.2, handTop + ahead);
+        if (hint) {
+          top = Math.max(top, Math.min(hint.y + 0.42, handTop + LOOK_AHEAD_MAX));
+          bot = Math.min(bot, hint.y - 0.32);
+          cx += clamp(hint.x - cx, -0.8, 0.8) * 0.3;
+          minX = Math.min(minX, hint.x);
+          maxX = Math.max(maxX, hint.x);
+        }
+      } else {
+        // falling / caught on the rope / landed: the whole body with air around it, leading the fall
+        bot = b.minY - 0.4 + Math.min(0, state.velocity.y) * 0.22;
+        top = b.maxY + 0.5;
+        if (state.phase === 'landed') bot = Math.min(bot, 0.05);
+      }
+    }
+    // never tighter than ~2.5 m of wall, never wider than ~5.6 m (the climber stays the hero)
+    const minExt = 2.5;
+    if (top - bot < minExt) {
+      const m = minExt - (top - bot);
+      top += m * 0.6;
+      bot -= m * 0.4;
+    }
+    if (top - bot > 4.6) bot = top - 4.6;
+
+    if (this.followFresh || this.pendingSnap) {
+      this.fBot.snap(bot);
+      this.fTop.snap(top);
+      this.fX.snap(cx);
+      this.followFresh = false;
+    } else if (dragging && !airborne) {
+      // grow only (and slowly), keep the centre unless the target runs toward the frame edge
+      if (!this.wasDragging) this.fX.snap(this.fX.value);
+      this.fBot.step(Math.min(bot, this.fBot.value), 0.55, dt);
+      this.fTop.step(Math.max(top, this.fTop.value), 0.55, dt);
+      const half = (this.fTop.value - this.fBot.value) * 0.5 * aspect;
+      const lo = maxX - half * 0.82;
+      const hi = minX + half * 0.82;
+      const want = lo <= hi ? clamp(this.fX.value, lo, hi) : (minX + maxX) / 2;
+      this.fX.step(want, 0.9, dt);
+    } else {
+      const st = airborne ? 0.16 : 0.42;
+      this.fBot.step(bot, st, dt);
+      this.fTop.step(top, st, dt);
+      this.fX.step(cx, airborne ? 0.3 : 0.5, dt);
+    }
+    this.wasDragging = dragging;
+    this.followAir = !!state && state.phase === 'falling';
+
+    this.tFov = 44;
+    // a little yaw toward a swing, damped hard (and none while dragging) so the view never wobbles
+    const swing = state && !dragging ? clamp(state.velocity.x * 2, -4, 4) : 0;
+    this.fYaw.step(swing, airborne ? 0.4 : 1.1, dt);
+    const depthB = state ? clamp(state.pelvisDepth * 0.3, 0.05, 0.3) : 0.1;
+    frame.toWorldXYZ(this.fX.value, this.fBot.value, depthB, this.pB);
+    frame.toWorldXYZ(this.fX.value, this.fTop.value, 0, this.pT);
+    this.solveAboveFloor(frame, 0.55, 12 + this.fYaw.value, -8, this.safeInsets(), Math.max(1.5, maxX - minX + 0.5), aspect);
+    this.tUp.copy(this.WORLD_UP);
+    this.tRoll = 0;
+  }
+
+  /**
+   * solveFrame() for a view (blend, yaw, pitch); if that would put the lens below the pads (steep
+   * overhangs look up a lot), the view is levelled until the camera clears them — the framing
+   * stays exact instead of being shoved by the height clamp afterwards.
+   */
+  private solveAboveFloor(frame: WallFrame, blend: number, yaw: number, pitch: number, ins: { top: number; bottom: number }, minWidth: number, aspect: number): void {
+    let p = pitch;
+    for (let i = 0; i < 4; i++) {
+      this.viewDir(frame, blend, yaw, p, this.dir);
+      this.basis(this.dir);
+      this.solveFrame(this.pB, this.pT, ins, minWidth, aspect);
+      const lack = CAM_MIN_Y - this.tPos.y;
+      if (lack <= 0.005) return;
+      const dist = this.tPos.distanceTo(this.tLook);
+      p += (Math.asin(clamp(lack / Math.max(1, dist), 0, 0.9)) / DEG) * 1.05 + 0.2;
+    }
+  }
+
   private titleTarget(ctx: CameraContext, t: number): void {
+    const { frame, state, boulder } = ctx;
+    const lift = this.titleFraming ? this.titleFraming.lift : 0.3;
+    if (lift < 0) {
+      this.classicTitle(ctx, t);
+      return;
+    }
+    // Composition: the climber (and Steini when he is on the mats) fill the band between the
+    // logo lockup (top ≈ 30%) and the button stack (bottom ≈ 30%), centred, with a slow orbit.
+    const aspect = this.camera.aspect || 0.46;
+    this.tFov = 40;
+    const yaw = 9 + 8 * Math.sin(t * 0.07);
+    const pitch = -3 + 2 * Math.sin(t * 0.05 + 1);
+    this.viewDir(frame, 0.3, yaw, pitch, this.dir);
+    this.basis(this.dir);
+    const pts = this.pts;
+    let n = 0;
+    const pad = 0.3; // crash-pad height (world y)
+    if (state) {
+      const d = state.pelvisDepth;
+      frame.toWorldXYZ(state.chest.x, state.chest.y + 0.36, d, pts[n++]);
+      frame.toWorldXYZ(state.pelvis.x, state.pelvis.y, d, pts[n++]);
+      for (const id of ['LH', 'RH', 'LF', 'RF'] as const) {
+        const L = state.limbs[id];
+        frame.toWorldXYZ(L.pos.x, L.pos.y, Math.max(0.05, L.depth), pts[n++]);
+      }
+    } else {
+      let sx = 0;
+      if (boulder) {
+        const st = boulder.holds.filter((h) => h.role === 'start');
+        if (st.length) sx = st.reduce((a, h) => a + h.x, 0) / st.length;
+      }
+      frame.toWorldXYZ(sx, 0.4, 0.3, pts[n++]);
+      frame.toWorldXYZ(sx, 2.2, 0.3, pts[n++]);
+    }
+    if (ctx.guide) {
+      frame.toWorldXYZ(ctx.guide.x, 0, ctx.guide.depth, pts[n]).setY(pad);
+      pts[n + 1].copy(pts[n]).setY(pad + 2.0); // horn tips
+      pts[n].addScaledVector(frame.right, -0.3);
+      pts[n + 1].addScaledVector(frame.right, 0.3);
+      n += 2;
+    }
+    // extremes in camera space
+    let bi = 0;
+    let ti = 0;
+    for (let i = 1; i < n; i++) {
+      if (pts[i].y < pts[bi].y) bi = i;
+      if (pts[i].y > pts[ti].y) ti = i;
+    }
+    this.pB.copy(pts[bi]).setY(Math.min(pts[bi].y, pad) - 0.05);
+    this.pT.copy(pts[ti]).addScaledVector(this.WORLD_UP, 0.12);
+    const tanH = Math.tan((this.tFov * DEG) / 2);
+    // band: the logo lockup ends ≈ 31%, the buttons start ≈ 70% (a little air on both sides)
+    const nT = 1 - 2 * 0.335;
+    const nB = 1 - 2 * 0.665;
+    const f = this.fitVertical(this.pB, this.pT, nB, nT, tanH);
+    let dist = f.dist;
+    let h = f.h;
+    // horizontal: every subject point inside ±0.8 NDC (relative to B), centred laterally
+    let xl = Infinity;
+    let xr = -Infinity;
+    let zl = 0;
+    let zr = 0;
+    for (let i = 0; i < n; i++) {
+      this.v1.subVectors(pts[i], this.pB);
+      const x = this.v1.dot(this.camRight);
+      const z = this.v1.dot(this.fwd);
+      if (x < xl) {
+        xl = x;
+        zl = z;
+      }
+      if (x > xr) {
+        xr = x;
+        zr = z;
+      }
+    }
+    const m = 0.8 * tanH * aspect;
+    const dW = ((xr - xl) / m - (zl + zr)) / 2 + 0.4;
+    if (dW > dist) {
+      this.v1.subVectors(this.pT, this.pB);
+      const yT = this.v1.dot(this.camUp);
+      const zT = this.v1.dot(this.fwd);
+      dist = dW;
+      h = (-nB * tanH * dist + yT - nT * tanH * (zT + dist)) / 2;
+    }
+    const k = (xl * (zr + dist) + xr * (zl + dist)) / (zl + zr + 2 * dist);
+    dist += 0.25 * Math.sin(t * 0.05);
+    this.tPos.copy(this.pB).addScaledVector(this.fwd, -dist).addScaledVector(this.camUp, h).addScaledVector(this.camRight, k);
+    this.tLook.copy(this.tPos).addScaledVector(this.fwd, dist);
+    this.tUp.copy(this.WORLD_UP);
+    this.tRoll = 0;
+  }
+
+  /** Locker-style orbit: look-point lifted above the subject at a fixed distance (titleFraming). */
+  private classicTitle(ctx: CameraContext, t: number): void {
     const { frame, state, boulder } = ctx;
     let sx = 0;
     let sy = 1.5;
@@ -465,7 +748,8 @@ export class CameraRig {
       }
     } else {
       const tune = TUNING[this.mode];
-      const tr = this.transition > 0 ? 1 + smoothstep(0, 1.25, this.transition) * 0.9 : 1;
+      let tr = this.transition > 0 ? 1 + smoothstep(0, 1.25, this.transition) * 0.9 : 1;
+      if (this.mode === 'follow' && this.followAir) tr *= 0.5;
       this.pos.step(this.tPos, tune.pos * tr, d);
       this.look.step(this.tLook, tune.look * tr, d);
       this.up.step(this.tUp, 0.4, d);

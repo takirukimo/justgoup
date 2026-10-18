@@ -1,0 +1,147 @@
+// Camera framing contracts (headless: CameraRig only needs three's math).
+//  follow — both feet and at least the next 1 m of route above the higher hand land inside the HUD-safe
+//           band, the climber fills ~45–55% of the screen height, and a drag never shrinks it.
+//  follow — a rope catch close to the floor keeps the whole body above the bottom HUD band.
+//  title  — the climber and Steini both fit between the logo lockup and the button stack.
+import { describe, expect, it } from 'vitest';
+import * as THREE from 'three';
+import { CameraRig, type CameraContext } from './camera';
+import { WallFrame } from './wall-frame';
+import type { ClimberPhase, ClimberState, LimbId, LimbSnapshot, Vec2 } from '../core/types';
+
+const W = 390;
+const H = 844;
+
+function limb(id: LimbId, pos: Vec2, anchor: Vec2, dragging = false): LimbSnapshot {
+  return { id, holdId: dragging ? null : 'h', pos, anchor, depth: 0.03, dragging, load: 0.3, stress: 0.3, capacity: 1, reachRatio: 0.7, smearing: false, shake: 0, busy: false };
+}
+
+/** A climber on the wall: pelvis at `py`, hands up, feet below. */
+function climber(py: number, phase: ClimberPhase = 'climbing', drag: LimbId | null = null): ClimberState {
+  const pelvis = { x: 0, y: py };
+  const chest = { x: 0.02, y: py + 0.5 };
+  return {
+    phase,
+    pelvis,
+    chest,
+    com: { x: 0.01, y: py + 0.2 },
+    pelvisDepth: 0.32,
+    bodyYaw: 0,
+    velocity: { x: 0, y: 0 },
+    limbs: {
+      LH: limb('LH', { x: -0.3, y: py + 1.15 }, { x: -0.19, y: py + 0.48 }, drag === 'LH'),
+      RH: limb('RH', { x: 0.28, y: py + 0.95 }, { x: 0.19, y: py + 0.48 }, drag === 'RH'),
+      LF: limb('LF', { x: -0.32, y: py - 0.62 }, { x: -0.1, y: py }, drag === 'LF'),
+      RF: limb('RF', { x: 0.3, y: py - 0.5 }, { x: 0.1, y: py }, drag === 'RF'),
+    },
+    tension: 0.2,
+    pump: 0,
+    shake: 0,
+    balance: 0,
+    topProgress: 0,
+    time: 1,
+    clipped: [],
+  };
+}
+
+function project(rig: CameraRig, frame: WallFrame, p: Vec2, depth = 0): { x: number; y: number } {
+  const v = frame.toWorldXYZ(p.x, p.y, depth, new THREE.Vector3()).project(rig.camera);
+  return { x: ((v.x + 1) / 2) * W, y: ((1 - v.y) / 2) * H };
+}
+
+function settle(rig: CameraRig, ctx: CameraContext, sec = 6): void {
+  for (let t = 0; t < sec; t += 1 / 60) rig.update(1 / 60, ctx);
+}
+
+describe('follow framing', () => {
+  for (const angle of [-8, 0, 20, 30, 40]) {
+    it(`frames feet + look-ahead inside the HUD-safe band (${angle}° wall)`, () => {
+      const frame = new WallFrame(angle);
+      const rig = new CameraRig(W / H);
+      rig.viewInsets = { top: 0.1, bottom: 0.13 };
+      const st = climber(1.6);
+      const ctx: CameraContext = { frame, boulder: null, state: st, ceiling: 7.4, guide: null };
+      rig.setMode('follow', { instant: true });
+      settle(rig, ctx);
+      const handTop = Math.max(st.limbs.LH.pos.y, st.limbs.RH.pos.y);
+      const ahead = project(rig, frame, { x: 0, y: handTop + 1.0 });
+      const feet = Math.max(project(rig, frame, st.limbs.LF.pos).y, project(rig, frame, st.limbs.RF.pos).y);
+      expect(ahead.y).toBeGreaterThan(76);
+      expect(feet).toBeLessThan(H - 98);
+      // climber height on screen: feet → top of the head (at the pelvis depth)
+      const head = project(rig, frame, { x: st.chest.x, y: st.chest.y + 0.32 }, st.pelvisDepth).y;
+      const hand = project(rig, frame, st.limbs.LH.pos).y;
+      const frac = (feet - Math.min(head, hand)) / H;
+      // ~45–55% on everyday walls; steep overhangs give the look-ahead a little more of the screen
+      expect(frac).toBeGreaterThan(angle >= 25 ? 0.37 : 0.42);
+      expect(frac).toBeLessThan(0.6);
+    });
+  }
+
+  it('does not breathe in while a limb is dragged', () => {
+    const frame = new WallFrame(15);
+    const rig = new CameraRig(W / H);
+    const ctx: CameraContext = { frame, boulder: null, state: climber(1.8), ceiling: 7.4, guide: null };
+    rig.setMode('follow', { instant: true });
+    settle(rig, ctx);
+    // drag the left hand far up: the frame grows to show the target…
+    const dragged = climber(1.8, 'climbing', 'LH');
+    dragged.limbs.LH.pos = { x: -0.2, y: 3.4 };
+    ctx.state = dragged;
+    rig.setFocusHint({ x: -0.2, y: 3.5 });
+    settle(rig, ctx, 3);
+    const grown = project(rig, frame, { x: -0.2, y: 3.5 }).y;
+    expect(grown).toBeGreaterThan(76);
+    // …and pulling the finger back down mid-drag does not zoom back in under it
+    const span0 = project(rig, frame, { x: 0, y: 0.5 }).y - project(rig, frame, { x: 0, y: 3.0 }).y;
+    dragged.limbs.LH.pos = { x: -0.25, y: 3.0 };
+    rig.setFocusHint({ x: -0.25, y: 3.0 });
+    settle(rig, ctx, 2);
+    const span1 = project(rig, frame, { x: 0, y: 0.5 }).y - project(rig, frame, { x: 0, y: 3.0 }).y;
+    expect(span1).toBeLessThanOrEqual(span0 + 1);
+  });
+
+  it('keeps a low rope catch above the bottom HUD band', () => {
+    const frame = new WallFrame(8);
+    const rig = new CameraRig(W / H);
+    rig.viewInsets = { top: 0.1, bottom: 0.13 };
+    const st = climber(1.25, 'hanging');
+    st.limbs.LF.pos = { x: -0.2, y: 0.55 };
+    st.limbs.RF.pos = { x: 0.2, y: 0.5 };
+    st.pelvisDepth = 0.6;
+    const ctx: CameraContext = { frame, boulder: null, state: st, ceiling: 7.4, guide: null };
+    rig.setMode('follow', { instant: true });
+    settle(rig, ctx);
+    const feet = Math.max(project(rig, frame, st.limbs.LF.pos).y, project(rig, frame, st.limbs.RF.pos).y);
+    const head = project(rig, frame, { x: 0, y: st.chest.y + 0.32 }, st.pelvisDepth).y;
+    expect(feet).toBeLessThan(H - 98);
+    expect(head).toBeGreaterThan(76);
+  });
+});
+
+describe('title composition', () => {
+  it('fits the climber and Steini between the logo and the buttons', () => {
+    const frame = new WallFrame(20);
+    const rig = new CameraRig(W / H);
+    rig.titleFraming = { lift: 0.3, distance: 7.4 };
+    const st = climber(0.95, 'idle');
+    const ctx: CameraContext = { frame, boulder: null, state: st, ceiling: 7.4, guide: { x: 1.05, depth: 1.5 } };
+    rig.setMode('title', { instant: true });
+    for (const t of [2, 20, 40]) {
+      settle(rig, ctx, t === 2 ? 2 : 18);
+      const pts = [st.limbs.LH.pos, st.limbs.RH.pos, st.limbs.LF.pos, st.limbs.RF.pos, { x: st.chest.x, y: st.chest.y + 0.32 }].map((p) => project(rig, frame, p, 0.3));
+      const g = new THREE.Vector3();
+      for (const [dx, y] of [[-0.3, 0.3], [0.3, 0.3], [-0.3, 2.2], [0.3, 2.2]]) {
+        frame.toWorldXYZ(1.05 + dx, 0, 1.5, g).setY(y);
+        const v = g.project(rig.camera);
+        pts.push({ x: ((v.x + 1) / 2) * W, y: ((1 - v.y) / 2) * H });
+      }
+      for (const p of pts) {
+        expect(p.x).toBeGreaterThan(0);
+        expect(p.x).toBeLessThan(W);
+        expect(p.y).toBeGreaterThan(H * 0.29);
+        expect(p.y).toBeLessThan(H * 0.7);
+      }
+    }
+  });
+});

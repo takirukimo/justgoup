@@ -16,7 +16,7 @@ import { WallFrame } from './wall-frame';
 import { WallView } from './wall';
 import { GymEnvironment } from './environment';
 import { Highlights } from './highlights';
-import { CameraRig } from './camera';
+import { CameraRig, type CameraContext } from './camera';
 import { FxSystem } from './fx';
 import { PostFX } from './post';
 import { ContactShadows } from './contact-shadows';
@@ -273,6 +273,7 @@ export class GameRenderer implements RendererAPI {
     }
     this.key.shadow.radius = p.shadowRadius;
     this.contact.strength = shadows ? 1 : 1.35;
+    this.wall.holds.setDecoShadows(p.shadowMapSize >= 2048);
     if (this.post) this.post.apply(p);
     if (this.env && this.boulder) this.env.configure(this.layoutFor(this.boulder), p);
   }
@@ -529,13 +530,21 @@ export class GameRenderer implements RendererAPI {
 
   // ───────────────────────────── frame ─────────────────────────────
 
-  private cameraContext() {
-    return {
-      frame: this.wallFrame,
-      boulder: this.boulder,
-      state: this.climberVisible ? this.state ?? this.rest : null,
-      ceiling: this.env ? this.env.ceiling : 7.4,
-    };
+  private camCtx: CameraContext = { frame: this.wallFrame, boulder: null, state: null, ceiling: 7.4, guide: null };
+  private camGuide = { x: 0, depth: 1.5 };
+
+  private cameraContext(): CameraContext {
+    const c = this.camCtx;
+    c.boulder = this.boulder;
+    c.state = this.climberVisible ? this.state ?? this.rest : null;
+    c.ceiling = this.env ? this.env.ceiling : 7.4;
+    const g = this.guideState;
+    if (g && this.guide?.visible) {
+      this.camGuide.x = g.x;
+      this.camGuide.depth = g.depth;
+      c.guide = this.camGuide;
+    } else c.guide = null;
+    return c;
   }
 
   frame(dt: number): void {

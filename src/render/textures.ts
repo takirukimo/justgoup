@@ -1141,6 +1141,12 @@ export function createLabelAtlas(color: string, gradeText: string, name: string,
     ctx.closePath();
     ctx.fillStyle = color;
     ctx.fill();
+    // a dark tape on the charcoal wall gets a chalky edge so its shape (and the word) still reads
+    if (luminance(color) < 0.2) {
+      ctx.lineWidth = 9;
+      ctx.strokeStyle = 'rgba(232,228,220,0.9)';
+      ctx.stroke();
+    }
     ctx.clip();
     const g = ctx.createLinearGradient(0, y0, 0, y0 + h);
     g.addColorStop(0, 'rgba(255,255,255,0.22)');
@@ -1150,7 +1156,7 @@ export function createLabelAtlas(color: string, gradeText: string, name: string,
     ctx.fillRect(x0, y0, x1 - x0, h);
     fillPattern(ctx, whiteNoiseTile(64, 99, 90, 170), S, S, 1, 0.08, 'overlay');
     ctx.strokeStyle = ink;
-    const cap = h * 0.5;
+    const cap = h * 0.54;
     drawStrokeText(ctx, text, S / 2, y0 + (h - cap) / 2, cap, { weight: 1.3, tracking: 2.2, align: 'center' });
     // small chevrons either side
     ctx.lineWidth = cap * 0.16;

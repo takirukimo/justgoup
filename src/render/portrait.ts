@@ -1,34 +1,42 @@
 // CHARACTER: offscreen collectible-card portrait of an animal head (PNG data URL, transparent
 // background), cached per (head, size).
 //
-// Studio rig: warm key from the upper left, cool fill, two coloured rim lights (signal + glacier)
-// that separate the silhouette from a dark card, plus a small room environment for glossy eyes
-// and horns. The head is framed from a 3/4 view by fitting its projected vertices. Rendering is
-// HDR (half float, MSAA) → ACES + sRGB in a resolve pass → straight alpha → 2× supersampled.
+// Every head is shot the same way: on the climber's own body (basalt tee, so the card shows a
+// little shoulder instead of a bare neck tube), from the same 3/4 view, framed from the shoulder
+// line to the top of the silhouette (horns, ears, crest) and centred on the head — so all nine
+// cards share one scale feel. Studio rig: warm key, cool fill, two coloured rim lights (signal +
+// glacier) that separate the silhouette from a dark card, plus a small room environment for glossy
+// eyes and horns. HDR (half float, MSAA) → ACES + sRGB in a resolve pass → straight alpha → 2×
+// supersampled.
 
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import type { HeadId } from '../core/types';
-import { createHead, disposeHead } from './heads/index';
+import { ClimberModel, createBodyGoal, type BodyGoal } from './climber';
 
 const cache = new Map<string, string>();
 let envTex: THREE.Texture | null = null;
 let envOwner: THREE.WebGLRenderer | null = null;
 
-/** Per-head framing tweaks (yaw toward the viewer's left, extra zoom). */
-const FRAMING: Partial<Record<HeadId, { yaw?: number; zoom?: number; pitch?: number }>> = {
-  ibex: { yaw: 0.5, zoom: 1.0 },
-  chamois: { yaw: 0.45 },
-  goat: { yaw: 0.45 },
-  ram: { yaw: 0.5, zoom: 1.0 },
-  eagle: { yaw: 0.6 },
-  vulture: { yaw: 0.6 },
-  marmot: { yaw: 0.4, zoom: 0.96 },
-  snowleopard: { yaw: 0.38 },
-  lynx: { yaw: 0.38 },
-};
-/** Vertices below this height (head-local, m) belong to the neck: they may leave the card. */
-const NECK_CUT = 0.085;
+/** Per-head framing tweaks: view yaw (rad, face toward the card's right), zoom (> 1 = closer). */
+const FRAMING: Partial<Record<HeadId, { yaw?: number; zoom?: number }>> = {};
+/** Shared view: 3/4 from the front-right, a touch above eye level. */
+const VIEW_YAW = 0.62;
+const VIEW_PITCH = 0.1;
+/** Card layout (fractions of the card): the shoulder line sits this far up, the silhouette top this far down. */
+const SHOULDER_ROW = 0.075;
+const HEADROOM = 0.07;
+
+/** One shared bust (body + head) per renderer: the body is built once, heads swap in. */
+let bust: { model: ClimberModel; goal: BodyGoal; owner: THREE.WebGLRenderer } | null = null;
+
+function bustFor(renderer: THREE.WebGLRenderer, head: HeadId): { model: ClimberModel; goal: BodyGoal } {
+  if (!bust || bust.owner !== renderer) {
+    bust?.model.dispose();
+    bust = { model: new ClimberModel({ head, colorway: 'basalt', chalk: 'classic' }), goal: createBodyGoal(), owner: renderer };
+  } else bust.model.setSkin(head, 'basalt', 'classic');
+  return bust;
+}
 
 const RESOLVE_VS = /* glsl */ `
 varying vec2 vUv;
@@ -105,45 +113,60 @@ export function renderPortrait(renderer: THREE.WebGLRenderer, head: HeadId, size
   top.position.set(0, 3, 0.2);
   scene.add(key1, fill, rimA, rimB, top, new THREE.HemisphereLight('#d7dde4', '#2a2420', 0.22));
 
-  const g = createHead(head);
   const f = FRAMING[head] ?? {};
-  g.rotation.set(f.pitch ?? 0.06, f.yaw ?? 0.58, 0);
-  scene.add(g);
-  g.updateMatrixWorld(true);
+  const { model, goal } = bustFor(renderer, head);
+  const yaw = f.yaw ?? VIEW_YAW;
+  // the body faces −Z: view from (sin yaw, ·, −cos yaw) so the face turns toward the card's right
+  const viewDir = new THREE.Vector3(Math.sin(yaw), Math.sin(VIEW_PITCH), -Math.cos(yaw)).normalize();
+  // the studio lights were authored for a camera on +Z: turn them with the view
+  const lightRot = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI - yaw);
+  for (const l of [key1, fill, rimA, rimB, top]) l.position.applyQuaternion(lightRot);
+  model.rig.restGoal(goal);
+  // relaxed shoulders, head turned a little toward the viewer
+  for (let s = 0; s < 2; s++) goal.hands[s].target.x *= 0.72;
+  goal.look.set(0, 1.62, -3).addScaledVector(viewDir, 1.2);
+  model.rig.solve(goal, 0);
+  scene.add(model);
+  model.updateMatrixWorld(true);
 
-  // ── framing: fit projected vertices ──
+  // ── framing: the head silhouette (projected) from the shoulder line up ──
+  const headObj = model.rig.bones[3].children.find((c) => (c as THREE.Group).isGroup) ?? model;
+  const neck = new THREE.Vector3();
+  headObj.getWorldPosition(neck);
   const cam = new THREE.PerspectiveCamera(24, 1, 0.01, 20);
-  const center = new THREE.Box3().setFromObject(g).getCenter(new THREE.Vector3());
-  cam.position.set(center.x, center.y + 0.04, center.z + 2.2);
-  cam.lookAt(center);
+  const aim = neck.clone().add(new THREE.Vector3(0, 0.12, 0));
+  cam.position.copy(aim).addScaledVector(viewDir, 2.4);
+  cam.lookAt(aim);
   cam.updateMatrixWorld(true);
   const v = new THREE.Vector3();
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  g.traverse((o) => {
+  let minX = Infinity, maxX = -Infinity, maxY = -Infinity;
+  headObj.traverse((o) => {
     const m = o as THREE.Mesh;
-    if (!m.isMesh) return;
+    if (!m.isMesh || !m.visible) return;
     const pos = m.geometry.getAttribute('position') as THREE.BufferAttribute;
     const step = Math.max(1, Math.floor(pos.count / 4000));
     for (let i = 0; i < pos.count; i += step) {
       v.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld);
-      if (v.y < NECK_CUT) continue;
+      if (v.y < neck.y + 0.06) continue; // the neck below the jaw belongs to the shoulders' row
       v.applyMatrix4(cam.matrixWorldInverse);
       const px = v.x / -v.z;
       const py = v.y / -v.z;
       if (px < minX) minX = px;
       if (px > maxX) maxX = px;
-      if (py < minY) minY = py;
       if (py > maxY) maxY = py;
     }
   });
-  // re-centre and zoom so the silhouette fills ~88% of the card; the neck runs off the bottom
+  // shoulder line: the top of the trapezius, just below the neck joint (collar + shoulder caps show)
+  v.copy(neck).add(new THREE.Vector3(0, -0.035, 0)).applyMatrix4(cam.matrixWorldInverse);
+  const shoulderY = v.y / -v.z;
+  // vertical: shoulder row → silhouette top with headroom; horizontal: the head fits with margin
+  const spanY = (maxY - shoulderY) / (1 - SHOULDER_ROW - HEADROOM);
+  const spanX = (maxX - minX) / 0.86;
+  const half = Math.max(spanY, spanX) / 2 / (f.zoom ?? 1);
   const cx = (minX + maxX) / 2;
-  const half = Math.max(maxX - minX, maxY - minY) / 2 / 0.82 / (f.zoom ?? 1);
-  // anchor to the top with a little headroom so the neck exits the bottom edge
-  const cy = maxY - half * 0.94;
+  const cy = maxY + HEADROOM * 2 * half - half;
   cam.fov = (2 * Math.atan(half) * 180) / Math.PI;
   cam.updateProjectionMatrix();
-  // shift the view so the silhouette centre lands in the middle (slightly low, card-style headroom)
   cam.setViewOffset(S, S, ((cx / half) * S) / 2, ((-cy / half) * S) / 2, S, S);
 
   // ── render (HDR, MSAA) → resolve (ACES, sRGB, straight alpha) ──
@@ -204,7 +227,7 @@ export function renderPortrait(renderer: THREE.WebGLRenderer, head: HeadId, size
   ldr.dispose();
   quad.geometry.dispose();
   quadMat.dispose();
-  disposeHead(g);
+  scene.remove(model);
   cache.set(key, url);
   return url;
 }

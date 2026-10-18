@@ -6,7 +6,9 @@
 //                                −: anodised metal that keeps the vertex/material colour (carabiners)
 //   z = cavity AO (0..1)       → darkens (incuts, pocket interiors, wall contact)
 //   w = gloss (0..1)           → smoother (dual-tex volume faces, anodised parts)
-// plus an optional fresnel rim (`rim` uniforms) used for hold highlights.
+// plus, in the `rim` variant (route holds), a fresnel rim used for hold highlights and an always-on
+// edge light + self-lift (`uEdge*`, `uLift`) that make the current route read against the dark wall
+// and the dimmer deco holds without looking gamey.
 // All instances share one compiled program per (rim on/off) variant.
 
 import * as THREE from 'three';
@@ -16,6 +18,12 @@ export interface SurfaceUniforms {
   uRimColor: { value: THREE.Color };
   uRimStrength: { value: number };
   uRimPower: { value: number };
+  /** Route-hold edge light (fresnel, thin) — always on, independent of highlights. */
+  uEdgeColor: { value: THREE.Color };
+  uEdgeStrength: { value: number };
+  uEdgePower: { value: number };
+  /** Self-illumination as a fraction of the albedo (reads in the key light's shadow). */
+  uLift: { value: number };
 }
 
 export type SurfaceMaterial = THREE.MeshStandardMaterial & { userData: { surf: SurfaceUniforms } };
@@ -45,6 +53,10 @@ uniform vec3 uChalk;
 uniform vec3 uRimColor;
 uniform float uRimStrength;
 uniform float uRimPower;
+uniform vec3 uEdgeColor;
+uniform float uEdgeStrength;
+uniform float uEdgePower;
+uniform float uLift;
 #endif
 `;
 
@@ -66,6 +78,10 @@ export function createSurfaceMaterial(o: SurfaceOpts = {}): SurfaceMaterial {
     uRimColor: { value: new THREE.Color(0xffffff) },
     uRimStrength: { value: 0 },
     uRimPower: { value: 2.2 },
+    uEdgeColor: { value: new THREE.Color(0xffffff) },
+    uEdgeStrength: { value: 0 },
+    uEdgePower: { value: 3 },
+    uLift: { value: 0 },
   };
   mat.userData.surf = surf;
   const rim = !!o.rim;
@@ -78,6 +94,10 @@ export function createSurfaceMaterial(o: SurfaceOpts = {}): SurfaceMaterial {
       shader.uniforms.uRimColor = surf.uRimColor;
       shader.uniforms.uRimStrength = surf.uRimStrength;
       shader.uniforms.uRimPower = surf.uRimPower;
+      shader.uniforms.uEdgeColor = surf.uEdgeColor;
+      shader.uniforms.uEdgeStrength = surf.uEdgeStrength;
+      shader.uniforms.uEdgePower = surf.uEdgePower;
+      shader.uniforms.uLift = surf.uLift;
     }
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>\n${VERT_DECL}`)
@@ -115,8 +135,13 @@ export function createSurfaceMaterial(o: SurfaceOpts = {}): SurfaceMaterial {
         '#include <emissivemap_fragment>',
         /* glsl */ `#include <emissivemap_fragment>
 	{
-		float fres = pow(1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0), uRimPower);
+		float ndv = 1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0);
+		float fres = pow(ndv, uRimPower);
 		totalEmissiveRadiance += uRimColor * (fres * uRimStrength + uRimStrength * 0.12);
+		// edge light fades into cavities (AO) so incuts stay dark and the silhouette stays crisp
+		float cav = 1.0 - clamp(vSurf.z, 0.0, 1.0);
+		totalEmissiveRadiance += uEdgeColor * (pow(ndv, uEdgePower) * uEdgeStrength * cav);
+		totalEmissiveRadiance += diffuseColor.rgb * uLift * cav;
 	}`,
       );
     }
