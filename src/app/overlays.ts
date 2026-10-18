@@ -4,6 +4,9 @@
 
 import { BRAND, FONTS, PALETTE } from '../config/brand';
 
+/** CHIRAL pink lifted for small text on the dark surfaces (AA ≥ 4.5:1; the UI's signalInk). */
+const PINK_INK = '#EE6B79';
+
 const CSS = `
 .jga-veil{position:absolute;inset:0;z-index:60;pointer-events:none;opacity:0;background:
 radial-gradient(120% 80% at 50% 40%,rgba(23,25,29,.94),${PALETTE.basalt} 70%);transition:opacity .26s cubic-bezier(.2,.8,.2,1);
@@ -35,12 +38,12 @@ backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);display:flex;gap:6
 .jga-error-card{box-sizing:border-box;max-width:340px;width:100%;display:flex;flex-direction:column;gap:14px;padding:26px 22px;border-radius:18px;
 background:rgba(23,25,29,.9);border:1px solid rgba(255,255,255,.08);box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
 .jga-error-mark{width:28px;height:28px;color:${PALETTE.signal}}
-.jga-error-k{font:600 10px/1 ${FONTS.mono};letter-spacing:.26em;color:${PALETTE.signal}}
+.jga-error-k{font:600 10px/1 ${FONTS.mono};letter-spacing:.26em;color:${PINK_INK}}
 .jga-error-h{font:800 30px/1 ${FONTS.display};letter-spacing:.06em;text-transform:uppercase;margin:0}
 .jga-error-p{font:400 14px/1.5 ${FONTS.ui};color:${PALETTE.mist};margin:0}
 .jga-error-c{font:500 11px/1.45 ${FONTS.mono};color:${PALETTE.fog};background:rgba(0,0,0,.35);border-radius:10px;padding:10px 12px;
 max-height:120px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0}
-.jga-error-b{height:52px;border-radius:14px;border:0;background:${PALETTE.signal};color:${PALETTE.basalt};font:800 16px/1 ${FONTS.display};
+.jga-error-b{height:52px;border-radius:14px;border:0;background:${PALETTE.signal};color:#FFFFFF;font:800 16px/1 ${FONTS.display};
 letter-spacing:.16em;cursor:pointer}
 .jga-error-b:active{transform:scale(.97)}
 .jga-lost{position:absolute;inset:0;z-index:85;display:grid;place-items:center;padding:24px;pointer-events:auto;

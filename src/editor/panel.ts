@@ -8,6 +8,7 @@ import type { HoldDef, HoldType } from '../core/types';
 import { ROUTE_COLORS } from '../config/brand';
 import { fontGrade, gradeColor, gradeLabel } from '../game/grades';
 import { button, el, label, setText, toggle } from '../ui/dom';
+import { wallLabel } from '../ui/format';
 import { icon } from '../ui/icons';
 import { glyph, holdGlyph, type EditorGlyph } from './glyphs';
 import { EDIT_ROLES, EDITOR, HOLD_TYPES, ROLE_LABEL, SIZE_RANGE, TYPE_LABEL, type DraftCheck, type EditRole } from './model';
@@ -497,7 +498,9 @@ export class EditorPanel {
       setText(this.angleVal, `${s.angle > 0 ? '+' : ''}${s.angle}°`);
       this.renderProfile(s.angle);
     }
-    setText(this.angleWord, s.angle < -2 ? 'SLAB' : s.angle <= 2 ? 'VERTICAL' : s.angle < 25 ? 'OVERHANG' : s.angle < 40 ? 'STEEP' : 'ROOF');
+    // the same honest wall words as the route preview and the problem cards (±6° reads VERTICAL)
+    const wl = wallLabel({ wallAngle: s.angle });
+    setText(this.angleWord, wl.kind === 'WALL' ? wl.value : wl.kind);
     setText(this.sampleVal, gradeLabel(s.sampleGrade));
     this.sampleBtn.disabled = s.generating;
     toggle(this.sampleBtn, 'is-busy', s.generating);
