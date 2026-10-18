@@ -3,7 +3,7 @@
 /** Fontainebleau equivalents per V-grade (research §3.7 reference row: V3 6A, V4 6B, V5 6C, V8 7B). */
 const FONT = ['4', '5', '5+', '6A', '6B', '6C', '7A', '7A+', '7B', '7C', '7C+', '8A', '8A+'] as const;
 
-/** Grade chip colours: calm greens/blues for the easy end, the signal orange around V6–V7, violet at the top. */
+/** Grade chip colours: calm greens/blues for the easy end, warm oranges around V6–V7, CHIRAL pink at V8, violet at the top. */
 const COLORS = [
   '#4FD18B', // V0
   '#4FD18B', // V1
@@ -13,7 +13,7 @@ const COLORS = [
   '#F2C230', // V5
   '#FF7A1A', // V6
   '#FF7A1A', // V7
-  '#FF4F1F', // V8
+  '#D54051', // V8 (CHIRAL pink)
   '#E5433B', // V9
   '#E5433B', // V10
   '#8B5CF6', // V11

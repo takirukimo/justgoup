@@ -14,7 +14,10 @@
 // squeezes on 'compression', roof hooks on 'cave'). Send Train runs rotate archetypes (runStyle), the
 // daily problem follows the weekday (dailyStyle). Lead routes follow the research template (§3.5): a
 // gentle start, bolts ≤ 1 m apart up to 5 m, a rest before the crux at 55–75 % of the height, a
-// positive clip hold under every draw, and varied lines / hold themes.
+// positive clip hold under every draw, and varied lines (meander / zigzag / diagonal) and hold themes.
+// On a multi-angle wall a steep panel is never relaxed (a strain floor by panel angle), the holds over a
+// lip are the crux's reward, and with GEN.holdsOnVolumes the squeezes of compression problems (and a few
+// holds of mixed / steep ones) are bolted onto route volumes (HoldDef.onVolume).
 
 import type { BoulderDef, HoldDef, HoldRole, HoldType, LimbId, QuickdrawDef, RouteStyle } from '../core/types';
 import type { GenerateOptions } from '../core/contracts';

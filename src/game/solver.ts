@@ -412,6 +412,24 @@ class Planner {
    * the sim's rule) for the body in `pose` — hooks on roofs pull instead of pushing. Flat walls keep
    * pushing feet (the planner's long-standing model).
    */
+  /** Would the feet's modes at `pose` differ from the ones the contacts carry? */
+  private footModesChange(contacts: Contacts, pose: Pose): boolean {
+    const prof = this.prof;
+    if (!prof) return false;
+    computeAnchors(pose, this.AX, this.AY);
+    const comY = pose.py + BODY.comT * (pose.cy - pose.py);
+    const bodyAngle = smoothAngleAt(prof, comY);
+    for (let i = 2; i < 4; i++) {
+      const c = contacts[i];
+      if (!c || !c.hold) continue;
+      const wall = Math.max(angleAt(prof, c.y), bodyAngle);
+      const m = footModeFor(c.hold, c.x, c.y, this.AX[i], this.AY[i], pose.px, wall, null);
+      const mode = m === 'heel' ? FOOT_HEEL : m === 'toe' ? FOOT_TOE : m === 'drop' ? FOOT_DROP : FOOT_PUSH;
+      if (mode !== c.mode) return true;
+    }
+    return false;
+  }
+
   applyFootModes(contacts: Contacts, pose: Pose): void {
     const prof = this.prof;
     if (!prof) return;
@@ -455,7 +473,22 @@ class Planner {
     const init = seed ?? initialPose(contacts, this.prm, this.tmpPose);
     if (this.prof) this.applyFootModes(contacts, init);
     const pose: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
-    const r = seed ? optimizePose(contacts, this.prm, init, pose, this.ev, 44, true) : optimizePose(contacts, this.prm, init, pose, this.ev, 90);
+    let r = seed ? optimizePose(contacts, this.prm, init, pose, this.ev, 44, true) : optimizePose(contacts, this.prm, init, pose, this.ev, 90);
+    // the sim infers each foot's mode from where the body SETTLES: when the settled pose turns a toe hook
+    // into a plain edge (or the other way round), judge the stance with the modes the sim will use
+    if (this.prof && this.footModesChange(contacts, pose)) {
+      this.applyFootModes(contacts, pose);
+      const p2: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
+      const r2 = optimizePose(contacts, this.prm, pose, p2, this.ev, 44, true);
+      // keep the result only when the modes hold at the new pose too (no flip-flopping between two)
+      if (!this.footModesChange(contacts, p2)) {
+        r = r2;
+        pose.px = p2.px;
+        pose.py = p2.py;
+        pose.cx = p2.cx;
+        pose.cy = p2.cy;
+      } else r = { cost: r2.cost, tension: Math.max(r.tension, r2.tension), violation: Math.max(r.violation, r2.violation) };
+    }
     const out = { pose, tension: r.tension, violation: r.violation, cth: this.ev.cth, sth: this.ev.sth };
     this.stanceCache.set(n.key, out);
     return out;

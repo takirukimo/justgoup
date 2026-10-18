@@ -447,7 +447,12 @@ export const GEN: {
    * compression, hold variety) is on regardless. GenerateOptions.profiles overrides it per problem.
    */
   profiles: boolean;
-  /** Hand holds bolted onto route volumes (needs the renderer to seat them on the volume face). */
+  /**
+   * Hand holds bolted onto route volumes (HoldDef.onVolume; compression squeezes, a few on mixed / steep
+   * problems). OFF until the renderer seats a mounted hold on its volume's face (today it would sink
+   * into the volume mesh). The sim and planner already handle them (holds.volumeYields: a foot by the
+   * mounted hold takes it, not the volume). GenerateOptions.holdsOnVolumes overrides it per problem.
+   */
   holdsOnVolumes: boolean;
 } = {
   profiles: false,
