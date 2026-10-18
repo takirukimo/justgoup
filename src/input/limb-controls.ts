@@ -615,6 +615,11 @@ export class LimbControls implements LimbControlsAPI {
     return { kind: 'none', holdId: null };
   }
 
+  /** Wall-local target of the dragged limb (a copy), or null when no limb is dragged. */
+  get dragTarget(): Vec2 | null {
+    return this.dragIdx >= 0 && this.dragIdx < 4 ? { x: this.target.x, y: this.target.y } : null;
+  }
+
   /** The double-dyno target a two-finger flick straight up the spine would throw at now, or null. */
   previewDoubleDyno(): { holdId: string; rise: number; feasible: boolean } | null {
     const st = this.state;
@@ -2654,7 +2659,8 @@ export class LimbControls implements LimbControlsAPI {
       const d = Math.max(0, Math.hypot(tx - this.s1.x, ty - this.s1.y) - 0.24);
       const on = this.zone === ZONE_SHAKE;
       const a = on ? 1 : clamp(1 - d / 0.45, 0, 1) * 0.5;
-      if (a > 0.02) {
+      if (a > 0.02 && on) {
+        // the lane itself only shows while the finger is in it (a whisper of fill + a dashed edge)
         const c = this.laneQuad;
         shakeLanePoint(idx, A, this.up, L.down0, L.out0, c[0]);
         shakeLanePoint(idx, A, this.up, L.down0, L.out1, c[1]);
@@ -2671,43 +2677,38 @@ export class LimbControls implements LimbControlsAPI {
         }
         if (ok) {
           ctx.closePath();
-          if (on) {
-            ctx.globalAlpha = 1;
-            ctx.fillStyle = 'rgba(154,212,222,0.12)';
-            ctx.fill();
-          }
-          ctx.setLineDash(on ? DASH_NONE : DASH_RING);
-          ctx.globalAlpha = a * 0.7;
-          ctx.strokeStyle = C_SHADOW;
-          ctx.lineWidth = 3;
-          ctx.stroke();
-          ctx.globalAlpha = a;
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = 'rgba(154,212,222,0.07)';
+          ctx.fill();
+          ctx.setLineDash(DASH_RING);
+          ctx.globalAlpha = 0.42;
           ctx.strokeStyle = PALETTE.glacier;
-          ctx.lineWidth = on ? 1.6 : 1.1;
+          ctx.lineWidth = 1;
           ctx.stroke();
           ctx.setLineDash(DASH_NONE);
-          // a shake glyph: a short wave in the middle of the lane
-          if (H.map(this.s1.x, this.s1.y, p)) {
-            const gx = p.x;
-            const gy = p.y;
-            ctx.beginPath();
-            for (let k = 0; k <= 16; k++) {
-              const u = k / 16;
-              const x = gx - 9 + u * 18;
-              const y = gy + Math.sin(u * Math.PI * 3 + (this.reduced ? 0 : this.time * 10)) * 2.6;
-              if (k === 0) ctx.moveTo(x, y);
-              else ctx.lineTo(x, y);
-            }
-            ctx.globalAlpha = a * 0.7;
-            ctx.strokeStyle = C_SHADOW;
-            ctx.lineWidth = 3.2;
-            ctx.stroke();
-            ctx.globalAlpha = a;
-            ctx.strokeStyle = PALETTE.glacier;
-            ctx.lineWidth = 1.5;
-            ctx.stroke();
-          }
         }
+      }
+      // the shake glyph (a short live wave) marks the lane's middle and fades in as the finger nears it
+      if (a > 0.02 && H.map(this.s1.x, this.s1.y, p)) {
+        const gx = p.x;
+        const gy = p.y;
+        ctx.beginPath();
+        for (let k = 0; k <= 16; k++) {
+          const u = k / 16;
+          const x = gx - 9 + u * 18;
+          const y = gy + Math.sin(u * Math.PI * 3 + (this.reduced ? 0 : this.time * 10)) * 2.6;
+          if (k === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.globalAlpha = a * 0.7;
+        ctx.strokeStyle = C_SHADOW;
+        ctx.lineWidth = 3.2;
+        ctx.stroke();
+        ctx.globalAlpha = a;
+        ctx.strokeStyle = PALETTE.glacier;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        this.grow(gx, gy, 14);
       }
     }
     ctx.globalAlpha = 1;

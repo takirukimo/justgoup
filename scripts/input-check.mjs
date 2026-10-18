@@ -314,6 +314,33 @@ async function waitEvent(page, since, pred, ms = 3000) {
 }
 const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
 
+/**
+ * Keep the dragging finger (touch id 0, last at `at`) on a wall point that moves with the body:
+ * `goal` is evaluated in the page and returns a wall-local point; the finger is nudged by the
+ * remaining wall offset (via the renderer's px/m) a few times. Returns the final finger position.
+ */
+async function steer(page, cdp, at, goal, rounds = 4) {
+  let f = { ...at };
+  for (let r = 0; r < rounds; r++) {
+    const d = await page.evaluate((src) => {
+      const g = new Function('return (' + src + ')')()();
+      const t = window.__ctl.dragTarget;
+      if (!t) return null;
+      const ppm = window.__renderer.pxPerMeter(g);
+      return { dx: (g.x - t.x) * ppm, dy: -(g.y - t.y) * ppm };
+    }, goal.toString());
+    if (!d || Math.hypot(d.dx, d.dy) < 3) break;
+    const to = { x: f.x + d.dx, y: f.y + d.dy };
+    for (let i = 1; i <= 4; i++) {
+      await touch(cdp, 'touchMove', [lerp(f, to, i / 4)]);
+      await page.waitForTimeout(30);
+    }
+    f = to;
+    await page.waitForTimeout(250);
+  }
+  return f;
+}
+
 /** A hold a hand could throw at from the start (a feasible dyno candidate above it, a long throw). */
 const planThrow = (page) =>
   page.evaluate(() => {
@@ -406,7 +433,15 @@ if (run('G')) {
   const a = { x: g.handle.x, y: g.handle.y };
   const b = { x: a.x + (g.bag.x - g.limbS.x), y: a.y + (g.bag.y - g.limbS.y) };
   await drag(page, cdp, a, b, 16);
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(400);
+  // the body sways once the hand lets go: follow the bag
+  await steer(page, cdp, b, () => {
+    const st = window.__sim.getState();
+    const dx = st.chest.x - st.pelvis.x;
+    const dy = st.chest.y - st.pelvis.y;
+    const l = Math.hypot(dx, dy) || 1;
+    return { x: st.pelvis.x - (dx / l) * 0.1, y: st.pelvis.y - (dy / l) * 0.1 };
+  });
   const pv = await preview(page);
   ok(pv && pv.kind === 'chalk', `hand over the hips previews a chalk dip (${JSON.stringify(pv)})`);
   const tag = await page.evaluate(() => document.querySelector('.jgl-tag.on')?.textContent ?? '');
@@ -414,19 +449,21 @@ if (run('G')) {
   await page.screenshot({ path: `${out}/check-chalk-aim.png` });
   const since = await eventCount(page);
   await touch(cdp, 'touchEnd', []);
-  const cs = await waitEvent(page, since, (e) => e.type === 'chalk-start' && e.limb === 'LH', 1500);
+  const cs = await waitEvent(page, since, (e) => e.type === 'chalk-start' && e.limb === 'LH', 15000);
   ok(!!cs, 'releasing at the hips chalks up (chalk-start LH)');
-  const cd = await waitEvent(page, since, (e) => e.type === 'chalk-done' && e.limb === 'LH', 4000);
+  // the dip lasts SIM.chalkTime of sim time (slow headless frames stretch it a lot in real time)
+  const cd = await waitEvent(page, since, (e) => e.type === 'chalk-done' && e.limb === 'LH', 90000);
   ok(!!cd, 'chalk-done LH after the dip');
+  await waitEvent(page, since, (e) => e.type === 'return' && e.limb === 'LH', 20000);
   await page.waitForTimeout(400);
   // HUD CHALK button → bus 'ui:chalk' → LimbControls → sim.chalkUp
   const s2 = await eventCount(page);
   await page.evaluate(() => window.__bus.emit('ui:chalk', { hand: 'RH' }));
-  const c2 = await waitEvent(page, s2, (e) => e.type === 'chalk-start' && e.limb === 'RH', 1500);
+  const c2 = await waitEvent(page, s2, (e) => e.type === 'chalk-start' && e.limb === 'RH', 15000);
   ok(!!c2, "'ui:chalk' (HUD button) chalks the right hand");
   const busy = await page.evaluate(() => window.__sim.getState().limbs.RH.chalking === true || window.__sim.getState().limbs.RH.busy);
   ok(busy, 'the right hand is busy in the bag');
-  await page.waitForTimeout(1600);
+  await waitEvent(page, s2, (e) => e.type === 'chalk-done' && e.limb === 'RH', 90000);
   // gated hand: blocked, no chalk
   await page.evaluate(() => window.__ctl.setAllowed(['LF'], false));
   const s3 = await eventCount(page);
@@ -464,7 +501,7 @@ if (run('H')) {
     ok(true, 'hand down beside the body previews a shake-out');
     const since = await eventCount(page);
     await touch(cdp, 'touchEnd', []);
-    const ss = await waitEvent(page, since, (e) => e.type === 'shake-out-start' && e.limb === 'RH', 1500);
+    const ss = await waitEvent(page, since, (e) => e.type === 'shake-out-start' && e.limb === 'RH', 15000);
     ok(!!ss, 'releasing there shakes out (shake-out-start RH)');
   } else {
     console.log(`SKIP  shake-out not offered from this stance (${JSON.stringify(pv)})`);
