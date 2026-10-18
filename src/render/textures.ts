@@ -9,7 +9,7 @@ import { BRAND, PALETTE, WALL } from '../config/brand';
 import type { ClimbMode, HoldDef } from '../core/types';
 import { Rng, hashString } from '../core/rng';
 import { clamp } from '../core/math';
-import { drawLogoMark, drawStrokeText, measureStrokeText } from './glyphs';
+import { BRAND_ASPECT, drawLockup, drawMark, drawMarkInBox, drawStrokeText, drawWordmark, drawWordmarkVertical, measureStrokeText } from './glyphs';
 
 export const PANEL_W = 1.22;
 export const PANEL_H = 2.44;
@@ -624,40 +624,48 @@ function drawWallBranding(
   Y: (y: number) => number,
   M: (m: number) => number,
 ): void {
+  // Tone-on-tone CHIRAL SPORTS artwork in a slightly glossier paint: it reads in the albedo as a
+  // whisper, in the roughness as a sheen when the key light grazes it, and as a hair of relief.
   const tone = WALL.logoTone;
   const halfW = o.width / 2;
 
-  type Mark = { kind: 'word' | 'logo' | 'vword'; x: number; y: number; size: number };
-  const marks: Mark[] = [];
+  // kind: 'word' horizontal wordmark (x = centre), 'vword' vertical wordmark reading top → bottom
+  // like the tee's back print (x = column's left edge), 'mark' the two-swoosh mark (x = left edge),
+  // 'lockup' mark + wordmark (x = left edge). y = TOP edge, size = letter / mark height (m).
+  type Art = { kind: 'word' | 'vword' | 'mark' | 'lockup'; x: number; y: number; size: number };
+  const arts: Art[] = [];
   if (o.mode === 'boulder') {
-    // Wordmark across the upper wall, logo mark low on the right.
-    const cap = Math.min(1.05, (o.width - 0.5) / 3.75);
-    marks.push({ kind: 'word', x: 0, y: Math.min(o.wallHeight - 0.42, 3.95), size: cap });
-    marks.push({ kind: 'logo', x: halfW - 1.62, y: 2.18, size: 1.42 });
+    // the wordmark spans the upper wall; a large mark sits low on the right, clear of the start
+    const wordW = Math.min(o.width - 0.7, 4.1);
+    arts.push({ kind: 'word', x: 0, y: Math.min(o.wallHeight - 0.22, 4.3), size: wordW / BRAND_ASPECT.word });
+    const markW = Math.min(1.85, o.width * 0.4);
+    arts.push({ kind: 'mark', x: halfW - 0.32 - markW, y: 2.28, size: markW / BRAND_ASPECT.mark });
   } else {
-    // Rope tower: a giant vertical wordmark running up the right side, logo marks stacked.
-    marks.push({ kind: 'vword', x: halfW - 0.32, y: 1.2, size: Math.min(1.1, o.width * 0.25) });
-    marks.push({ kind: 'logo', x: -halfW + 0.35, y: 7.1, size: 1.5 });
-    marks.push({ kind: 'word', x: -0.35, y: 13.2, size: 0.62 });
+    // lead tower: the tee's vertical wordmark runs down the right side, a large mark mid-height
+    // on the left and the lockup up at the chains
+    const vh = Math.min(0.44, o.width * 0.1);
+    arts.push({ kind: 'vword', x: halfW - 0.24 - vh, y: Math.min(o.wallHeight - 1.6, 12.9), size: vh });
+    const markW = Math.min(1.7, o.width * 0.38);
+    arts.push({ kind: 'mark', x: -halfW + 0.34, y: 7.3, size: markW / BRAND_ASPECT.mark });
+    const lockW = Math.min(o.width - 1.4, 3.0);
+    arts.push({ kind: 'lockup', x: -halfW + 0.34, y: Math.min(o.wallHeight - 0.62, 14.38), size: lockW / BRAND_ASPECT.lockup });
   }
 
-  for (const mk of marks) {
+  for (const a of arts) {
+    // skip artwork that doesn't touch this segment (rope walls are split into several textures)
+    const len = a.kind === 'vword' ? a.size * BRAND_ASPECT.word : a.size;
+    if (a.y - len > o.y1 + 0.05 || a.y < o.y0 - 0.05) continue;
     for (const layer of [L.A, L.Hh, L.R]) {
       const ctx = layer.ctx;
       const isA = layer === L.A;
       const isH = layer === L.Hh;
       ctx.save();
-      ctx.strokeStyle = isA ? tone : isH ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.14)';
-      ctx.fillStyle = ctx.strokeStyle;
-      if (mk.kind === 'word') {
-        drawStrokeText(ctx, BRAND.name, X(mk.x), Y(mk.y), M(mk.size), { weight: 1.45, tracking: 1.2, align: 'center' });
-      } else if (mk.kind === 'vword') {
-        ctx.translate(X(mk.x), Y(mk.y));
-        ctx.rotate(-Math.PI / 2);
-        drawStrokeText(ctx, BRAND.name, 0, -M(mk.size) / 2, M(mk.size), { weight: 1.45, tracking: 1.2 });
-      } else {
-        drawLogoMark(ctx, BRAND.logoPaths, X(mk.x), Y(mk.y), M(mk.size));
-      }
+      ctx.fillStyle = isA ? tone : isH ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.14)';
+      const px = M(a.size);
+      if (a.kind === 'word') drawWordmark(ctx, X(a.x), Y(a.y), px, 'center');
+      else if (a.kind === 'vword') drawWordmarkVertical(ctx, X(a.x), Y(a.y), px);
+      else if (a.kind === 'lockup') drawLockup(ctx, X(a.x), Y(a.y), px);
+      else drawMark(ctx, X(a.x), Y(a.y), px * BRAND_ASPECT.mark);
       ctx.restore();
     }
   }
@@ -734,7 +742,7 @@ function drawSpecDetails(
     if (by < o.y0 - 0.2 || by > o.y1 + 0.2) continue;
     const bx = X(-halfW + 0.16);
     const lineH = fontPx * 1.45;
-    ctx.fillStyle = 'rgba(255,79,31,0.55)';
+    ctx.fillStyle = rgba(PALETTE.signal, 0.6);
     ctx.fillRect(bx, Y(by) - lineH * 3.2, Math.max(2, M(0.004)), lineH * 3.1);
     ctx.fillStyle = ink;
     const wallNo = String(o.wallNo ?? 1).padStart(2, '0');
@@ -862,7 +870,7 @@ export function plywoodTile(size: number): TileSet {
 
 let padCache: { top: TileSet; band: THREE.CanvasTexture } | null = null;
 
-/** Pad top fabric (2 × 2 m tile) + the front band (orange stripe + CHIRAL print, 4 m per repeat). */
+/** Pad top fabric (2 × 2 m tile) + the front band (CHIRAL pink stripe + CHIRAL SPORTS lockup, 4 m per repeat). */
 export function padTextures(): { top: TileSet; band: THREE.CanvasTexture } {
   if (padCache) return padCache;
   const size = 1024;
@@ -944,15 +952,15 @@ export function padTextures(): { top: TileSet; band: THREE.CanvasTexture } {
   B.fillRect(0, bh * 0.32 - 2, bw, 2);
   for (let k = 0; k < 2; k++) {
     const ox = k * 2 * bppm;
+    // official lockup in bone, a spec line, and a pink tick closing each 2 m section
     B.fillStyle = PALETTE.bone;
-    drawLogoMark(B, BRAND.logoPaths, ox + 0.18 * bppm, bh * 0.43, bh * 0.4);
-    B.strokeStyle = PALETTE.bone;
-    drawStrokeText(B, BRAND.name, ox + 0.18 * bppm + bh * 0.52, bh * 0.47, bh * 0.32, { weight: 1.35, tracking: 1.3 });
-    B.font = `500 ${Math.round(bh * 0.13)}px ${MONO}`;
-    B.fillStyle = 'rgba(233,229,221,0.45)';
-    B.fillText('IMPACT ZONE // 300 MM // CHIRAL HQ', ox + 0.95 * bppm, bh * 0.73);
-    B.fillStyle = 'rgba(255,79,31,0.8)';
-    B.fillRect(ox + 1.95 * bppm, bh * 0.45, 3, bh * 0.36);
+    const lockH = bh * 0.2;
+    drawLockup(B, ox + 0.16 * bppm, bh * 0.5, lockH);
+    B.font = `500 ${Math.round(bh * 0.115)}px ${MONO}`;
+    B.fillStyle = 'rgba(233,229,221,0.42)';
+    B.fillText(`IMPACT ZONE // 300 MM // ${BRAND.gym}`, ox + 1.08 * bppm, bh * 0.66);
+    B.fillStyle = rgba(PALETTE.signal, 0.85);
+    B.fillRect(ox + 1.95 * bppm, bh * 0.47, 3, bh * 0.3);
   }
   const band = canvasTexture(B.canvas, { srgb: true, repeat: true, anisotropy: 8 });
   padCache = { top, band };
@@ -1040,16 +1048,22 @@ export interface AtlasRect {
 
 export interface DecalAtlas {
   texture: THREE.CanvasTexture;
+  /** The official mark, centred in a square slot (a square decal shows it undistorted). */
   logo: AtlasRect;
+  /** The CHIRAL SPORTS wordmark; decal height = width / aspect.word. */
   word: AtlasRect;
+  /** Mark + wordmark lockup; decal height = width / aspect.lockup. */
+  lockup: AtlasRect;
   solid: AtlasRect;
   blob: AtlasRect;
   ring: AtlasRect;
+  /** Width / height of the word and lockup slots (padding included). */
+  aspect: { word: number; lockup: number };
 }
 
 let atlasCache: DecalAtlas | null = null;
 
-/** White-on-transparent decals: logo mark, CHIRAL wordmark, solid, soft blob, hairline ring. */
+/** White-on-transparent decals: the official mark, wordmark and lockup, solid, soft blob, hairline ring. */
 export function decalAtlas(): DecalAtlas {
   if (atlasCache) return atlasCache;
   const S = 1024;
@@ -1057,12 +1071,19 @@ export function decalAtlas(): DecalAtlas {
   ctx.clearRect(0, 0, S, S);
   ctx.fillStyle = '#fff';
   ctx.strokeStyle = '#fff';
-  // logo (0..512, 0..512)
-  drawLogoMark(ctx, BRAND.logoPaths, 24, 24, 464);
-  // wordmark (0..1024, 512..704)
-  const cap = 150;
-  const ww = measureStrokeText(BRAND.name, cap, { weight: 1.4, tracking: 1.2 });
-  drawStrokeText(ctx, BRAND.name, (S - ww) / 2, 512 + 21, cap, { weight: 1.4, tracking: 1.2 });
+  // mark (0..512, 0..512), centred in the square slot
+  drawMarkInBox(ctx, 24, 24, 464);
+  // wordmark (0..1024, 528..640): 1000 px wide
+  const pad = 12;
+  const wordH = (S - pad * 2) / BRAND_ASPECT.word;
+  const wordY0 = 528;
+  drawWordmark(ctx, pad, wordY0 + 8, wordH);
+  const wordY1 = wordY0 + 16 + wordH;
+  // lockup (0..1024, 656..): 1000 px wide
+  const lockH = (S - pad * 2) / BRAND_ASPECT.lockup;
+  const lockY0 = 656;
+  drawLockup(ctx, pad, lockY0 + 8, lockH);
+  const lockY1 = lockY0 + 16 + lockH;
   // solid (512..1024, 0..256)
   ctx.fillRect(516, 4, 504, 248);
   // blob (512..768, 256..512)
@@ -1081,10 +1102,12 @@ export function decalAtlas(): DecalAtlas {
   atlasCache = {
     texture: canvasTexture(ctx.canvas, { srgb: true, anisotropy: 4 }),
     logo: r(0, 0, 512, 512),
-    word: r(0, 512, 1024, 704),
+    word: r(0, wordY0, S, wordY1),
+    lockup: r(0, lockY0, S, lockY1),
     solid: r(520, 8, 1016, 248),
     blob: r(512, 256, 768, 512),
     ring: r(768, 256, 1024, 512),
+    aspect: { word: S / (wordY1 - wordY0), lockup: S / (lockY1 - lockY0) },
   };
   return atlasCache;
 }
@@ -1173,7 +1196,7 @@ export function createLabelAtlas(color: string, gradeText: string, name: string,
   tape(6, 132, 'START');
   tape(150, 132, 'TOP');
 
-  // route card (bone card, signal band, grade + name)
+  // route card (bone card, CHIRAL pink band, grade + name, the mark)
   const cy0 = 296;
   const ch = 208;
   ctx.save();
@@ -1189,10 +1212,10 @@ export function createLabelAtlas(color: string, gradeText: string, name: string,
   const nameCap = Math.min(34, (S - 84) / Math.max(1, measureStrokeText(nm, 10, { tracking: 1.6 }) / 10));
   drawStrokeText(ctx, nm, 64, cy0 + 142, nameCap, { weight: 1.1, tracking: 1.6 });
   ctx.fillStyle = '#121316';
-  drawLogoMark(ctx, BRAND.logoPaths, S - 104, cy0 + 34, 76);
+  drawMark(ctx, S - 118, cy0 + 40, 84);
   ctx.font = `600 18px ${MONO}`;
   ctx.fillStyle = 'rgba(18,19,22,0.6)';
-  ctx.fillText(`${BRAND.name} HQ // SET ${String((seed % 89) + 10)}`, 64, cy0 + 196);
+  ctx.fillText(`${BRAND.gym} // SET ${String((seed % 89) + 10)}`, 64, cy0 + 196);
   ctx.restore();
 
   const r = (x0: number, y0: number, x1: number, y1: number): AtlasRect => ({ u0: x0 / S, v0: 1 - y1 / S, u1: x1 / S, v1: 1 - y0 / S });
@@ -1207,18 +1230,32 @@ export function createLabelAtlas(color: string, gradeText: string, name: string,
 
 // ───────────────────────────── signage, windows, shafts, banners ─────────────────────────────
 
-/** Backlit CHIRAL sign (logo mark + wordmark + HQ), white on transparent, used as an emissive map. */
+/** Width / height of signTexture(). */
+export const SIGN_ASPECT = 8;
+
+/**
+ * Backlit CHIRAL HQ sign: the official lockup, a hairline divider and "HQ", white on transparent
+ * (used as an emissive map; the renderer tints it warm white).
+ */
 export function signTexture(): THREE.CanvasTexture {
   const W = 2048;
-  const H = 512;
+  const H = W / SIGN_ASPECT;
   const ctx = ctx2d(makeCanvas(W, H));
   ctx.fillStyle = '#fff';
   ctx.strokeStyle = '#fff';
-  drawLogoMark(ctx, BRAND.logoPaths, 40, 56, 400);
-  drawStrokeText(ctx, BRAND.name, 500, 120, 270, { weight: 1.35, tracking: 1.3 });
-  ctx.globalAlpha = 0.75;
-  const hqX = 500 + measureStrokeText(BRAND.name, 270, { weight: 1.35, tracking: 1.3 }) + 60;
-  drawStrokeText(ctx, 'HQ', hqX, 250, 140, { weight: 1.1, tracking: 1.6 });
+  const lockH = 124;
+  const hqCap = lockH * 0.8;
+  const hqOpts = { weight: 1.05, tracking: 1.7 };
+  const gap = lockH * 0.55;
+  const total = lockH * BRAND_ASPECT.lockup + gap * 2 + 5 + measureStrokeText('HQ', hqCap, hqOpts);
+  let x = (W - total) / 2;
+  const y = (H - lockH) / 2;
+  x += drawLockup(ctx, x, y, lockH) + gap;
+  ctx.globalAlpha = 0.5;
+  ctx.fillRect(x, y - lockH * 0.08, 5, lockH * 1.16);
+  x += 5 + gap;
+  ctx.globalAlpha = 0.8;
+  drawStrokeText(ctx, 'HQ', x, y + lockH - hqCap, hqCap, hqOpts);
   return canvasTexture(ctx.canvas, { srgb: true, anisotropy: 4 });
 }
 
@@ -1272,32 +1309,59 @@ export function shaftTexture(): THREE.CanvasTexture {
   return canvasTexture(ctx.canvas, { srgb: false, mipmaps: true });
 }
 
-/** Hanging fabric banner: signal orange, bone logo mark, vertical wordmark. */
+/** Banner colourways (one column each in bannerTexture()), mirroring the CHIRAL SPORTS tees. */
+export const BANNER_VARIANTS = 3;
+/** Width / height of one banner column. */
+export const BANNER_ASPECT = 0.3;
+
+/**
+ * Hanging fabric banners in the three tee colourways (black with white print, white with pink
+ * print, pink with white print): the mark up top and the wordmark running down the middle,
+ * rotated like the tee's back print. One column per variant; map u to [k/3, (k+1)/3].
+ */
 export function bannerTexture(): THREE.CanvasTexture {
-  const W = 256;
-  const H = 1024;
-  const ctx = ctx2d(makeCanvas(W, H));
-  ctx.fillStyle = PALETTE.signal;
-  ctx.fillRect(0, 0, W, H);
-  fillPattern(ctx, valueNoiseTile(64, 4, 0xba), W, H, 4, 0.12, 'soft-light');
-  ctx.fillStyle = PALETTE.bone;
-  drawLogoMark(ctx, BRAND.logoPaths, W * 0.2, 60, W * 0.6);
-  ctx.save();
-  ctx.translate(W * 0.5, 300);
-  ctx.rotate(Math.PI / 2);
-  ctx.strokeStyle = PALETTE.bone;
-  drawStrokeText(ctx, BRAND.name, 0, -60, 120, { weight: 1.4, tracking: 1.3 });
-  ctx.restore();
-  ctx.fillStyle = 'rgba(13,14,16,0.85)';
-  ctx.font = `600 18px ${MONO}`;
-  ctx.fillText(BRAND.tagline.slice(0, 22), 20, H - 60);
-  ctx.fillRect(20, H - 44, W - 40, 3);
-  // fabric sag shading
-  const g = ctx.createLinearGradient(0, 0, W, 0);
-  g.addColorStop(0, 'rgba(0,0,0,0.22)');
-  g.addColorStop(0.5, 'rgba(0,0,0,0)');
-  g.addColorStop(1, 'rgba(0,0,0,0.22)');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, W, H);
+  const CW = 300;
+  const H = Math.round(CW / BANNER_ASPECT);
+  const ctx = ctx2d(makeCanvas(CW * BANNER_VARIANTS, H));
+  const variants: { cloth: string; ink: string; rule: string }[] = [
+    { cloth: '#141518', ink: PALETTE.chalk, rule: PALETTE.signal },
+    { cloth: '#E6E2DA', ink: PALETTE.signal, rule: '#2B2D31' },
+    { cloth: PALETTE.signal, ink: PALETTE.chalk, rule: PALETTE.chalk },
+  ];
+  variants.forEach((v, k) => {
+    ctx.save();
+    ctx.translate(k * CW, 0);
+    ctx.beginPath();
+    ctx.rect(0, 0, CW, H);
+    ctx.clip();
+    ctx.fillStyle = v.cloth;
+    ctx.fillRect(0, 0, CW, H);
+    fillPattern(ctx, valueNoiseTile(64, 4, 0xba + k), CW, H, 4, 0.1, 'soft-light');
+    // hem + pole sleeve
+    ctx.fillStyle = 'rgba(0,0,0,0.16)';
+    ctx.fillRect(0, 0, CW, 26);
+    ctx.fillRect(0, H - 14, CW, 14);
+    ctx.fillStyle = v.ink;
+    const markW = CW * 0.5;
+    drawMark(ctx, (CW - markW) / 2, 96, markW);
+    // the wordmark column, letters rotated 90° reading top to bottom, centred
+    const letterH = CW * 0.16;
+    drawWordmarkVertical(ctx, (CW - letterH) / 2, 96 + markW / BRAND_ASPECT.mark + 90, letterH);
+    // a short rule + the gym name at the foot
+    ctx.fillStyle = v.rule;
+    ctx.fillRect(CW * 0.38, H - 118, CW * 0.24, 4);
+    ctx.fillStyle = v.ink;
+    ctx.globalAlpha = 0.7;
+    drawStrokeText(ctx, BRAND.gym, CW / 2, H - 92, 18, { weight: 1, tracking: 2.6, align: 'center' });
+    ctx.globalAlpha = 1;
+    // fabric sag shading
+    const g = ctx.createLinearGradient(0, 0, CW, 0);
+    g.addColorStop(0, 'rgba(0,0,0,0.2)');
+    g.addColorStop(0.5, 'rgba(0,0,0,0)');
+    g.addColorStop(1, 'rgba(0,0,0,0.2)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, CW, H);
+    ctx.restore();
+  });
   return canvasTexture(ctx.canvas, { srgb: true });
 }

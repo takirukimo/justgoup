@@ -9,6 +9,7 @@
 import * as THREE from 'three';
 import type { CameraMode, GuideState, HoldHighlight, RendererAPI, ScreenPoint } from '../core/contracts';
 import type { BoulderDef, ChalkId, ClimberState, ColorwayId, HeadId, HoldDef, LimbSnapshot, QualityLevel, Vec2 } from '../core/types';
+import { PALETTE } from '../config/brand';
 import { CHALKS } from '../config/skins';
 import { GAME } from '../config/tuning';
 import { clamp } from '../core/math';
@@ -47,7 +48,7 @@ function showcaseBoulder(): BoulderDef {
     width: GAME.boulderWall.width,
     height: GAME.boulderWall.height,
     holds: [],
-    color: '#FF4F1F',
+    color: PALETTE.signal,
     seed: 1,
   };
 }
@@ -566,6 +567,8 @@ export class GameRenderer implements RendererAPI {
     const cam = this.rig.camera;
     // straight-on editor views of steep overhangs (and transitions out of them) sit below pad level
     this.env.setFloorVisible(cam.position.y > GAME.padHeight + 0.05);
+    // the title screen sets the STEIBOCK lockup right over the lit CHIRAL HQ sign: dim it there
+    this.env.setSignLevel(this.rig.mode === 'title' && this.rig.introProgress >= 1 ? 0.3 : 1);
 
     this.updateLights(d, st);
     this.wall.update(d);

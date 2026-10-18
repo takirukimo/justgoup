@@ -1,7 +1,7 @@
 // GPU-cheap particle effects in a single pooled THREE.Points draw:
 //   chalkPuff — soft billboards in the player's chalk colour, drift outward + fade
 //   dust      — crash-pad landing burst (rolling grey cloud at pad level)
-//   confetti  — send celebration: chalk bursts + small tumbling signal-orange / bone flecks
+//   confetti  — send celebration: chalk bursts + small tumbling CHIRAL pink / bone flecks
 // CPU integrates a ring buffer of particles; attributes are updated in place (no allocation).
 
 import * as THREE from 'three';

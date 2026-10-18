@@ -3,6 +3,11 @@
 //
 // Glyphs live on a grid 10 units tall (y down). Strokes are centre-lines for a 2-unit stroke:
 // outer edges land on 0 and 10 vertically. Chamfered corners give the "technical" feel.
+//
+// Brand artwork (the CHIRAL mark, the CHIRAL SPORTS wordmark and their lockup) is never set in
+// this font: drawMark / drawWordmark / drawLockup render the official outlined paths.
+
+import { BRAND } from '../config/brand';
 
 type Poly = { pts: number[]; closed?: boolean };
 interface Glyph {
@@ -147,4 +152,106 @@ export function drawLogoMark(ctx: CanvasRenderingContext2D, paths: readonly stri
   ctx.scale(size / 64, size / 64);
   for (const d of paths) ctx.fill(new Path2D(d));
   ctx.restore();
+}
+
+// ───────────────────────────── official CHIRAL SPORTS artwork ─────────────────────────────
+// The outlined paths from assets/brand (BRAND.markPaths / wordmarkPaths) drawn with their real
+// viewBoxes, so the proportions are exactly the official ones. Everything fills with the
+// context's current fillStyle. Path2D objects are built once and reused.
+
+const pathCache = new Map<string, Path2D>();
+function path2d(d: string): Path2D {
+  let p = pathCache.get(d);
+  if (!p) {
+    p = new Path2D(d);
+    pathCache.set(d, p);
+  }
+  return p;
+}
+
+const MARK_W = BRAND.markViewBox[0];
+const MARK_H = BRAND.markViewBox[1];
+const WORD_W = BRAND.wordmarkViewBox[0];
+const WORD_H = BRAND.wordmarkViewBox[1];
+/** Official lockup geometry (assets/brand/chiral-lockup-livetext.svg): wordmark starts at x = 165.74. */
+const LOCKUP_WORD_X = 165.74;
+const LOCKUP_MARK_Y = 5.86;
+const LOCKUP_W = LOCKUP_WORD_X + WORD_W;
+const LOCKUP_H = WORD_H;
+
+/** Width / height of the official mark, wordmark and horizontal lockup. */
+export const BRAND_ASPECT = {
+  mark: MARK_W / MARK_H,
+  word: WORD_W / WORD_H,
+  lockup: LOCKUP_W / LOCKUP_H,
+} as const;
+
+function fillPaths(ctx: CanvasRenderingContext2D, paths: readonly string[]): void {
+  for (const d of paths) ctx.fill(path2d(d));
+}
+
+/** The official CHIRAL mark (two swooshes), top-left at (x, y), `width` px wide (height = width / 1.913). */
+export function drawMark(ctx: CanvasRenderingContext2D, x: number, y: number, width: number): void {
+  const s = width / MARK_W;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s, s);
+  fillPaths(ctx, BRAND.markPaths);
+  ctx.restore();
+}
+
+/** The official mark centred in a square box (decal atlases that assume a square logo slot). */
+export function drawMarkInBox(ctx: CanvasRenderingContext2D, x: number, y: number, box: number): void {
+  const w = box;
+  const h = w / BRAND_ASPECT.mark;
+  drawMark(ctx, x, y + (box - h) / 2, w);
+}
+
+/** The official CHIRAL SPORTS wordmark, top-left at (x, y), `height` px tall (cap height ≈ height). */
+export function drawWordmark(ctx: CanvasRenderingContext2D, x: number, y: number, height: number, align: 'left' | 'center' | 'right' = 'left'): number {
+  const s = height / WORD_H;
+  const w = WORD_W * s;
+  const ox = align === 'center' ? x - w / 2 : align === 'right' ? x - w : x;
+  ctx.save();
+  ctx.translate(ox, y);
+  ctx.scale(s, s);
+  fillPaths(ctx, BRAND.wordmarkPaths);
+  ctx.restore();
+  return w;
+}
+
+/**
+ * Mark + wordmark lockup with the official spacing, top-left at (x, y), `height` px tall (the
+ * wordmark's height; the mark sits on the baseline). Returns the drawn width.
+ */
+export function drawLockup(ctx: CanvasRenderingContext2D, x: number, y: number, height: number, align: 'left' | 'center' | 'right' = 'left'): number {
+  const s = height / LOCKUP_H;
+  const w = LOCKUP_W * s;
+  const ox = align === 'center' ? x - w / 2 : align === 'right' ? x - w : x;
+  ctx.save();
+  ctx.translate(ox, y);
+  ctx.scale(s, s);
+  ctx.save();
+  ctx.translate(0, LOCKUP_MARK_Y);
+  fillPaths(ctx, BRAND.markPaths);
+  ctx.restore();
+  ctx.translate(LOCKUP_WORD_X, 0);
+  fillPaths(ctx, BRAND.wordmarkPaths);
+  ctx.restore();
+  return w;
+}
+
+/**
+ * The wordmark set vertically like the back print of the CHIRAL SPORTS tee: letters rotated 90°
+ * clockwise, reading top to bottom. (x, y) is the top of the column's left edge; `height` is the
+ * letter height (= column width). Returns the column length.
+ */
+export function drawWordmarkVertical(ctx: CanvasRenderingContext2D, x: number, y: number, height: number): number {
+  const len = WORD_W * (height / WORD_H);
+  ctx.save();
+  ctx.translate(x + height, y);
+  ctx.rotate(Math.PI / 2);
+  drawWordmark(ctx, 0, 0, height);
+  ctx.restore();
+  return len;
 }

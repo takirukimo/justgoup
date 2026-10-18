@@ -50,17 +50,17 @@ function carabiner(h: number, w: number, tube: number, color: string, bent: bool
   return mergeGeometries([tag(body, color, ANODISED), tag(gate, '#C9CDD2', STEEL)], false) as THREE.BufferGeometry;
 }
 
-/** Dogbone sling between the biners: flat webbing with stitched bands. */
-function dogbone(len: number, color: string): THREE.BufferGeometry {
+/** Dogbone sling between the biners: CHIRAL pink webbing with bone bar-tacks and a bone print band. */
+function dogbone(len: number, webbing: string, accent: string): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
   const body = new THREE.BoxGeometry(0.017, len, 0.0065, 1, 6, 1);
-  parts.push(tag(body, '#26292E', FABRIC));
+  parts.push(tag(body, webbing, FABRIC));
   for (const y of [len / 2 - 0.012, -len / 2 + 0.012]) {
     const band = new THREE.BoxGeometry(0.0176, 0.006, 0.0072).translate(0, y, 0);
-    parts.push(tag(band, color, FABRIC));
+    parts.push(tag(band, accent, FABRIC));
   }
-  const logo = new THREE.BoxGeometry(0.0178, 0.012, 0.0074).translate(0, 0, 0);
-  parts.push(tag(logo, PALETTE.signal, FABRIC));
+  const print = new THREE.BoxGeometry(0.0178, 0.009, 0.0074).translate(0, 0, 0);
+  parts.push(tag(print, accent, FABRIC));
   return mergeGeometries(parts, false) as THREE.BufferGeometry;
 }
 
@@ -125,10 +125,10 @@ export class QuickdrawSet {
     const draws = defs.slice(0, -1);
     const anchor = defs[defs.length - 1];
 
-    // swing geometry (shared by all draws): top biner (bone), sling, bottom biner (signal)
+    // swing geometry (shared by all draws): top biner (bone), pink sling, bottom biner (graphite)
     const top = carabiner(TOP_H, 0.04, 0.0034, '#D9D4CA', false).rotateY(0.55);
-    const sling = dogbone(SLING, PALETTE.bone).translate(0, -TOP_H + 0.006 - SLING / 2 + 0.006, 0.002);
-    const bot = carabiner(BOT_H, 0.044, 0.0037, PALETTE.signal, true)
+    const sling = dogbone(SLING, PALETTE.signal, PALETTE.bone).translate(0, -TOP_H + 0.006 - SLING / 2 + 0.006, 0.002);
+    const bot = carabiner(BOT_H, 0.044, 0.0037, '#4A5059', true)
       .rotateY(-0.5)
       .translate(0, -TOP_H + 0.006 - SLING + 0.012, 0.004);
     this.swingGeo = mergeGeometries([top, sling, bot], false) as THREE.BufferGeometry;
@@ -205,7 +205,7 @@ export class QuickdrawSet {
       m.compose(p, q, one);
       parts.push(tag(ring, '#C8CCD1', STEEL).applyMatrix4(m));
     }
-    // signal-orange anchor plate tag between the bolts
+    // CHIRAL pink anchor plate tag between the bolts
     const plate = tag(new THREE.BoxGeometry(0.16, 0.028, 0.002), PALETTE.signal, [0, 0, 0, 0.3]);
     this.frame.toWorldXYZ(a.x, a.y + 0.045, 0.001, p);
     m.compose(p, this.frame.quaternion, one);

@@ -1,9 +1,10 @@
 // CHIRAL HQ — the gym interior around the main wall.
 //
 // A dark, moody hall: faceted neighbouring walls at other angles covered in deco routes and big
-// branded volumes, thick charcoal crash pads with orange CHIRAL stripes, black ceiling trusses
-// with warm linear light bars, clerestory windows throwing cool light shafts through the haze,
-// a backlit CHIRAL sign above the walls, props and banners. Everything static is merged into a
+// branded volumes, thick charcoal crash pads with CHIRAL pink stripes and the CHIRAL SPORTS
+// lockup, black ceiling trusses with warm linear light bars, clerestory windows throwing cool
+// light shafts through the haze, the backlit CHIRAL HQ sign above the walls, props and banners
+// in the three tee colourways. All brand artwork is the official mark / wordmark / lockup. Everything static is merged into a
 // handful of meshes with baked vertex lighting; materials are lit by the renderer's light rig.
 
 import * as THREE from 'three';
@@ -17,12 +18,15 @@ import { Batch, beam, tr, type BakeFn } from './batch';
 import { holdGeometry, decoColor } from './holds';
 import { createSurfaceMaterial, type SurfaceMaterial } from './shading';
 import {
+  BANNER_ASPECT,
+  BANNER_VARIANTS,
   bannerTexture,
   concreteTile,
   decalAtlas,
   padTextures,
   plywoodTile,
   shaftTexture,
+  SIGN_ASPECT,
   signTexture,
   windowTexture,
   type AtlasRect,
@@ -51,6 +55,8 @@ interface Hall {
   key: string;
   group: THREE.Group;
   floorGroup: THREE.Group;
+  /** The backlit CHIRAL HQ sign's material (its colour is the backlight level). */
+  signMat: THREE.MeshBasicMaterial | null;
   materials: THREE.Material[];
   geometries: THREE.BufferGeometry[];
   motes: THREE.Points | null;
@@ -58,6 +64,8 @@ interface Hall {
 }
 
 const FOG_COLOR = '#0d0f12';
+/** Warm white backlight of the CHIRAL HQ sign at full level (HDR, feeds the bloom). */
+const SIGN_COLOR = new THREE.Color(1.85, 1.74, 1.62);
 
 export class GymEnvironment {
   readonly group = new THREE.Group();
@@ -67,6 +75,8 @@ export class GymEnvironment {
   private moteTime = { value: 0 };
   private detail: 0 | 1 | 2 = 2;
   private floorVisible = true;
+  private signLevel = 1;
+  private signTarget = 1;
 
   constructor(
     private renderer: THREE.WebGLRenderer,
@@ -129,8 +139,20 @@ export class GymEnvironment {
     if (this.hall) this.hall.floorGroup.visible = v;
   }
 
+  /**
+   * Backlight level of the CHIRAL HQ sign (1 = full). The title screen dims it so the lit lockup
+   * doesn't compete with the STEIBOCK logo set right over it; it eases over ~1 s.
+   */
+  setSignLevel(v: number): void {
+    this.signTarget = clamp(v, 0, 1);
+  }
+
   update(dt: number): void {
     this.moteTime.value += dt;
+    const k = 1 - Math.exp(-dt * 2.2);
+    this.signLevel += (this.signTarget - this.signLevel) * k;
+    const m = this.hall?.signMat;
+    if (m) m.color.copy(SIGN_COLOR).multiplyScalar(this.signLevel);
   }
 
   // ───────────────────────────── build ─────────────────────────────
@@ -270,14 +292,14 @@ export class GymEnvironment {
       darkBatch.add(new THREE.BoxGeometry(len - 0.2, 0.006, 0.004), localMat(0, f.height + 0.0, 0.036, 0, m4), PALETTE.signal);
       for (const side of [-1, 1]) darkBatch.add(new RoundedBoxGeometry(0.07, f.height, 0.065, 2, 0.02), localMat((side * len) / 2, f.height / 2, 0, 0, m4), '#1B1D21');
 
-      // tone-on-tone branding on the panels
+      // tone-on-tone branding on the panels: the mark or the wordmark (official proportions)
       const frng = new Rng(f.seed * 977);
-      if (frng.chance(0.6)) {
-        const s = Math.min(1.6, f.height * 0.36);
-        decal(atlas.logo, s, s, localMat(frng.range(-len * 0.25, len * 0.25), f.height * 0.62, 0.003, 0, m4), '#ffffff', 0.05);
+      if (frng.chance(0.55)) {
+        const s = Math.min(1.7, f.height * 0.38);
+        decal(atlas.logo, s, s, localMat(frng.range(-len * 0.22, len * 0.22), f.height * 0.6, 0.003, 0, m4), '#ffffff', 0.055);
       } else {
-        const w = Math.min(len * 0.8, 3.6);
-        decal(atlas.word, w, w * 0.1875, localMat(0, f.height * 0.7, 0.003, 0, m4), '#ffffff', 0.05);
+        const w = Math.min(len * 0.82, 3.4);
+        decal(atlas.word, w, w / atlas.aspect.word, localMat(0, f.height * 0.72, 0.003, 0, m4), '#ffffff', 0.06);
       }
 
       // routes
@@ -400,19 +422,21 @@ export class GymEnvironment {
     }
 
     // ── backlit sign + windows (emissive) ──
+    // CHIRAL HQ: the official lockup backlit on a black fascia with a CHIRAL pink light line under it
     const signTex = signTexture();
-    const signY = rope ? 16.3 : Hc - 1.35;
-    const signW = 5.2;
-    const signMat = new THREE.MeshBasicMaterial({ map: signTex, transparent: true, depthWrite: false, color: new THREE.Color(2.4, 2.15, 1.9), fog: true });
+    const signY = rope ? 16.3 : Hc - 1.3;
+    const signW = 6.4;
+    const signH = signW / SIGN_ASPECT;
+    const signMat = new THREE.MeshBasicMaterial({ map: signTex, transparent: true, depthWrite: false, color: SIGN_COLOR.clone(), fog: true });
     materials.push(signMat);
-    const signGeo = new THREE.PlaneGeometry(signW, signW / 4);
+    const signGeo = new THREE.PlaneGeometry(signW, signH);
     geometries.push(signGeo);
     const sign = new THREE.Mesh(signGeo, signMat);
-    sign.position.set(0.25, signY, zBack + 0.06);
+    sign.position.set(0, signY, zBack + 0.07);
     sign.name = 'hall:sign';
     group.add(sign);
-    darkBatch.add(new THREE.BoxGeometry(signW + 0.5, signW / 4 + 0.4, 0.05), tr(0.25, signY, zBack + 0.02), '#121316');
-    emissiveBatch.add(new THREE.BoxGeometry(signW + 0.5, 0.015, 0.02), tr(0.25, signY - signW / 8 - 0.2, zBack + 0.06), new THREE.Color(4.5, 1.25, 0.4));
+    darkBatch.add(new RoundedBoxGeometry(signW + 0.6, signH + 0.34, 0.08, 2, 0.025), tr(0, signY, zBack + 0.03), '#0f1012');
+    emissiveBatch.add(new THREE.BoxGeometry(signW + 0.6, 0.016, 0.02), tr(0, signY - signH / 2 - 0.17, zBack + 0.075), new THREE.Color(PALETTE.signal).multiplyScalar(5.2));
 
     const winTex = windowTexture();
     const winMat = new THREE.MeshBasicMaterial({ map: winTex, color: new THREE.Color(1.5, 1.7, 1.8), fog: true });
@@ -487,14 +511,19 @@ export class GymEnvironment {
       const banMat = new THREE.MeshStandardMaterial({ map: bannerTexture(), roughness: 0.85, side: THREE.DoubleSide, vertexColors: true });
       materials.push(banMat);
       const banners = new Batch();
-      const bh = rope ? 6 : 3.4;
-      for (const [x, z] of [[-9.6, 8], [9.6, 8], [-9.6, 15], [9.6, 15]] as const) {
-        const g = new THREE.PlaneGeometry(1.15, bh, 1, 6);
+      const bh = rope ? 4.6 : 3.3;
+      const bw = bh * BANNER_ASPECT;
+      // black / white / pink / black: the tee colourways down the hall
+      const placements = [[-9.6, 8, 0], [9.6, 8, 2], [-9.6, 15, 1], [9.6, 15, 0]] as const;
+      for (const [x, z, variant] of placements) {
+        const g = new THREE.PlaneGeometry(bw, bh, 1, 6);
         const p = g.getAttribute('position') as THREE.BufferAttribute;
         for (let i = 0; i < p.count; i++) p.setZ(i, Math.sin((p.getY(i) / bh) * 3) * 0.05);
+        const buv = g.getAttribute('uv') as THREE.BufferAttribute;
+        for (let i = 0; i < buv.count; i++) buv.setX(i, (variant + buv.getX(i)) / BANNER_VARIANTS);
         g.computeVertexNormals();
         banners.add(g, tr(x, Hc - 1.15 - bh / 2, z, 0, x < 0 ? Math.PI / 2.6 : -Math.PI / 2.6, 0));
-        darkBatch.add(new THREE.CylinderGeometry(0.015, 0.015, 1.3, 6), tr(x, Hc - 1.1, z, 0, x < 0 ? Math.PI / 2.6 : -Math.PI / 2.6, Math.PI / 2), '#0b0c0d');
+        darkBatch.add(new THREE.CylinderGeometry(0.015, 0.015, bw + 0.15, 6), tr(x, Hc - 1.1, z, 0, x < 0 ? Math.PI / 2.6 : -Math.PI / 2.6, Math.PI / 2), '#0b0c0d');
       }
       const banGeo = banners.build(bake);
       if (banGeo) {
@@ -609,7 +638,7 @@ export class GymEnvironment {
       group.add(motes);
     }
 
-    return { key, group, floorGroup, materials, geometries, motes, ceiling: Hc };
+    return { key, group, floorGroup, signMat, materials, geometries, motes, ceiling: Hc };
   }
 
   private buildPads(
@@ -690,19 +719,20 @@ export class GymEnvironment {
       const midX = (ax + bx) / 2 + nx * 2.3;
       const midZ = (az + bz) / 2 + nz * 2.3;
       seamB.add(new THREE.BoxGeometry(len, 0.008, 0.08), m4.compose(new THREE.Vector3(midX, H + 0.002, midZ), new THREE.Quaternion().setFromEuler(new THREE.Euler(0, yaw, 0)), new THREE.Vector3(1, 1, 1)), '#16171a');
-      // big tone-on-tone wordmark on the pad top
+      // big tone-on-tone CHIRAL SPORTS lockup printed on the pad top (outer row)
       if (len > 3) {
         const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0)).premultiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(0, yaw, 0)));
-        const lx = (ax + bx) / 2 + nx * 3.35;
-        const lz = (az + bz) / 2 + nz * 3.35;
+        const lx = (ax + bx) / 2 + nx * 3.4;
+        const lz = (az + bz) / 2 + nz * 3.4;
         m4.compose(new THREE.Vector3(lx, H + 0.006, lz), q, new THREE.Vector3(1, 1, 1));
-        const w = 2.2;
-        const word = new THREE.PlaneGeometry(w, w * 0.1875);
-        remapUV(word, atlas.word);
-        decals.add(word, m4, '#ffffff', { alpha: 0.07 });
+        const w = Math.min(len * 0.62, 2.9);
+        const lock = new THREE.PlaneGeometry(w, w / atlas.aspect.lockup);
+        remapUV(lock, atlas.lockup);
+        decals.add(lock, m4, '#ffffff', { alpha: 0.075 });
       }
     }
-    // orange stripe inset from the pad's front edge (mitred, so segments meet cleanly)
+    // CHIRAL pink stripe inset from the pad's front edge (mitred, so segments meet cleanly), with
+    // the mark printed in pink just behind it at the ends of the main wall's pad
     const stripe = offsetPolyline(fl, 4.52);
     for (let i = 0; i < stripe.length - 1; i++) {
       const [ax, az] = stripe[i];
@@ -714,6 +744,18 @@ export class GymEnvironment {
       const g2 = new THREE.PlaneGeometry(len, 0.035);
       remapUV(g2, atlas.solid);
       decals.add(g2, m4, PALETTE.signal, { alpha: 0.95 });
+      if (i === 2) {
+        // main wall's pad: the mark in pink near both ends, set just behind the stripe
+        const nx = -(bz - az) / len;
+        const nz = (bx - ax) / len;
+        for (const t of [0.1, 0.9]) {
+          const mw = 0.34;
+          m4.compose(new THREE.Vector3(ax + (bx - ax) * t - nx * 0.2, H + 0.0065, az + (bz - az) * t - nz * 0.2), q, new THREE.Vector3(1, 1, 1));
+          const mg = new THREE.PlaneGeometry(mw, mw);
+          remapUV(mg, atlas.logo);
+          decals.add(mg, m4, PALETTE.signal, { alpha: 0.92 });
+        }
+      }
     }
     const seamGeo = seamB.build();
     if (seamGeo) {
