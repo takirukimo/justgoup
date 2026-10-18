@@ -1,7 +1,10 @@
 // INPUT QA: drives dev/input.html with real touch (CDP) and mouse input and asserts through the sim.
-// usage: node scripts/input-check.mjs [baseUrl] [--out dir] [--seed n] [--grade n]
-//   baseUrl defaults to http://localhost:5204 (run `npx vite --port 5204` first).
-// Screens: <out>/check-before.png, check-during.png, check-after.png (+ foot/hip/rope variants).
+// usage: node scripts/input-check.mjs [baseUrl] [--out dir] [--seed n] [--grade n] [--only ABF…]
+//   baseUrl defaults to http://localhost:5204 (run `npx vite --config dev/input.vite.config.mjs --port 5204` first).
+//   --only runs just the listed sections: A hand grab · B foot / second finger / hips · C gating + keys ·
+//   D rope clip · E lifecycle · F deadpoint flick · G chalk-up drag + HUD chalk · H shake-out drag ·
+//   I double dyno (two fingers on the hips) · J Pure mode.
+// Screens: <out>/check-before.png, check-during.png, check-after.png (+ foot/hip/rope/dyno/chalk/shake/duo/pure).
 import { chromium } from 'playwright-core';
 import { mkdirSync } from 'node:fs';
 
@@ -14,6 +17,8 @@ const base = args[0] && !args[0].startsWith('--') ? args[0] : 'http://localhost:
 const out = opt('out', '/tmp/claude-0/shots/input');
 const seed = +opt('seed', 3);
 const grade = +opt('grade', 2);
+const only = opt('only', '');
+const run = (k) => !only || only.includes(k);
 mkdirSync(out, { recursive: true });
 
 const browser = await chromium.launch({
@@ -40,8 +45,14 @@ async function open(query) {
   return { page, cdp, logs };
 }
 
-const touch = (cdp, type, pts) =>
-  cdp.send('Input.dispatchTouchEvent', { type, touchPoints: pts.map((p) => ({ x: p.x, y: p.y, id: p.id ?? 0, radiusX: 6, radiusY: 6, force: 1 })) });
+// Touch events carry explicit timestamps from a virtual clock: under headless SwiftShader a frame can
+// take seconds and real dispatch times would turn every flick into a crawl. `dt` (s) advances the clock;
+// a lift defaults to a finger that rested a moment (no flick) unless the caller says otherwise.
+let vclock = 0;
+const touch = (cdp, type, pts, dt = type === 'touchEnd' ? 0.3 : 0.034) => {
+  vclock = vclock ? vclock + dt : Date.now() / 1000;
+  return cdp.send('Input.dispatchTouchEvent', { type, timestamp: vclock, touchPoints: pts.map((p) => ({ x: p.x, y: p.y, id: p.id ?? 0, radiusX: 6, radiusY: 6, force: 1 })) });
+};
 
 /** Touch-drag from a → b in `steps` moves; optional callback at a given step (mid-drag screenshot). */
 async function drag(page, cdp, a, b, steps = 14, onStep) {
@@ -85,7 +96,7 @@ const holdOf = (page, limb) => page.evaluate((l) => window.__sim.getState().limb
 const events = (page) => page.evaluate(() => window.__events.map((e) => ({ type: e.type, p: e.payload })));
 
 // ───────────── A: right hand touch-drag onto a reachable hold ─────────────
-{
+if (run('A')) {
   const { page, cdp, logs } = await open(`seed=${seed}&grade=${grade}&invincible=1`);
   const plan = await planMove(page, 'RH');
   ok(!!plan && !!plan.handle, `RH plan: ${plan ? `${plan.from} → ${plan.holdId} (predicted ${plan.quality.toFixed(2)})` : 'none'}`);
@@ -129,7 +140,7 @@ const events = (page) => page.evaluate(() => window.__events.map((e) => ({ type:
 }
 
 // ───────────── B: foot drag, a second finger ignored, hip drag ─────────────
-{
+if (run('B')) {
   const { page, cdp } = await open(`seed=${seed}&grade=${grade}&invincible=1`);
   const plan = await planMove(page, 'LF', false);
   ok(!!plan, `LF plan: ${plan ? `${plan.from} → ${plan.holdId}` : 'none'}`);
@@ -174,7 +185,7 @@ const events = (page) => page.evaluate(() => window.__events.map((e) => ({ type:
 }
 
 // ───────────── C: tutorial gating + keyboard-armed mouse drag ─────────────
-{
+if (run('C')) {
   const { page, cdp } = await open(`seed=${seed}&grade=${grade}&invincible=1&allow=LH`);
   const rh = await page.evaluate(() => window.__ctl.handlePosition('RH'));
   await touch(cdp, 'touchStart', [rh]);
@@ -204,7 +215,7 @@ const events = (page) => page.evaluate(() => window.__events.map((e) => ({ type:
 }
 
 // ───────────── D: rope mode clip label ─────────────
-{
+if (run('D')) {
   const { page, cdp } = await open(`mode=rope&seed=${seed}&grade=1&invincible=1`);
   const plan = await page.evaluate(() => {
     const sim = window.__sim;
@@ -240,7 +251,7 @@ const events = (page) => page.evaluate(() => window.__events.map((e) => ({ type:
 }
 
 // ───────────── E: lifecycle, highlight merging, enable/disable ─────────────
-{
+if (run('E')) {
   const { page } = await open(`seed=${seed}&grade=${grade}&invincible=1`);
   const r = await page.evaluate(async () => {
     const ctl = window.__ctl;
@@ -282,6 +293,283 @@ const events = (page) => page.evaluate(() => window.__events.map((e) => ({ type:
   ok(!r.reenabled.hidden && r.reenabled.pe === '', 'setEnabled(true) shows the handles again');
   ok(r.ends === 1, `exactly one drag-end (${r.ends})`);
   ok(r.disposed.cleared && r.disposed.gone, `dispose() removes the overlay and restores highlights (${r.disposed.own})`);
+  await page.close();
+}
+
+// ───────────── shared helpers for the Phase B gestures ─────────────
+
+const simEvents = async (page, since = 0) =>
+  (await events(page)).slice(since).filter((e) => e.type === 'sim:event').map((e) => e.p);
+const eventCount = (page) => page.evaluate(() => window.__events.length);
+const preview = (page) => page.evaluate(() => window.__ctl.releasePreview);
+/** Wait (≤ ms) until a sim event matching `pred` shows up after index `since`. */
+async function waitEvent(page, since, pred, ms = 3000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    const ev = (await simEvents(page, since)).find(pred);
+    if (ev) return ev;
+    await page.waitForTimeout(60);
+  }
+  return null;
+}
+const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+
+/** A hold a hand could throw at from the start (a feasible dyno candidate above it, a long throw). */
+const planThrow = (page) =>
+  page.evaluate(() => {
+    const sim = window.__sim;
+    const st = sim.getState();
+    const r = window.__renderer;
+    let best = null;
+    for (const limb of ['RH', 'LH']) {
+      const o = st.limbs[limb === 'RH' ? 'LH' : 'RH'];
+      const L = st.limbs[limb];
+      if (!o.holdId) continue;
+      for (const h of sim.boulder.holds) {
+        if (h.role === 'deco' || h.type === 'foot' || h.y <= L.pos.y) continue;
+        const d = sim.dynoCandidate(limb, h);
+        // short throws become static reaches once the drag pulls the body up: aim well past the reach
+        if (!d || d.holdId !== h.id || !d.feasible || d.rise < 0.38) continue;
+        if (!best || d.rise > best.rise) best = { limb, holdId: h.id, rise: d.rise, kind: d.kind, hold: r.wallToScreen({ x: h.x, y: h.y }), limbS: r.wallToScreen(L.pos, L.depth), handle: window.__ctl.handlePosition(limb) };
+      }
+    }
+    return best;
+  });
+
+// ───────────── F: deadpoint — a fast flick toward a hold beyond static reach ─────────────
+if (run('F')) {
+  const { page, cdp, logs } = await open(`seed=3&grade=4&style=dyno&invincible=1`);
+  const plan = await planThrow(page);
+  ok(!!plan && !!plan.handle, `throw plan: ${plan ? `${plan.limb} → ${plan.holdId} (${plan.kind}, +${(plan.rise * 100).toFixed(0)} cm)` : 'none'}`);
+  if (plan) {
+    const a = { x: plan.handle.x, y: plan.handle.y };
+    const b = { x: a.x + (plan.hold.x - plan.limbS.x), y: a.y + (plan.hold.y - plan.limbS.y) };
+    await drag(page, cdp, a, b, 16);
+    await page.waitForTimeout(450);
+    const pv = await preview(page);
+    // (feasibility can flip mid-drag: the reach pull stands the climber up and spends the leg drive)
+    ok(pv && pv.kind === 'throw' && pv.holdId === plan.holdId, `aiming past static reach previews a throw (${JSON.stringify(pv)})`);
+    const tag = await page.evaluate(() => document.querySelector('.jgl-tag.on')?.textContent ?? '');
+    ok(/DEADPOINT|DYNO|TOO FAR/.test(tag) && /\+\d+ CM|\+\d\.\d M/.test(tag), `throw tag reads "${tag}"`);
+    await page.screenshot({ path: `${out}/check-dyno-aim.png` });
+    // pull back a little, hold still, then flick through to the hold and lift while moving
+    const back = lerp(a, b, 0.62);
+    for (let i = 1; i <= 6; i++) {
+      await touch(cdp, 'touchMove', [lerp(b, back, i / 6)]);
+      await page.waitForTimeout(30);
+    }
+    await page.waitForTimeout(200);
+    const since = await eventCount(page);
+    await touch(cdp, 'touchMove', [back], 0.2); // rest
+    for (let i = 1; i <= 3; i++) await touch(cdp, 'touchMove', [lerp(back, b, i / 3)], 0.014);
+    await touch(cdp, 'touchEnd', [], 0.008);
+    const start = await waitEvent(page, since, (e) => e.type === 'dyno-start', 1500);
+    const rv = await page.evaluate(() => window.__ctl.lastVel);
+    console.log(`      release velocity ${Math.hypot(rv.x, rv.y).toFixed(2)} m/s (${rv.x.toFixed(2)}, ${rv.y.toFixed(2)})`);
+    ok(!!start && start.holdId === plan.holdId && start.limbs.includes(plan.limb), `flick throws: ${start ? `${start.kind} ${start.limbs.join('+')} → ${start.holdId} power ${start.power.toFixed(2)}` : 'no dyno-start'}`);
+    await page.waitForTimeout(250);
+    await page.screenshot({ path: `${out}/check-dyno-flight.png` });
+    const end = await waitEvent(page, since, (e) => e.type === 'dyno-catch' || e.type === 'dyno-miss', 3000);
+    ok(!!end, `throw resolves (${end ? end.type + (end.type === 'dyno-catch' ? ` q${end.quality.toFixed(2)}` : ` ${end.reason}`) : 'none'})`);
+    if (end && end.type === 'dyno-catch') ok((await holdOf(page, plan.limb)) === plan.holdId, `${plan.limb} caught ${plan.holdId}`);
+    // a slow release on the same kind of target does NOT throw (the hand returns)
+    const plan2 = await planThrow(page);
+    if (plan2 && plan2.handle) {
+      const a2 = { x: plan2.handle.x, y: plan2.handle.y };
+      const b2 = { x: a2.x + (plan2.hold.x - plan2.limbS.x), y: a2.y + (plan2.hold.y - plan2.limbS.y) };
+      await drag(page, cdp, a2, b2, 14);
+      await page.waitForTimeout(350);
+      const s2 = await eventCount(page);
+      await touch(cdp, 'touchEnd', []);
+      await page.waitForTimeout(300);
+      const ev2 = (await simEvents(page, s2)).map((e) => e.type);
+      ok(!ev2.includes('dyno-start'), `a still finger at release does not throw (${ev2.join(', ') || 'no events'})`);
+    }
+  }
+  ok(logs.length === 0, `no page errors${logs.length ? ': ' + logs.join(' | ') : ''}`);
+  await page.close();
+}
+
+// ───────────── G: chalk up — drag a hand to the hips; the HUD CHALK bridge ─────────────
+if (run('G')) {
+  const { page, cdp, logs } = await open(`seed=${seed}&grade=${grade}&invincible=1`);
+  const g = await page.evaluate(() => {
+    const st = window.__sim.getState();
+    const r = window.__renderer;
+    const dx = st.chest.x - st.pelvis.x;
+    const dy = st.chest.y - st.pelvis.y;
+    const l = Math.hypot(dx, dy) || 1;
+    const bag = { x: st.pelvis.x - (dx / l) * 0.1, y: st.pelvis.y - (dy / l) * 0.1 };
+    const L = st.limbs.LH;
+    return { bag: r.wallToScreen(bag), limbS: r.wallToScreen(L.pos, L.depth), handle: window.__ctl.handlePosition('LH') };
+  });
+  const a = { x: g.handle.x, y: g.handle.y };
+  const b = { x: a.x + (g.bag.x - g.limbS.x), y: a.y + (g.bag.y - g.limbS.y) };
+  await drag(page, cdp, a, b, 16);
+  await page.waitForTimeout(500);
+  const pv = await preview(page);
+  ok(pv && pv.kind === 'chalk', `hand over the hips previews a chalk dip (${JSON.stringify(pv)})`);
+  const tag = await page.evaluate(() => document.querySelector('.jgl-tag.on')?.textContent ?? '');
+  ok(/CHALK UP/.test(tag), `chalk tag reads "${tag}"`);
+  await page.screenshot({ path: `${out}/check-chalk-aim.png` });
+  const since = await eventCount(page);
+  await touch(cdp, 'touchEnd', []);
+  const cs = await waitEvent(page, since, (e) => e.type === 'chalk-start' && e.limb === 'LH', 1500);
+  ok(!!cs, 'releasing at the hips chalks up (chalk-start LH)');
+  const cd = await waitEvent(page, since, (e) => e.type === 'chalk-done' && e.limb === 'LH', 4000);
+  ok(!!cd, 'chalk-done LH after the dip');
+  await page.waitForTimeout(400);
+  // HUD CHALK button → bus 'ui:chalk' → LimbControls → sim.chalkUp
+  const s2 = await eventCount(page);
+  await page.evaluate(() => window.__bus.emit('ui:chalk', { hand: 'RH' }));
+  const c2 = await waitEvent(page, s2, (e) => e.type === 'chalk-start' && e.limb === 'RH', 1500);
+  ok(!!c2, "'ui:chalk' (HUD button) chalks the right hand");
+  const busy = await page.evaluate(() => window.__sim.getState().limbs.RH.chalking === true || window.__sim.getState().limbs.RH.busy);
+  ok(busy, 'the right hand is busy in the bag');
+  await page.waitForTimeout(1600);
+  // gated hand: blocked, no chalk
+  await page.evaluate(() => window.__ctl.setAllowed(['LF'], false));
+  const s3 = await eventCount(page);
+  await page.evaluate(() => window.__bus.emit('ui:chalk', { hand: 'LH' }));
+  await page.waitForTimeout(300);
+  const ev3 = (await events(page)).slice(s3);
+  ok(ev3.some((e) => e.type === 'input:blocked' && e.p.limb === 'LH') && !ev3.some((e) => e.type === 'sim:event' && e.p.type === 'chalk-start'), 'a gated hand refuses the HUD chalk (input:blocked)');
+  ok(logs.length === 0, `no page errors${logs.length ? ': ' + logs.join(' | ') : ''}`);
+  await page.close();
+}
+
+// ───────────── H: shake out — drop a hand down beside the body ─────────────
+if (run('H')) {
+  const { page, cdp, logs } = await open(`seed=${seed}&grade=0&invincible=1`);
+  const g = await page.evaluate(() => {
+    const st = window.__sim.getState();
+    const r = window.__renderer;
+    const dx = st.chest.x - st.pelvis.x;
+    const dy = st.chest.y - st.pelvis.y;
+    const l = Math.hypot(dx, dy) || 1;
+    const ux = dx / l;
+    const uy = dy / l;
+    const L = st.limbs.RH;
+    // 0.5 m down the spine from the shoulder, 0.15 m out to the right
+    const p = { x: L.anchor.x - ux * 0.5 + uy * 0.15, y: L.anchor.y - uy * 0.5 - ux * 0.15 };
+    return { p: r.wallToScreen(p), limbS: r.wallToScreen(L.pos, L.depth), handle: window.__ctl.handlePosition('RH') };
+  });
+  const a = { x: g.handle.x, y: g.handle.y };
+  const b = { x: a.x + (g.p.x - g.limbS.x), y: a.y + (g.p.y - g.limbS.y) };
+  await drag(page, cdp, a, b, 16);
+  await page.waitForTimeout(500);
+  const pv = await preview(page);
+  await page.screenshot({ path: `${out}/check-shake-aim.png` });
+  if (pv && pv.kind === 'shake') {
+    ok(true, 'hand down beside the body previews a shake-out');
+    const since = await eventCount(page);
+    await touch(cdp, 'touchEnd', []);
+    const ss = await waitEvent(page, since, (e) => e.type === 'shake-out-start' && e.limb === 'RH', 1500);
+    ok(!!ss, 'releasing there shakes out (shake-out-start RH)');
+  } else {
+    console.log(`SKIP  shake-out not offered from this stance (${JSON.stringify(pv)})`);
+    await touch(cdp, 'touchEnd', []);
+  }
+  ok(logs.length === 0, `no page errors${logs.length ? ': ' + logs.join(' | ') : ''}`);
+  await page.close();
+}
+
+// ───────────── I: double dyno — two fingers on the hip handle, flick ─────────────
+if (run('I')) {
+  const { page, cdp, logs } = await open(`seed=1&grade=4&style=dyno&invincible=1`);
+  // find a problem whose start offers a double dyno
+  let found = null;
+  for (let s = 1; s <= 40 && !found; s++) {
+    found = await page.evaluate(async (s) => {
+      window.__load(s);
+      await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(res))));
+      const p = window.__ctl.previewDoubleDyno();
+      return p && p.feasible ? { seed: s, ...p } : null;
+    }, s);
+  }
+  ok(!!found, `double-dyno start found: ${found ? `seed ${found.seed} → ${found.holdId} +${(found.rise * 100).toFixed(0)} cm` : 'none'}`);
+  if (found) {
+    await page.waitForTimeout(600);
+    const h = await page.evaluate(() => window.__ctl.handlePosition('HIP'));
+    const f1 = { x: h.x - 8, y: h.y, id: 1 };
+    const f2 = { x: h.x + 14, y: h.y + 6, id: 2 };
+    await touch(cdp, 'touchStart', [f1]);
+    await page.waitForTimeout(120);
+    await touch(cdp, 'touchStart', [f1, f2], 0.12);
+    await page.waitForTimeout(500);
+    const pv = await preview(page);
+    ok(pv && pv.kind === 'double' && pv.holdId === found.holdId, `two fingers on the hips arm a double dyno (${JSON.stringify(pv)})`);
+    const tag = await page
+      .waitForFunction(() => [...document.querySelectorAll('.jgl-tag.on')].map((t) => t.textContent).join(' ').match(/DYNO.*/)?.[0], null, { timeout: 4000 })
+      .then((h) => h.jsonValue())
+      .catch(() => '');
+    ok(/DYNO/.test(tag), `double-dyno tag reads "${tag}"`);
+    await page.screenshot({ path: `${out}/check-duo-aim.png` });
+    const since = await eventCount(page);
+    // flick both fingers up the screen, lift one while moving
+    await touch(cdp, 'touchMove', [f1, f2], 0.4);
+    for (let i = 1; i <= 4; i++) await touch(cdp, 'touchMove', [{ ...f1, y: f1.y - i * 22 }, { ...f2, y: f2.y - i * 22 }], 0.014);
+    await touch(cdp, 'touchEnd', [{ ...f1, y: f1.y - 88 }], 0.008);
+    await touch(cdp, 'touchEnd', [], 0.03);
+    await page.waitForTimeout(150);
+    const all = (await events(page)).slice(since);
+    const dy = all.find((e) => e.type === 'input:dyno');
+    ok(!!dy && dy.p.thrown && dy.p.holdId === found.holdId, `input:dyno ${dy ? JSON.stringify(dy.p) : 'missing'}`);
+    const start = all.find((e) => e.type === 'sim:event' && e.p.type === 'dyno-start');
+    ok(!!start && start.p.kind === 'dyno' && start.p.limbs.length === 2, `sim threw a double dyno (${start ? `${start.p.kind} ${start.p.limbs.join('+')} power ${start.p.power.toFixed(2)}` : 'none'})`);
+    const hipEnd = all.findIndex((e) => e.type === 'input:hip-end');
+    ok(!!start && hipEnd > all.indexOf(start), 'hip-end follows the throw events');
+    await page.waitForTimeout(200);
+    await page.screenshot({ path: `${out}/check-duo-flight.png` });
+    const end = await waitEvent(page, since, (e) => e.type === 'dyno-catch' || e.type === 'dyno-miss', 3000);
+    ok(!!end, `double dyno resolves (${end ? end.type : 'none'})`);
+    // a slow two-finger lift cancels: nothing thrown
+    await page.waitForTimeout(1200);
+    const h2 = await page.evaluate(() => window.__ctl.handlePosition('HIP'));
+    if (h2) {
+      const s2 = await eventCount(page);
+      const g1 = { x: h2.x, y: h2.y, id: 1 };
+      const g2 = { x: h2.x + 16, y: h2.y, id: 2 };
+      await touch(cdp, 'touchStart', [g1]);
+      await page.waitForTimeout(80);
+      await touch(cdp, 'touchStart', [g1, g2], 0.08);
+      await page.waitForTimeout(300);
+      for (let i = 1; i <= 4; i++) await touch(cdp, 'touchMove', [{ ...g1, y: g1.y - i * 4 }, { ...g2, y: g2.y - i * 4 }], 0.12);
+      await touch(cdp, 'touchEnd', [g1], 0.3);
+      await touch(cdp, 'touchEnd', [], 0.05);
+      await page.waitForTimeout(200);
+      const ev2 = (await events(page)).slice(s2);
+      ok(!ev2.some((e) => e.type === 'sim:event' && e.p.type === 'dyno-start'), 'a slow two-finger lift does not throw');
+    }
+  }
+  ok(logs.length === 0, `no page errors${logs.length ? ': ' + logs.join(' | ') : ''}`);
+  await page.close();
+}
+
+// ───────────── J: Pure mode — invisible handles, a finger near the hand picks it ─────────────
+if (run('J')) {
+  const { page, cdp, logs } = await open(`seed=${seed}&grade=${grade}&invincible=1&pure=1`);
+  const vis = await page.evaluate(() => ({
+    pure: window.__ctl.isPure,
+    opacity: getComputedStyle(document.querySelector('.jgl-h[data-limb="RH"]')).opacity,
+  }));
+  ok(vis.pure && vis.opacity === '0', `pure mode hides the handles (opacity ${vis.opacity})`);
+  await page.screenshot({ path: `${out}/check-pure-idle.png` });
+  const plan = await planMove(page, 'RH');
+  if (plan) {
+    const a = { x: plan.limb.x + 6, y: plan.limb.y + 4 };
+    const b = { x: a.x + (plan.hold.x - plan.limb.x), y: a.y + (plan.hold.y - plan.limb.y) };
+    await drag(page, cdp, a, b, 14);
+    await page.waitForTimeout(300);
+    const st = await page.evaluate(() => ({ d: window.__ctl.dragging, hl: window.__renderer.highlights.prev.length, tags: document.querySelectorAll('.jgl-tag.on').length }));
+    ok(st.d === 'RH', `a finger on the real hand picks it (dragging ${st.d})`);
+    ok(st.hl === 0 && st.tags === 0, `no highlights or labels in pure mode (${st.hl} highlights, ${st.tags} tags)`);
+    await page.screenshot({ path: `${out}/check-pure-drag.png` });
+    await touch(cdp, 'touchEnd', []);
+    await page.waitForTimeout(300);
+    ok((await holdOf(page, 'RH')) === plan.holdId, `pure drag still grabs ${plan.holdId}`);
+  }
+  ok(logs.length === 0, `no page errors${logs.length ? ': ' + logs.join(' | ') : ''}`);
   await page.close();
 }
 

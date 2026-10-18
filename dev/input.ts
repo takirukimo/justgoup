@@ -5,12 +5,14 @@
 //   seed=<n> grade=<0..12> mode=boulder|rope|tutorial   angle=<deg> (override)
 //   q=low|medium|high   assist=0 (hide labels/arcs)   allow=RH,LF (tutorial gating)   hips=0|1
 //   invincible=1   fixed=1 (fixed 1/60 dt)   dev=0 (hide the dev HUD bands)
+//   style=<RouteStyle> (generator archetype, e.g. dyno)   pure=1 (Pure mode: invisible handles)
 
 import { GameRenderer } from '../src/render/renderer';
 import { LimbControls } from '../src/input/limb-controls';
 import { ClimberSim, RopeSystem, generateBoulder, generateRopeRoute, gradeLabel, tutorialBoulder } from '../src/game';
 import { bus } from '../src/core/events';
-import type { BoulderDef, LimbId, QualityLevel } from '../src/core/types';
+import type { BoulderDef, LimbId, QualityLevel, RouteStyle } from '../src/core/types';
+import * as game from '../src/game';
 import type { SimEvent } from '../src/core/contracts';
 
 const qs = new URLSearchParams(location.search);
@@ -42,7 +44,7 @@ function makeBoulder(): BoulderDef {
   let b: BoulderDef;
   if (mode === 'tutorial') b = tutorialBoulder();
   else if (mode === 'rope') b = generateRopeRoute({ seed, grade });
-  else b = generateBoulder({ seed, grade });
+  else b = generateBoulder({ seed, grade, ...(qs.get('style') ? { style: qs.get('style') as RouteStyle } : {}) });
   if (qs.has('angle')) b = { ...b, wallAngle: num('angle', b.wallAngle) };
   return b;
 }
@@ -103,10 +105,10 @@ bus.on('input:blocked', (e) => pushLog(`BLOCKED ${e.limb}`));
 
 // QA: every bus message this harness cares about, in order (read by scripts/input-check.mjs)
 const qaEvents: { type: string; payload?: unknown }[] = [];
-for (const type of ['sim:event', 'input:drag-start', 'input:drag-move', 'input:drag-end', 'input:hip-start', 'input:hip-end', 'input:blocked'] as const) {
+for (const type of ['sim:event', 'input:drag-start', 'input:drag-move', 'input:drag-end', 'input:hip-start', 'input:hip-end', 'input:blocked', 'input:dyno', 'ui:chalk'] as const) {
   bus.on(type, (payload: unknown) => {
     qaEvents.push({ type, payload });
-    if (qaEvents.length > 400) qaEvents.shift();
+    if (qaEvents.length > 6000) qaEvents.splice(0, 1000);
   });
 }
 
@@ -177,6 +179,8 @@ declare global {
 await renderer.init();
 load();
 window.__ctl = controls;
+(window as unknown as { __bus: typeof bus; __game: typeof game }).__bus = bus;
+(window as unknown as { __game: typeof game }).__game = game;
 window.__renderer = renderer;
 window.__events = qaEvents;
 window.__load = (s?: number) => {

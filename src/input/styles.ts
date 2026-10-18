@@ -119,6 +119,19 @@ const CSS = /* css */ `
 .jgl-hip.is-drag .jgl-disc { color: ${PALETTE.glacier}; box-shadow: inset 0 1px 0 rgba(255,255,255,.2), inset 0 0 0 1.5px rgba(154,212,222,.7); }
 .jgl-hip .jgl-shd { top: 7px; bottom: -7px; }
 
+/* Phase B: a hand aimed at a throw, the hips arming a double dyno, a body in flight */
+.jgl-h.is-throw .jgl-disc {
+  color: ${PALETTE.chalk};
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.24), inset 0 0 0 1.5px rgba(238,107,121,.9), 0 0 0 3px rgba(213,64,81,.24);
+}
+.jgl-h.is-throw .jgl-trk { stroke: rgba(238,107,121,.7); }
+.jgl-h.is-throw .jgl-glow { background: radial-gradient(closest-side, rgba(213,64,81,.34), rgba(213,64,81,.1) 58%, rgba(213,64,81,0)); }
+.jgl-hip.is-duo .jgl-b { transform: scale(1.22); }
+.jgl-hip.is-duo .jgl-glow { opacity: 1; background: radial-gradient(closest-side, rgba(213,64,81,.42), rgba(213,64,81,.12) 58%, rgba(213,64,81,0)); }
+.jgl-hip.is-duo .jgl-trk { stroke: #EE6B79; stroke-dasharray: none; stroke-width: 2.4; }
+.jgl-hip.is-duo .jgl-disc { color: #fff; box-shadow: inset 0 1px 0 rgba(255,255,255,.2), inset 0 0 0 1.5px rgba(238,107,121,.85); }
+.jgl-h.is-air .jgl-b { opacity: .45; transform: scale(.92); }
+
 /* labels */
 .jgl-tag {
   position: absolute; left: 0; top: 0; height: 23px; padding: 0 9px 0 8px; border-radius: 7px;
@@ -137,7 +150,18 @@ const CSS = /* css */ `
 .jgl-tag.is-clip { background: ${PALETTE.signal}; color: ${PALETTE.basalt}; box-shadow: 0 8px 18px -8px rgba(213,64,81,.75); }
 .jgl-tag.is-clip i { background: #fff; box-shadow: none; }
 .jgl-tag.is-clip span { color: rgba(255,255,255,.92); }
+.jgl-tag.is-hint { color: #EE6B79; box-shadow: inset 0 1px 0 rgba(255,255,255,.07), inset 0 0 0 1px rgba(238,107,121,.42), 0 6px 14px -8px rgba(0,0,0,.8); }
+.jgl-tag.is-hint span { color: ${PALETTE.bone}; }
 .jgl.no-assist .jgl-tag, .jgl.no-assist .jgl-side { display: none; }
+
+/* Pure mode: no visible handles until a finger picks a limb; then only a faint ring */
+.jgl.is-pure .jgl-h { opacity: 0; transition: opacity .18s cubic-bezier(.2,.8,.2,1); }
+.jgl.is-pure .jgl-h.is-drag { opacity: 1; }
+.jgl.is-pure .jgl-disc, .jgl.is-pure .jgl-glow, .jgl.is-pure .jgl-shd, .jgl.is-pure .jgl-arc,
+.jgl.is-pure .jgl-halo, .jgl.is-pure .jgl-spin, .jgl.is-pure .jgl-key, .jgl.is-pure .jgl-tag,
+.jgl.is-pure .jgl-b::after { display: none; }
+.jgl.is-pure .jgl-trk { stroke: rgba(246,244,239,.26); stroke-width: 1.5; stroke-dasharray: none; }
+.jgl.is-pure .jgl-h.is-drag .jgl-b { transform: scale(.82); }
 
 @keyframes jgl-pulse { from { transform: scale(1); } to { transform: scale(1.085); } }
 @keyframes jgl-spin { to { transform: rotate(360deg); } }

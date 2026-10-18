@@ -14,6 +14,24 @@
 //     anchor → target line, a reticle at the target, reachable / candidate hold highlights through
 //     the renderer, a "GOOD · JUG" grip label, and in rope mode a "CLIP" label on the quickdraw;
 //   • the hip handle pulls the hips toward the finger (sim.setHipTarget) with a soft arrow.
+// Phase B moves:
+//   • release velocity: the finger's wall-local velocity over the last ~90 ms (VelocityTracker) goes
+//     to sim.endDrag(limb, { velocity }), so a hand flicked toward a hold beyond its static reach
+//     throws a deadpoint / dyno. While the target is such a hold (sim.dynoCandidate) the overlay shows
+//     a throw preview instead of the grip reticle: a pink ballistic arc with a FLICK cue, a segmented
+//     throw reticle on the hold and a "DEADPOINT · +18 CM" tag (grey "TOO FAR" when it can't be thrown);
+//   • a dragged hand also shows two subtle release targets that fade in as the finger nears them: the
+//     chalk bag behind the hips (release there → the sim chalks up) and the shake-out lane down beside
+//     the body (release there → shake out), each lighting up with a CHALK UP / SHAKE OUT tag;
+//   • double dyno: a second finger landing on the hip handle while it is held arms a two-hand throw
+//     (also Shift + mouse on desktop). The fingers aim (the target is the matchable hold beyond
+//     static reach closest to the aim direction, previewed with two arcs), and a flick toward it
+//     releases sim.dyno('both', holdId, power); a slow lift cancels. A one-finger hip drag hints
+//     "DYNO · 2 FINGERS + FLICK" the first few times a double dyno is on;
+//   • HUD CHALK buttons arrive as 'ui:chalk' on the bus (bus-events.ts) → sim.chalkUp(hand); C on a
+//     keyboard chalks the armed (else the greasier) hand;
+//   • Pure mode (pure.ts): handles, leaders, labels, reach envelope and highlights are hidden; a
+//     finger landing near a hand / foot / the hips picks that limb and shows only a faint ring.
 // Handles repel each other (and the reticle / aimed hold) in screen space, stay inside the safe
 // viewport, carry a stress ring (green → amber → red, pulsing + trembling when overloaded) and a
 // spinner while the hand is busy clipping. Per-frame work is allocation-light: cached DOM nodes,
@@ -25,16 +43,21 @@
 //     are routed through this controller and merged with the drag highlights, so a drag never
 //     wipes a tutorial ring and clearing the drag highlights restores theirs.
 
-import type { CameraMode, ClimberSimAPI, HoldHighlight, LimbControlsAPI, RendererAPI } from '../core/contracts';
+import type { CameraMode, ClimberSimAPI, DynoPreview, HoldHighlight, LimbControlsAPI, RendererAPI } from '../core/contracts';
 import type { ClimberState, HoldDef, HoldType, LimbId, LimbSnapshot, QuickdrawDef, Vec2 } from '../core/types';
 import { bus } from '../core/events';
-import { PALETTE } from '../config/brand';
+import { FONTS, PALETTE } from '../config/brand';
 import { BODY, GAME, SIM } from '../config/tuning';
 import { clamp, damp } from '../core/math';
+import { canMatch, usableByHand } from '../game/holds';
+import './bus-events';
 import { Homography } from './homography';
 import { HandleLayout, type SafeRect } from './layout';
 import { FOOT_GLYPH, HAND_GLYPH, HIP_GLYPH } from './glyphs';
+import { onPureMode } from './pure';
+import { alongSpeed, chalkBagAt, flickPower, frictionWord, inChalkZone, inShakeLane, isFlick, SHAKE_LANE, shakeLanePoint, spineUp, throwWord } from './release';
 import { ensureLimbControlStyles } from './styles';
+import { VelocityTracker } from './velocity';
 
 // ───────────────────────────── constants ─────────────────────────────
 
@@ -74,7 +97,13 @@ const F_BUSY = 64;
 const F_ARMED = 128;
 const F_SMEAR = 256;
 const F_FOCUS = 512;
+const F_THROW = 1024;
+const F_DUO = 2048;
+const F_AIR = 4096;
 const FLAG_CLASSES: readonly (readonly [number, string])[] = [
+  [F_THROW, 'is-throw'],
+  [F_DUO, 'is-duo'],
+  [F_AIR, 'is-air'],
   [F_FOCUS, 'is-focus'],
   [F_FREE, 'is-free'],
   [F_DRAG, 'is-drag'],
@@ -99,6 +128,21 @@ const TYPE_WORD: Record<HoldType, string> = {
 };
 
 const KEY_LIMB: Readonly<Record<string, number>> = { '1': 0, '2': 1, '3': 2, '4': 3, '5': HIP, h: HIP, H: HIP };
+
+/** Hand release targets previewed while a hand is dragged. */
+const ZONE_NONE = 0;
+const ZONE_CHALK = 1;
+const ZONE_SHAKE = 2;
+/** A second finger this close (px) to the held hip handle arms the double dyno. */
+const DUO_R = 84;
+/** Pure mode: hit radius (px) around a real hand / foot and around the pelvis (no visible handles). */
+const PURE_HIT_R = 50;
+const PURE_HIP_R = 36;
+/** One-finger hip drags that may show the double-dyno hint per session. */
+const DUO_HINTS = 4;
+/** Throw colour (CHIRAL pink, lifted for hairlines on the dark wall) and its "too far" grey. */
+const C_THROW = '#EE6B79';
+const C_THROW_DIM = 'rgba(185,190,197,0.7)';
 
 // ── colour tables (precomputed strings: no per-frame string building) ──
 
@@ -138,6 +182,8 @@ const C_SHADOW = 'rgba(8,9,10,0.55)';
 const DASH_ANCHOR: number[] = [4, 4];
 const DASH_RING: number[] = [2, 5];
 const DASH_NONE: number[] = [];
+const DASH_THROW: number[] = [7, 5];
+const FLICK_FONT = `700 9.5px ${FONTS.mono}`;
 
 // ───────────────────────────── types ─────────────────────────────
 
@@ -181,6 +227,15 @@ interface RendererExtras {
  */
 type ReleaseTargetFn = (limb: LimbId, p: Vec2) => { hold: HoldDef | null; clip: QuickdrawDef | null };
 
+/** LimbControls.releasePreview: what a release would do now. */
+export interface ReleasePreview {
+  kind: 'grab' | 'clip' | 'throw' | 'chalk' | 'shake' | 'double' | 'none';
+  holdId: string | null;
+  rise?: number;
+  feasible?: boolean;
+  throwKind?: 'deadpoint' | 'dyno';
+}
+
 export interface LimbControlsOptions {
   /** Extra space (CSS px) kept free of handles beyond the device safe-area insets (HUD bars). */
   reserve?: Partial<typeof RESERVE>;
@@ -197,6 +252,8 @@ export class LimbControls implements LimbControlsAPI {
   private readonly handles: HandleView[] = [];
   private readonly candTag: TagView;
   private readonly clipTag: TagView;
+  private readonly hipTag: TagView;
+  private readonly offChalk: () => void;
   private readonly layout = new HandleLayout();
   private readonly homo = new Homography();
 
@@ -276,6 +333,47 @@ export class LimbControls implements LimbControlsAPI {
   private nextDrawReach: QuickdrawDef | null = null;
   private highlightsDirty = false;
 
+  // release velocity (wall-local target samples of the drag)
+  private readonly vel = new VelocityTracker();
+  private readonly relVel: Vec2 = { x: 0, y: 0 };
+  /** Release velocity of the last hand / foot drag (wall m/s; 0 when the finger had stopped). */
+  readonly lastVel: Vec2 = { x: 0, y: 0 };
+  // throw preview (a hand dragged beyond its static reach toward a hold)
+  private dyno: DynoPreview | null = null;
+  private dynoHold: HoldDef | null = null;
+  // hand release targets: chalk bag (behind the hips) + shake-out lane (beside the body)
+  private zone = ZONE_NONE;
+  private chalkOk = false;
+  private shakeOk = false;
+  private readonly up: Vec2 = { x: 0, y: 1 };
+  private readonly bag: Vec2 = { x: 0, y: 0 };
+
+  // double dyno: a second finger on the held hip handle (or Shift + mouse)
+  private duo = false;
+  private duoPid = -1;
+  private readonly duoX = new Float64Array(2);
+  private readonly duoY = new Float64Array(2);
+  private duoCX = 0;
+  private duoCY = 0;
+  /** Wall-local displacement of the two-finger centroid since the gesture began (the aim). */
+  private readonly duoAim: Vec2 = { x: 0, y: 0 };
+  private readonly duoVel = new VelocityTracker();
+  private duoHold: HoldDef | null = null;
+  private duoRise = 0;
+  private duoFeasible = false;
+  private duoT = 0;
+  /** One-finger hip drags that showed the "2 FINGERS + FLICK" hint (it stops after a few, or once used). */
+  private duoHints = 0;
+  private duoHintOn = false;
+  private duoHintT = 0;
+  private duoUsed = false;
+  private holdMap = new Map<string, HoldDef>();
+  private duoHolds: HoldDef[] = [];
+
+  // Pure mode (pure.ts)
+  private pure = false;
+  private readonly offPure: () => void;
+
   // highlights (merged with other modules' highlights)
   private readonly origSetHighlights: (h: HoldHighlight[]) => void;
   private readonly wrappedSetHighlights: (h: HoldHighlight[]) => void;
@@ -299,6 +397,12 @@ export class LimbControls implements LimbControlsAPI {
   private readonly s1: Vec2 = { x: 0, y: 0 };
   private readonly s2: Vec2 = { x: 0, y: 0 };
   private readonly s3: Vec2 = { x: 0, y: 0 };
+  private readonly laneQuad: Vec2[] = [
+    { x: 0, y: 0 },
+    { x: 0, y: 0 },
+    { x: 0, y: 0 },
+    { x: 0, y: 0 },
+  ];
 
   private readonly ro: ResizeObserver | null = null;
   private readonly mq: MediaQueryList | null = null;
@@ -329,8 +433,10 @@ export class LimbControls implements LimbControlsAPI {
     this.candTag = this.buildTag(doc, '');
     this.clipTag = this.buildTag(doc, 'is-clip');
     this.clipTag.word.textContent = 'CLIP';
+    this.hipTag = this.buildTag(doc, 'is-hint');
     root.appendChild(this.candTag.el);
     root.appendChild(this.clipTag.el);
+    root.appendChild(this.hipTag.el);
 
     this.probe = doc.createElement('div');
     this.probe.style.cssText =
@@ -371,6 +477,8 @@ export class LimbControls implements LimbControlsAPI {
       this.ro.observe(root);
     }
     window.addEventListener('resize', this.onResize);
+    this.offChalk = bus.on('ui:chalk', this.onChalk);
+    this.offPure = onPureMode((v) => this.setPure(v));
     this.measure();
   }
 
@@ -386,6 +494,9 @@ export class LimbControls implements LimbControlsAPI {
     this.prevAng.fill(NaN);
     this.indexHolds(sim);
     this.clearOwnHighlights();
+    this.dyno = null;
+    this.dynoHold = null;
+    this.zone = ZONE_NONE;
     if (!sim) this.setVisible(false);
   }
 
@@ -436,6 +547,7 @@ export class LimbControls implements LimbControlsAPI {
     this.computeHomography(state);
     this.projectHolds(state);
     if (this.dragIdx !== NONE && this.dragIdx !== HIP) this.updateDragQueries(state, d);
+    else if (this.dragIdx === HIP) this.updateHipQueries(state, d);
     this.layoutHandles(state, d);
     this.writeHandles(state);
     this.updateTags(state);
@@ -461,6 +573,8 @@ export class LimbControls implements LimbControlsAPI {
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('blur', this.onBlur);
     window.removeEventListener('resize', this.onResize);
+    this.offChalk();
+    this.offPure();
     this.mq?.removeEventListener?.('change', this.onMotionPref);
     this.ro?.disconnect();
     this.root.remove();
@@ -481,6 +595,43 @@ export class LimbControls implements LimbControlsAPI {
     return h && h.placed ? { x: h.x, y: h.y } : null;
   }
 
+  /**
+   * What releasing the current drag would do right now (tests, tutorial): grab / clip the target,
+   * throw at a hold ('throw', with the sim's preview), dip into the chalk bag, shake out, a double
+   * dyno ('double', hip handle with two fingers), or nothing special ('none'). null when not dragging.
+   */
+  get releasePreview(): ReleasePreview | null {
+    const idx = this.dragIdx;
+    if (idx === NONE) return null;
+    if (idx === HIP) {
+      if (!this.duo) return { kind: 'none', holdId: null };
+      return { kind: 'double', holdId: this.duoHold ? this.duoHold.id : null, rise: this.duoRise, feasible: this.duoFeasible };
+    }
+    if (this.clip) return { kind: 'clip', holdId: this.clip.id };
+    if (this.cand) return { kind: 'grab', holdId: this.cand.id };
+    if (this.dyno && this.dynoHold) return { kind: 'throw', holdId: this.dynoHold.id, rise: this.dyno.rise, feasible: this.dyno.feasible, throwKind: this.dyno.kind };
+    if (this.zone === ZONE_CHALK) return { kind: 'chalk', holdId: null };
+    if (this.zone === ZONE_SHAKE) return { kind: 'shake', holdId: null };
+    return { kind: 'none', holdId: null };
+  }
+
+  /** The double-dyno target a two-finger flick straight up the spine would throw at now, or null. */
+  previewDoubleDyno(): { holdId: string; rise: number; feasible: boolean } | null {
+    const st = this.state;
+    if (!st || this.duo) return this.duo && this.duoHold ? { holdId: this.duoHold.id, rise: this.duoRise, feasible: this.duoFeasible } : null;
+    const ax = this.duoAim.x;
+    const ay = this.duoAim.y;
+    this.duoAim.x = this.duoAim.y = 0;
+    spineUp(st.pelvis, st.chest, this.up);
+    this.pickDuoTarget(st);
+    this.duoAim.x = ax;
+    this.duoAim.y = ay;
+    const h = this.duoHold;
+    const out = h ? { holdId: h.id, rise: this.duoRise, feasible: this.duoFeasible } : null;
+    this.duoHold = null;
+    return out;
+  }
+
   /** Override the HUD bands kept free of handles (CSS px beyond the safe-area insets). */
   setReserve(r: Partial<typeof RESERVE>): void {
     Object.assign(this.reserve, r);
@@ -497,6 +648,49 @@ export class LimbControls implements LimbControlsAPI {
   cancelDrag(): void {
     if (this.dragIdx !== NONE) this.finishDrag();
   }
+
+  /**
+   * Pure mode (Phase D; usually driven by pure.ts setPureMode): the handles stay invisible until a
+   * finger lands near a hand, foot or the hips, which then shows only a faint ring — no leaders,
+   * labels, reach envelope, release targets or hold highlights.
+   */
+  setPure(v: boolean): void {
+    if (this.pure === v) return;
+    this.pure = v;
+    this.root.classList.toggle('is-pure', v);
+    if (v) {
+      this.clearOwnHighlights();
+      this.setTag(this.candTag, false);
+      this.setTag(this.clipTag, false);
+      this.setTag(this.hipTag, false);
+    } else if (this.dragIdx >= 0 && this.dragIdx < 4) this.highlightsDirty = true;
+  }
+
+  get isPure(): boolean {
+    return this.pure;
+  }
+
+  /**
+   * Dip a hand into the chalk bag (the HUD CHALK button sends 'ui:chalk'). Respects tutorial gating
+   * ('input:blocked') and refuses with a shake when the sim says no (other hand not holding, busy…).
+   */
+  chalkUp(hand: 'LH' | 'RH'): boolean {
+    const sim = this.sim;
+    const idx = hand === 'LH' ? 0 : 1;
+    if (!this.enabled || !sim || !this.state || this.state.phase !== 'climbing' || this.dragIdx === idx || this.duo) return false;
+    if (!(this.allowedMask & (1 << idx))) {
+      this.refuse(idx);
+      bus.emit('input:blocked', { limb: hand, reason: 'locked' });
+      return false;
+    }
+    const ok = typeof sim.chalkUp === 'function' && sim.chalkUp(hand);
+    if (!ok) this.refuse(idx);
+    return ok;
+  }
+
+  private readonly onChalk = (e: { hand: 'LH' | 'RH' }): void => {
+    if (e && (e.hand === 'LH' || e.hand === 'RH')) this.chalkUp(e.hand);
+  };
 
   // ═══════════════════════════════ DOM construction ═══════════════════════════════
 
@@ -682,11 +876,16 @@ export class LimbControls implements LimbControlsAPI {
       this.holdSR = new Float64Array(n);
     }
     let k = 0;
+    this.holdMap = new Map();
+    this.duoHolds = [];
     for (const h of holds) {
       if (h.role === 'deco') continue;
       this.holdWX[k] = h.x;
       this.holdWY[k] = h.y;
       this.holdWR[k] = holdRadius(h);
+      this.holdMap.set(h.id, h);
+      // double-dyno targets: hand holds both hands can share
+      if (usableByHand(h) && canMatch(0, h)) this.duoHolds.push(h);
       k++;
     }
     this.holdN = k;
@@ -726,8 +925,21 @@ export class LimbControls implements LimbControlsAPI {
 
   private readonly onPointerDown = (e: PointerEvent): void => {
     if (!this.enabled || !this.visible || !this.sim || !this.state) return;
-    if (this.dragIdx !== NONE) return; // one drag at a time: extra fingers are ignored
     if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (this.dragIdx !== NONE) {
+      // one drag at a time: extra fingers are ignored — except a second finger on the held hip
+      // handle, which arms a double dyno
+      if (this.dragIdx === HIP && !this.duo && e.pointerId !== this.pointerId && e.pointerType !== 'mouse') {
+        const x = e.clientX - this.rootLeft;
+        const y = e.clientY - this.rootTop;
+        const hip = this.handles[HIP];
+        if (Math.hypot(x - hip.x, y - hip.y) <= DUO_R || Math.hypot(x - this.fingerX, y - this.fingerY) <= DUO_R) {
+          e.preventDefault();
+          this.startDuo(e, x, y, false);
+        }
+      }
+      return;
+    }
     const rr = this.root.getBoundingClientRect();
     this.rootLeft = rr.left;
     this.rootTop = rr.top;
@@ -744,6 +956,8 @@ export class LimbControls implements LimbControlsAPI {
         return;
       }
       this.startHipDrag(e, x, y);
+      // desktop: Shift + drag on the hips aims a double dyno with one pointer
+      if (e.shiftKey && e.pointerType === 'mouse') this.startDuo(e, x, y, true);
       return;
     }
     const limb = IDS[idx];
@@ -760,6 +974,7 @@ export class LimbControls implements LimbControlsAPI {
   };
 
   private hitTest(x: number, y: number): number {
+    if (this.pure) return this.pureHitTest(x, y);
     let best = NONE;
     let bestScore = Infinity;
     for (let i = 0; i < 5; i++) {
@@ -785,6 +1000,24 @@ export class LimbControls implements LimbControlsAPI {
     return best;
   }
 
+  /** Pure mode: no visible handles, so a finger picks the nearest real hand / foot (or the hips). */
+  private pureHitTest(x: number, y: number): number {
+    let best = NONE;
+    let bestScore = Infinity;
+    for (let i = 0; i < 4; i++) {
+      const d = Math.hypot(x - this.limbX[i], y - this.limbY[i]);
+      const sc = d / PURE_HIT_R;
+      if (d <= PURE_HIT_R && sc < bestScore) {
+        best = i;
+        bestScore = sc;
+      }
+    }
+    const dh = Math.hypot(x - this.pelvisX, y - this.pelvisY);
+    // the hips lose ties against a hand / foot right next to them
+    if (dh <= PURE_HIP_R && dh / PURE_HIP_R + 0.2 < bestScore) best = HIP;
+    return best;
+  }
+
   private capture(e: PointerEvent): void {
     this.pointerId = e.pointerId;
     try {
@@ -805,7 +1038,7 @@ export class LimbControls implements LimbControlsAPI {
     this.fingerY = this.prevY = y;
     const h = this.handles[idx];
     // keep the handle where it was grabbed relative to the finger; key-armed drags start at the finger
-    if (h.placed && Math.hypot(h.x - x, h.y - y) <= HIT_R) {
+    if (!this.pure && h.placed && Math.hypot(h.x - x, h.y - y) <= HIT_R) {
       this.grabOffX = h.x - x;
       this.grabOffY = h.y - y;
     } else {
@@ -826,6 +1059,10 @@ export class LimbControls implements LimbControlsAPI {
     this.reachT = Infinity; // refresh the reachable set on the first frame
     this.reachIds = [];
     this.nextDrawReach = null;
+    this.dyno = null;
+    this.dynoHold = null;
+    this.zone = ZONE_NONE;
+    this.vel.reset(e.timeStamp, this.target.x, this.target.y);
     sim.dragTo(limb, this.target);
     this.computeHomography(state);
     bus.emit('input:drag-start', { limb });
@@ -846,8 +1083,179 @@ export class LimbControls implements LimbControlsAPI {
     this.target.y = state.pelvis.y;
     this.computeHomography(state);
     (this.sim as ClimberSimAPI).setHipTarget(this.target);
+    this.duoHintT = Infinity; // check for a double-dyno hint on the first frame
     bus.emit('input:hip-start');
     this.setCursor('grabbing');
+  }
+
+  /**
+   * Arm a double dyno: the second finger (`single`: Shift + mouse, one pointer) on the held hip
+   * handle. The hips stay where they are; the fingers' centroid now aims the throw.
+   */
+  private startDuo(e: PointerEvent, x: number, y: number, single: boolean): void {
+    const sim = this.sim;
+    const state = this.state;
+    if (!sim || !state || typeof sim.dyno !== 'function' || typeof sim.dynoCandidate !== 'function') return;
+    if ((this.allowedMask & 3) !== 3 || state.airborne) {
+      this.refuse(HIP);
+      return;
+    }
+    this.duo = true;
+    this.duoPid = single ? -1 : e.pointerId;
+    if (!single) {
+      try {
+        this.root.setPointerCapture(e.pointerId);
+      } catch {
+        /* synthetic pointer */
+      }
+    }
+    this.duoX[0] = this.fingerX;
+    this.duoY[0] = this.fingerY;
+    this.duoX[1] = single ? this.fingerX : x;
+    this.duoY[1] = single ? this.fingerY : y;
+    this.duoCX = (this.duoX[0] + this.duoX[1]) / 2;
+    this.duoCY = (this.duoY[0] + this.duoY[1]) / 2;
+    this.duoAim.x = 0;
+    this.duoAim.y = 0;
+    this.duoVel.reset(e.timeStamp, 0, 0);
+    // the hips keep the position the player chose while the throw is aimed
+    sim.setHipTarget(null);
+    this.duoHintOn = false;
+    this.setTag(this.hipTag, false);
+    spineUp(state.pelvis, state.chest, this.up);
+    this.pickDuoTarget(state);
+    this.duoT = 0;
+  }
+
+  /** One of the double-dyno fingers moved: move the centroid aim (wall-local, camera-independent). */
+  private moveDuo(slot: number, x: number, y: number, t: number): void {
+    if (this.duoPid < 0) {
+      this.duoX[0] = this.duoX[1] = x;
+      this.duoY[0] = this.duoY[1] = y;
+    } else {
+      this.duoX[slot] = x;
+      this.duoY[slot] = y;
+    }
+    if (slot === 0) {
+      this.fingerX = x;
+      this.fingerY = y;
+    }
+    const cx = (this.duoX[0] + this.duoX[1]) / 2;
+    const cy = (this.duoY[0] + this.duoY[1]) / 2;
+    if (this.wallDelta(this.duoCX, this.duoCY, cx, cy, this.s3)) {
+      this.duoAim.x += this.s3.x;
+      this.duoAim.y += this.s3.y;
+    }
+    this.duoCX = cx;
+    this.duoCY = cy;
+    this.duoVel.add(t, this.duoAim.x, this.duoAim.y);
+  }
+
+  /** Release of a double-dyno finger: a flick toward the target throws, a slow lift cancels. */
+  private finishDuo(t: number): void {
+    const sim = this.sim;
+    const state = this.state;
+    const hold = this.duoHold;
+    if (sim && state && hold && typeof sim.dyno === 'function') {
+      const v = this.duoVel.velocity(t, this.relVel);
+      this.s2.x = (state.limbs.LH.pos.x + state.limbs.RH.pos.x) / 2;
+      this.s2.y = (state.limbs.LH.pos.y + state.limbs.RH.pos.y) / 2;
+      const along = alongSpeed(v, this.s2, hold);
+      if (isFlick(along)) {
+        const power = flickPower(along);
+        const events = sim.dyno('both', hold.id, power);
+        for (const ev of events) bus.emit('sim:event', ev);
+        bus.emit('input:dyno', { holdId: hold.id, power, thrown: events.length > 0 });
+        if (events.length) this.duoUsed = true;
+        else this.refuse(HIP);
+      }
+    }
+    this.finishDrag();
+  }
+
+  /** Drop the double-dyno state (no throw). */
+  private endDuo(): void {
+    if (!this.duo) return;
+    const pid = this.duoPid;
+    this.duo = false;
+    this.duoPid = -1;
+    this.duoHold = null;
+    if (pid >= 0 && this.root.hasPointerCapture?.(pid)) {
+      try {
+        this.root.releasePointerCapture(pid);
+      } catch {
+        /* already released */
+      }
+    }
+  }
+
+  /**
+   * Double-dyno target: the hold both hands can share, beyond static reach (a dyno candidate of
+   * either hand), closest to the aim direction (the spine's up before the fingers move).
+   */
+  private pickDuoTarget(state: ClimberState): void {
+    const sim = this.sim;
+    this.duoHold = null;
+    this.duoRise = 0;
+    this.duoFeasible = false;
+    if (!sim || typeof sim.dynoCandidate !== 'function') return;
+    const LH = state.limbs.LH;
+    const RH = state.limbs.RH;
+    if (LH.busy || RH.busy || state.airborne) return;
+    const mx = (LH.pos.x + RH.pos.x) / 2;
+    const my = (LH.pos.y + RH.pos.y) / 2;
+    let dx = this.duoAim.x;
+    let dy = this.duoAim.y;
+    let dl = Math.hypot(dx, dy);
+    if (dl < 0.03) {
+      dx = this.up.x;
+      dy = this.up.y;
+      dl = 1;
+    }
+    const far = Math.max(sim.maxReach('LH'), sim.maxReach('RH')) + SIM.dynoMaxReach + GAME.snapRadius;
+    let bestS = Infinity;
+    for (const h of this.duoHolds) {
+      const hx = h.x - mx;
+      const hy = h.y - my;
+      const d = Math.hypot(hx, hy);
+      if (d < 0.2) continue;
+      const cos = (hx * dx + hy * dy) / (d * dl);
+      if (cos < 0.45) continue;
+      if (Math.hypot(h.x - LH.anchor.x, h.y - LH.anchor.y) > far && Math.hypot(h.x - RH.anchor.x, h.y - RH.anchor.y) > far) continue;
+      const sc = (1 - cos) * 3 + d * 0.25;
+      if (sc >= bestS) continue;
+      const pl = sim.dynoCandidate('LH', h);
+      const pr = sim.dynoCandidate('RH', h);
+      const okL = !!pl && pl.holdId === h.id;
+      const okR = !!pr && pr.holdId === h.id;
+      if (!okL && !okR) continue;
+      bestS = sc;
+      this.duoHold = h;
+      this.duoRise = Math.max(okL && pl ? pl.rise : 0, okR && pr ? pr.rise : 0);
+      this.duoFeasible = (!okL || !!pl?.feasible) && (!okR || !!pr?.feasible);
+    }
+  }
+
+  /** Per-frame hip-drag work: re-aim a double dyno, or offer the double-dyno hint on a plain hip drag. */
+  private updateHipQueries(state: ClimberState, dt: number): void {
+    spineUp(state.pelvis, state.chest, this.up);
+    if (this.duo) {
+      this.duoT += dt;
+      if (this.duoT >= 0.06) {
+        this.duoT = 0;
+        this.pickDuoTarget(state);
+      }
+      return;
+    }
+    this.duoHintT += dt;
+    if (this.duoHintT < 0.3) return;
+    this.duoHintT = 0;
+    if (this.duoHintOn || this.duoUsed || this.duoHints >= DUO_HINTS || this.pure || !this.assist || (this.allowedMask & 3) !== 3) return;
+    const p = this.previewDoubleDyno();
+    if (p && p.feasible) {
+      this.duoHintOn = true;
+      this.duoHints++;
+    }
   }
 
   private setCursor(c: string): void {
@@ -865,31 +1273,50 @@ export class LimbControls implements LimbControlsAPI {
       }
       return;
     }
-    if (this.dragIdx === NONE || e.pointerId !== this.pointerId || !this.sim) return;
+    if (this.dragIdx === NONE || !this.sim) return;
+    if (this.duo) {
+      const slot = e.pointerId === this.pointerId ? 0 : e.pointerId === this.duoPid ? 1 : -1;
+      if (slot < 0) return;
+      const list = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : null;
+      if (list && list.length > 1) for (const ce of list) this.moveDuo(slot, ce.clientX - this.rootLeft, ce.clientY - this.rootTop, ce.timeStamp);
+      this.moveDuo(slot, e.clientX - this.rootLeft, e.clientY - this.rootTop, e.timeStamp);
+      return;
+    }
+    if (e.pointerId !== this.pointerId) return;
     const x = e.clientX - this.rootLeft;
     const y = e.clientY - this.rootTop;
     this.fingerX = x;
     this.fingerY = y;
-    if (!this.applyFingerDelta(x, y)) return;
     if (this.dragIdx === HIP) {
-      this.sim.setHipTarget(this.target);
-    } else {
-      this.sim.dragTo(IDS[this.dragIdx], this.target);
-      this.evalCandidate(false);
-      this.renderer.setCameraFocusHint(this.target);
+      if (this.applyFingerDelta(x, y)) this.sim.setHipTarget(this.target);
+      return;
     }
+    // browsers batch moves per frame: replay the coalesced samples so a flick keeps its speed
+    let moved = false;
+    const list = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : null;
+    if (list && list.length > 1) {
+      for (const ce of list) {
+        if (this.applyFingerDelta(ce.clientX - this.rootLeft, ce.clientY - this.rootTop)) {
+          this.vel.add(ce.timeStamp, this.target.x, this.target.y);
+          moved = true;
+        }
+      }
+    }
+    if (this.applyFingerDelta(x, y)) {
+      this.vel.add(e.timeStamp, this.target.x, this.target.y);
+      moved = true;
+    }
+    if (!moved) return;
+    this.sim.dragTo(IDS[this.dragIdx], this.target);
+    this.evalCandidate(false);
+    this.renderer.setCameraFocusHint(this.target);
   };
 
   /**
-   * Move the wall target by the finger's motion since the last event, measured with the current
-   * camera on both ends (so camera pans never move the limb, only the finger does).
+   * Wall-local motion (into `out`) between two overlay points, measured with the current camera on
+   * both ends (so camera pans never move a limb, only the finger does).
    */
-  private applyFingerDelta(x: number, y: number): boolean {
-    const px = this.prevX;
-    const py = this.prevY;
-    if (Math.abs(x - px) < 0.01 && Math.abs(y - py) < 0.01) return false;
-    this.prevX = x;
-    this.prevY = y;
+  private wallDelta(px: number, py: number, x: number, y: number, out: Vec2): boolean {
     const r = this.renderer;
     const a = r.screenToWall(px - this.offX, py - this.offY);
     const b = r.screenToWall(x - this.offX, y - this.offY);
@@ -903,25 +1330,66 @@ export class LimbControls implements LimbControlsAPI {
       dy = this.s1.y - this.s0.y;
     } else return false;
     if (!Number.isFinite(dx) || !Number.isFinite(dy)) return false;
-    this.target.x += dx;
-    this.target.y += dy;
+    out.x = dx;
+    out.y = dy;
+    return true;
+  }
+
+  /** Move the wall target by the finger's motion since the last event. */
+  private applyFingerDelta(x: number, y: number): boolean {
+    const px = this.prevX;
+    const py = this.prevY;
+    if (Math.abs(x - px) < 0.01 && Math.abs(y - py) < 0.01) return false;
+    this.prevX = x;
+    this.prevY = y;
+    if (!this.wallDelta(px, py, x, y, this.s3)) return false;
+    this.target.x += this.s3.x;
+    this.target.y += this.s3.y;
     return true;
   }
 
   private readonly onPointerUp = (e: PointerEvent): void => {
-    if (this.dragIdx === NONE || e.pointerId !== this.pointerId) return;
-    this.finishDrag();
+    if (this.dragIdx === NONE) return;
+    if (this.duo) {
+      const slot = e.pointerId === this.pointerId ? 0 : e.pointerId === this.duoPid ? 1 : -1;
+      if (slot < 0) return;
+      this.moveDuo(slot, e.clientX - this.rootLeft, e.clientY - this.rootTop, e.timeStamp);
+      this.finishDuo(e.timeStamp);
+      return;
+    }
+    if (e.pointerId !== this.pointerId) return;
+    const idx = this.dragIdx;
+    if (idx < 4) {
+      // the lift point counts too (it can differ from the last move)
+      const x = e.clientX - this.rootLeft;
+      const y = e.clientY - this.rootTop;
+      if (this.applyFingerDelta(x, y)) {
+        this.vel.add(e.timeStamp, this.target.x, this.target.y);
+        this.sim?.dragTo(IDS[idx], this.target);
+      }
+    }
+    this.finishDrag(idx < 2 ? this.vel.velocity(e.timeStamp, this.relVel) : null);
   };
 
   private readonly onLostCapture = (e: PointerEvent): void => {
-    if (this.dragIdx === NONE || e.pointerId !== this.pointerId) return;
+    if (this.dragIdx === NONE) return;
+    if (this.duo && e.pointerId === this.duoPid) {
+      // the second finger was taken away (system gesture): no throw, back to a plain hip drag end
+      this.finishDrag();
+      return;
+    }
+    if (e.pointerId !== this.pointerId) return;
     this.finishDrag();
   };
 
-  /** End the active drag: drop the limb (grab / smear / clip / return) or release the hips. */
-  private finishDrag(): void {
+  /**
+   * End the active drag: drop the limb (grab / smear / clip / return; a hand released with a flick
+   * `velocity` toward a hold beyond reach throws) or release the hips.
+   */
+  private finishDrag(velocity: Vec2 | null = null): void {
     const idx = this.dragIdx;
     if (idx === NONE) return;
+    this.endDuo();
     const sim = this.sim;
     const pid = this.pointerId;
     this.dragIdx = NONE;
@@ -939,17 +1407,25 @@ export class LimbControls implements LimbControlsAPI {
     } else {
       const limb = IDS[idx];
       if (sim) {
-        const events = sim.endDrag(limb);
+        const v = velocity && Number.isFinite(velocity.x) && Number.isFinite(velocity.y) ? { x: velocity.x, y: velocity.y } : null;
+        this.lastVel.x = v ? v.x : 0;
+        this.lastVel.y = v ? v.y : 0;
+        const events = v ? sim.endDrag(limb, { velocity: v }) : sim.endDrag(limb);
         for (const ev of events) bus.emit('sim:event', ev);
       }
       bus.emit('input:drag-end', { limb });
       this.renderer.setCameraFocusHint(null);
       this.cand = null;
       this.clip = null;
+      this.dyno = null;
+      this.dynoHold = null;
+      this.zone = ZONE_NONE;
       this.clearOwnHighlights();
     }
+    this.duoHintOn = false;
     this.setTag(this.candTag, false);
     this.setTag(this.clipTag, false);
+    this.setTag(this.hipTag, false);
     this.setCursor('');
   }
 
@@ -980,6 +1456,15 @@ export class LimbControls implements LimbControlsAPI {
         this.armed = NONE;
         e.preventDefault();
       }
+      return;
+    }
+    if ((e.key === 'c' || e.key === 'C') && this.dragIdx === NONE && this.state) {
+      // chalk up the armed hand, else the greasier one
+      const st = this.state;
+      const hand = this.armed === 0 || this.armed === 1 ? IDS[this.armed] : (st.limbs.LH.friction ?? 1) <= (st.limbs.RH.friction ?? 1) ? 'LH' : 'RH';
+      e.preventDefault();
+      this.armed = NONE;
+      this.chalkUp(hand as 'LH' | 'RH');
       return;
     }
     const idx = KEY_LIMB[e.key];
@@ -1019,6 +1504,46 @@ export class LimbControls implements LimbControlsAPI {
       this.clip = q;
       this.highlightsDirty = true;
     }
+    if (this.dragIdx < 2) this.evalDyno(sim, limb);
+  }
+
+  /** Throw preview: the hold a flick released here would deadpoint / dyno to (no static grab, no clip). */
+  private evalDyno(sim: ClimberSimAPI, limb: LimbId): void {
+    const d = !this.cand && !this.clip && typeof sim.dynoCandidate === 'function' ? sim.dynoCandidate(limb, this.target) : null;
+    const prev = this.dynoHold;
+    this.dyno = d;
+    this.dynoHold = d ? (this.holdMap.get(d.holdId) ?? null) : null;
+    if (this.dynoHold !== prev) this.highlightsDirty = true;
+  }
+
+  /**
+   * Hand release targets (mirrors ClimberSim.releaseZone + its guards): the chalk bag needs the other
+   * hand on a hold, the shake-out also a stance that holds without this hand. Only when the release
+   * wouldn't grab a hold or clip.
+   */
+  private evalZone(state: ClimberState, idx: number): void {
+    const L = state.limbs[IDS[idx]];
+    const o = state.limbs[IDS[idx ^ 1]];
+    spineUp(state.pelvis, state.chest, this.up);
+    chalkBagAt(state.pelvis, this.up, this.bag);
+    this.chalkOk = !!o.holdId && !o.busy && !o.dragging && !state.airborne;
+    let worst = 0;
+    if (this.chalkOk) {
+      for (let k = 0; k < 4; k++) {
+        if (k === idx) continue;
+        const C = state.limbs[IDS[k]];
+        if ((C.holdId || C.smearing) && C.stress > worst) worst = C.stress;
+      }
+    }
+    this.shakeOk = this.chalkOk && worst <= SIM.shakeOutMaxStress;
+    let z = ZONE_NONE;
+    if (!this.cand && !this.clip) {
+      const tx = this.target.x;
+      const ty = this.target.y;
+      if (inChalkZone(this.bag, tx, ty)) z = this.chalkOk ? ZONE_CHALK : ZONE_NONE;
+      else if (this.shakeOk && inShakeLane(idx, L.anchor, this.up, tx, ty)) z = ZONE_SHAKE;
+    }
+    this.zone = z;
   }
 
   private updateDragQueries(state: ClimberState, dt: number): void {
@@ -1032,6 +1557,8 @@ export class LimbControls implements LimbControlsAPI {
       : Math.hypot(this.target.x - L.anchor.x, this.target.y - L.anchor.y) > this.reach + 0.01;
     // the anchor moves as the body sways: the candidate (reach-limited) can change without a move
     this.evalCandidate(false);
+    if (idx < 2) this.evalZone(state, idx);
+    else this.zone = ZONE_NONE;
     if (this.cand) {
       this.qualityT += dt;
       if (this.qualityT > 0.12) {
@@ -1074,6 +1601,11 @@ export class LimbControls implements LimbControlsAPI {
   private rebuildOwnHighlights(state: ClimberState): void {
     this.highlightsDirty = false;
     if (this.dragIdx < 0 || this.dragIdx > 3) return;
+    if (this.pure) {
+      // Pure mode: no route-reading overlays — the climber's body is the feedback
+      this.clearOwnHighlights();
+      return;
+    }
     const own = this.own;
     own.length = 0;
     let n = 0;
@@ -1089,6 +1621,14 @@ export class LimbControls implements LimbControlsAPI {
     if (this.nextDrawReach && (!this.clip || this.clip.id !== this.nextDrawReach.id)) {
       const h = this.ownSlot(n++);
       h.holdId = this.nextDrawReach.id;
+      h.kind = 'reachable';
+      h.quality = 0;
+      own.push(h);
+    }
+    if (this.dynoHold && this.dynoHold.id !== candId) {
+      // the throw target glows softly; the overlay draws the throw reticle on it
+      const h = this.ownSlot(n++);
+      h.holdId = this.dynoHold.id;
       h.kind = 'reachable';
       h.quality = 0;
       own.push(h);
@@ -1184,7 +1724,7 @@ export class LimbControls implements LimbControlsAPI {
     if (drag !== NONE && drag !== HIP && this.homo.valid) {
       // keep every other handle off the reticle and the hold being aimed at
       if (this.homo.map(this.target.x, this.target.y, this.s1)) lay.addObstacle(this.s1.x, this.s1.y, 26);
-      const c = this.cand;
+      const c = this.cand ?? this.dynoHold;
       if (c && this.homo.map(c.x, c.y, this.s1)) {
         const rpx = holdRadius(c) * this.homo.scaleAt(c.x, c.y, this.s2, this.s3);
         lay.addObstacle(this.s1.x, this.s1.y, rpx + 8);
@@ -1195,6 +1735,12 @@ export class LimbControls implements LimbControlsAPI {
     if (drag === HIP) {
       // the finger is on the hip target: keep handles off it
       lay.addObstacle(this.fingerX, this.fingerY, 30);
+      const c = this.duo ? this.duoHold : null;
+      if (c && this.homo.valid && this.homo.map(c.x, c.y, this.s1)) {
+        const rpx = holdRadius(c) * this.homo.scaleAt(c.x, c.y, this.s2, this.s3);
+        lay.addObstacle(this.s1.x, this.s1.y, rpx + 10);
+      }
+      if (this.duo && this.duoPid >= 0) lay.addObstacle(this.duoX[1], this.duoY[1], 30);
     }
     lay.solve(this.safe, GAP, 8);
 
@@ -1278,7 +1824,7 @@ export class LimbControls implements LimbControlsAPI {
       const vy = hy - this.s0.y;
       const len = Math.hypot(vx, vy);
       let holdPx = 18;
-      const c = this.cand;
+      const c = this.cand ?? this.dynoHold;
       if (c) holdPx = Math.max(holdPx, holdRadius(c) * this.homo.scaleAt(c.x, c.y, this.s2, this.s3));
       const need = HANDLE_R * 1.12 + holdPx + 10;
       this.pushAmt = damp(this.pushAmt, Math.max(0, need - len), 16, dt);
@@ -1322,6 +1868,8 @@ export class LimbControls implements LimbControlsAPI {
         }
         if (this.armed === i) flags |= F_ARMED;
         if (drag === NONE && this.allowedMask !== 15 && this.allowedMask & (1 << i) && !L.busy) flags |= F_FOCUS;
+        if (i === drag && this.dynoHold) flags |= F_THROW;
+        if (state.airborne) flags |= F_AIR;
         // stress ring
         const stress = attached && i !== drag && !L.busy ? L.stress : 0;
         const frac = clamp(stress / RING_FULL, 0, 1);
@@ -1349,6 +1897,8 @@ export class LimbControls implements LimbControlsAPI {
         if (!this.hipsAllowed) flags |= F_LOCKED;
         if (this.armed === HIP) flags |= F_ARMED;
         if (drag === NONE && this.hipsAllowed && this.allowedMask === 0) flags |= F_FOCUS;
+        if (drag === HIP && this.duo) flags |= F_DUO;
+        if (state.airborne) flags |= F_AIR;
       }
       if (flags !== h.flags) {
         const diff = flags ^ h.flags;
@@ -1413,7 +1963,26 @@ export class LimbControls implements LimbControlsAPI {
 
   private updateTags(state: ClimberState): void {
     const idx = this.dragIdx;
-    if (idx < 0 || idx > 3 || !this.assist || !this.homo.valid) {
+    if (idx === HIP && this.assist && !this.pure && this.homo.valid) {
+      this.setTag(this.clipTag, false);
+      const hip = this.handles[HIP];
+      const c = this.duo ? this.duoHold : null;
+      if (c && this.homo.map(c.x, c.y, this.s0)) {
+        const t = throwWord({ kind: 'dyno', rise: this.duoRise, feasible: this.duoFeasible });
+        this.setTagText(this.candTag, t.word, t.type, this.duoFeasible ? C_THROW : PALETTE.mist);
+        const rpx = holdRadius(c) * this.homo.scaleAt(c.x, c.y, this.s2, this.s3);
+        this.placeTag(this.candTag, this.s0.x, this.s0.y, rpx + 6, hip.x, hip.y);
+        this.setTag(this.candTag, true);
+      } else this.setTag(this.candTag, false);
+      if (this.duoHintOn && !this.duo) {
+        this.setTagText(this.hipTag, 'DYNO', '2 FINGERS + FLICK', C_THROW);
+        this.placeTag(this.hipTag, hip.x, hip.y, HIP_R + 2, hip.x + (hip.x >= this.W / 2 ? 1 : -1), hip.y + 999);
+        this.setTag(this.hipTag, true);
+      } else this.setTag(this.hipTag, false);
+      return;
+    }
+    this.setTag(this.hipTag, false);
+    if (idx < 0 || idx > 3 || !this.assist || this.pure || !this.homo.valid) {
       this.setTag(this.candTag, false);
       this.setTag(this.clipTag, false);
       return;
@@ -1421,6 +1990,8 @@ export class LimbControls implements LimbControlsAPI {
     const sim = this.sim as ClimberSimAPI;
     const h = this.handles[idx];
     const c = this.cand;
+    const d = this.dyno;
+    const dh = this.dynoHold;
     let tagOn = false;
     if (c && this.homo.map(c.x, c.y, this.s0)) {
       const other = state.limbs[IDS[idx ^ 1]];
@@ -1428,6 +1999,22 @@ export class LimbControls implements LimbControlsAPI {
       this.setTagText(this.candTag, qualityWord(this.quality), type, qualityColor(this.quality));
       const rpx = holdRadius(c) * this.homo.scaleAt(c.x, c.y, this.s2, this.s3);
       this.placeTag(this.candTag, this.s0.x, this.s0.y, rpx, h.x, h.y);
+      tagOn = true;
+    } else if (d && dh && this.homo.map(dh.x, dh.y, this.s0)) {
+      const t = throwWord(d);
+      this.setTagText(this.candTag, t.word, t.type, d.feasible ? C_THROW : PALETTE.mist);
+      const rpx = holdRadius(dh) * this.homo.scaleAt(dh.x, dh.y, this.s2, this.s3);
+      this.placeTag(this.candTag, this.s0.x, this.s0.y, rpx + 6, h.x, h.y);
+      tagOn = true;
+    } else if (this.zone === ZONE_CHALK && this.homo.map(this.bag.x, this.bag.y, this.s0)) {
+      const f = state.limbs[IDS[idx]].friction;
+      this.setTagText(this.candTag, 'CHALK UP', f === undefined ? '' : frictionWord(f), PALETTE.chalk);
+      this.placeTag(this.candTag, this.s0.x, this.s0.y, SIM.chalkZone * this.homo.scaleAt(this.bag.x, this.bag.y, this.s2, this.s3), h.x, h.y);
+      tagOn = true;
+    } else if (this.zone === ZONE_SHAKE && this.homo.map(this.target.x, this.target.y, this.s0)) {
+      const pump = state.limbs[IDS[idx]].pump;
+      this.setTagText(this.candTag, 'SHAKE OUT', pump === undefined ? '' : `PUMP ${Math.round(clamp(pump, 0, 1) * 100)}%`, PALETTE.glacier);
+      this.placeTag(this.candTag, this.s0.x, this.s0.y, 18, h.x, h.y);
       tagOn = true;
     } else if (idx >= 2 && sim.boulder.wallAngle <= SIM.smearMaxAngle && !this.outOfReach && this.homo.map(this.target.x, this.target.y, this.s0)) {
       this.setTagText(this.candTag, 'SMEAR', '', PALETTE.glacier);
@@ -1474,9 +2061,13 @@ export class LimbControls implements LimbControlsAPI {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     const drag = this.dragIdx;
+    if (this.pure) return; // Pure mode: no overlay drawing at all (the handle shows a faint ring)
     if (drag >= 0 && drag < 4 && this.homo.valid) this.drawLimbDrag(state, drag);
     this.drawLeaders(state);
-    if (drag === HIP && this.homo.valid) this.drawHipDrag(state);
+    if (drag === HIP && this.homo.valid) {
+      if (this.duo) this.drawDuo(state);
+      else this.drawHipDrag(state);
+    }
     ctx.globalAlpha = 1;
     ctx.setLineDash(DASH_NONE);
   }
@@ -1724,6 +2315,9 @@ export class LimbControls implements LimbControlsAPI {
       }
     }
 
+    // hand release targets: chalk bag at the hips, shake-out lane beside the body
+    if (idx < 2) this.drawReleaseTargets(state, idx);
+
     // anchor (shoulder / hip) marker
     if (!H.map(ax, ay, p)) return;
     const axs = p.x;
@@ -1745,8 +2339,24 @@ export class LimbControls implements LimbControlsAPI {
     const rx = this.s1.x;
     const ry = this.s1.y;
     const c = this.cand;
-    const colour = c ? qualityColor(this.quality) : out ? PALETTE.fog : this.clip ? PALETTE.signal : PALETTE.chalk;
+    const dyno = this.dyno && this.dynoHold ? this.dyno : null;
+    const colour = c
+      ? qualityColor(this.quality)
+      : dyno
+        ? dyno.feasible
+          ? C_THROW
+          : C_THROW_DIM
+        : this.zone === ZONE_CHALK
+          ? PALETTE.chalk
+          : this.zone === ZONE_SHAKE
+            ? PALETTE.glacier
+            : out
+              ? PALETTE.fog
+              : this.clip
+                ? PALETTE.signal
+                : PALETTE.chalk;
     const RR = 11;
+    if (dyno && this.dynoHold) this.drawThrow(L.pos.x, L.pos.y, this.dynoHold, dyno.feasible, true);
 
     // dashed anchor → target line (stops at the reticle)
     let dx = rx - axs;
@@ -1823,6 +2433,313 @@ export class LimbControls implements LimbControlsAPI {
     ctx.fillStyle = colour;
     ctx.fill();
     this.grow(rx, ry, RR + 12);
+  }
+
+  /**
+   * Throw preview: a ballistic arc (wall-local quadratic that bulges upward with the sideways
+   * distance, like the body's flight) from the hand at (sx, sy) to the hold, a FLICK cue at its
+   * middle, and a segmented throw reticle on the hold. Grey and short of the hold when infeasible.
+   */
+  private drawThrow(sx: number, sy: number, hold: HoldDef, feasible: boolean, cue: boolean): void {
+    const ctx = this.ctx;
+    const H = this.homo;
+    const p = this.s0;
+    const ex = hold.x;
+    const ey = hold.y;
+    const cx = (sx + ex) / 2;
+    const cy = (sy + ey) / 2 + Math.abs(ex - sx) * 0.42 + 0.05;
+    const N = 22;
+    const tEnd = feasible ? 1 : 0.72;
+    const scale = H.scaleAt(ex, ey, this.s2, this.s3);
+    const holdPx = holdRadius(hold) * scale;
+    const stop = holdPx + 7; // the arc ends at the reticle ring
+    const endOk = H.map(ex, ey, this.s1);
+    const hx = this.s1.x;
+    const hy = this.s1.y;
+    ctx.beginPath();
+    let started = false;
+    let lx = 0;
+    let ly = 0;
+    let px = 0;
+    let py = 0;
+    let midX = 0;
+    let midY = 0;
+    let midTx = 0;
+    let midTy = 0;
+    for (let k = 0; k <= N; k++) {
+      const t = (k / N) * tEnd;
+      const u = 1 - t;
+      const x = u * u * sx + 2 * u * t * cx + t * t * ex;
+      const y = u * u * sy + 2 * u * t * cy + t * t * ey;
+      if (!H.map(x, y, p)) continue;
+      if (k === N >> 1) {
+        midX = p.x;
+        midY = p.y;
+      }
+      // stop where the arc meets the reticle ring
+      if (feasible && endOk && t > 0.5 && Math.hypot(p.x - hx, p.y - hy) < stop) break;
+      if (!started) {
+        ctx.moveTo(p.x, p.y);
+        started = true;
+      } else ctx.lineTo(p.x, p.y);
+      px = lx;
+      py = ly;
+      lx = p.x;
+      ly = p.y;
+      this.grow(p.x, p.y, 10);
+    }
+    if (!started) return;
+    ctx.setLineDash(DASH_NONE);
+    ctx.strokeStyle = C_SHADOW;
+    ctx.lineWidth = 4;
+    ctx.globalAlpha = 0.55;
+    ctx.stroke();
+    ctx.setLineDash(feasible ? DASH_THROW : DASH_RING);
+    ctx.lineDashOffset = feasible && !this.reduced ? -this.time * 26 : 0;
+    ctx.strokeStyle = feasible ? C_THROW : C_THROW_DIM;
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = feasible ? 0.95 : 0.8;
+    ctx.stroke();
+    ctx.lineDashOffset = 0;
+    ctx.setLineDash(DASH_NONE);
+    // arrowhead along the last segment (feasible) / a small bar where a short throw dies
+    let dx = lx - px;
+    let dy = ly - py;
+    const dl = Math.hypot(dx, dy);
+    if (dl > 1e-3) {
+      dx /= dl;
+      dy /= dl;
+      ctx.beginPath();
+      if (feasible) {
+        ctx.moveTo(lx + dx * 2, ly + dy * 2);
+        ctx.lineTo(lx - dx * 7 - dy * 5, ly - dy * 7 + dx * 5);
+        ctx.lineTo(lx - dx * 7 + dy * 5, ly - dy * 7 - dx * 5);
+        ctx.closePath();
+        ctx.fillStyle = C_THROW;
+        ctx.globalAlpha = 1;
+        ctx.fill();
+      } else {
+        ctx.moveTo(lx - dy * 6, ly + dx * 6);
+        ctx.lineTo(lx + dy * 6, ly - dx * 6);
+        ctx.strokeStyle = C_THROW_DIM;
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.9;
+        ctx.stroke();
+      }
+    }
+    // FLICK cue at the middle of the arc, offset to its outer side
+    if (cue && feasible && this.assist && midX) {
+      midTx = lx - midX;
+      midTy = ly - midY;
+      const ml = Math.hypot(midTx, midTy) || 1;
+      let nx = -midTy / ml;
+      let ny = midTx / ml;
+      if (ny > 0) {
+        nx = -nx;
+        ny = -ny;
+      }
+      const tx = midX + nx * 14;
+      const ty = midY + ny * 14;
+      ctx.font = FLICK_FONT;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.globalAlpha = 0.85;
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = C_SHADOW;
+      ctx.strokeText('FLICK', tx, ty);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = C_THROW;
+      ctx.fillText('FLICK', tx, ty);
+      this.grow(tx, ty, 22);
+    }
+    // throw reticle: four rotating arcs around the hold + inward ticks
+    if (!H.map(ex, ey, p)) return;
+    const rx = p.x;
+    const ry = p.y;
+    const R = holdPx + 6;
+    const rot = this.reduced ? Math.PI / 4 : Math.PI / 4 + this.time * 0.9;
+    const col = feasible ? C_THROW : C_THROW_DIM;
+    for (let pass = 0; pass < 2; pass++) {
+      ctx.beginPath();
+      for (let k = 0; k < 4; k++) {
+        const a0 = rot + (k * Math.PI) / 2 + 0.3;
+        const a1 = rot + ((k + 1) * Math.PI) / 2 - 0.3;
+        ctx.moveTo(rx + Math.cos(a0) * R, ry + Math.sin(a0) * R);
+        ctx.arc(rx, ry, R, a0, a1);
+      }
+      ctx.setLineDash(pass === 1 && !feasible ? DASH_RING : DASH_NONE);
+      ctx.strokeStyle = pass === 0 ? C_SHADOW : col;
+      ctx.lineWidth = pass === 0 ? 4.5 : 2;
+      ctx.globalAlpha = pass === 0 ? 0.6 : 1;
+      ctx.stroke();
+    }
+    ctx.setLineDash(DASH_NONE);
+    ctx.beginPath();
+    for (let k = 0; k < 4; k++) {
+      const a = rot + (k * Math.PI) / 2;
+      ctx.moveTo(rx + Math.cos(a) * (R + 4), ry + Math.sin(a) * (R + 4));
+      ctx.lineTo(rx + Math.cos(a) * (R - 3), ry + Math.sin(a) * (R - 3));
+    }
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+    this.grow(rx, ry, R + 8);
+  }
+
+  /** Double dyno: arcs from both hands to the shared target, or a faint ring at the hips with no target. */
+  private drawDuo(state: ClimberState): void {
+    const c = this.duoHold;
+    const ctx = this.ctx;
+    const hip = this.handles[HIP];
+    if (!c) {
+      ctx.setLineDash(DASH_RING);
+      ctx.globalAlpha = 0.6;
+      ctx.strokeStyle = C_THROW_DIM;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(hip.x, hip.y, HIP_R + 12, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash(DASH_NONE);
+      this.grow(hip.x, hip.y, HIP_R + 16);
+      return;
+    }
+    const LH = state.limbs.LH;
+    const RH = state.limbs.RH;
+    this.drawThrow(LH.pos.x, LH.pos.y, c, this.duoFeasible, false);
+    this.drawThrow(RH.pos.x, RH.pos.y, c, this.duoFeasible, true);
+  }
+
+  /** Chalk bag + shake-out lane while a hand is dragged: faint until the finger nears them, lit when it would trigger. */
+  private drawReleaseTargets(state: ClimberState, idx: number): void {
+    const ctx = this.ctx;
+    const H = this.homo;
+    const p = this.s0;
+    const tx = this.target.x;
+    const ty = this.target.y;
+    // chalk bag
+    if (this.chalkOk && H.map(this.bag.x, this.bag.y, p)) {
+      const d = Math.hypot(tx - this.bag.x, ty - this.bag.y) - SIM.chalkZone;
+      const on = this.zone === ZONE_CHALK;
+      const a = on ? 1 : clamp(1 - d / 0.55, 0, 1) * 0.6;
+      if (a > 0.02) {
+        const bx = p.x;
+        const by = p.y;
+        const r = SIM.chalkZone * H.scaleAt(this.bag.x, this.bag.y, this.s2, this.s3);
+        ctx.beginPath();
+        ctx.arc(bx, by, r, 0, Math.PI * 2);
+        if (on) {
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = 'rgba(246,244,239,0.12)';
+          ctx.fill();
+        }
+        ctx.setLineDash(on ? DASH_NONE : DASH_RING);
+        ctx.globalAlpha = a * 0.7;
+        ctx.strokeStyle = C_SHADOW;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.globalAlpha = a;
+        ctx.strokeStyle = PALETTE.chalk;
+        ctx.lineWidth = on ? 1.6 : 1.1;
+        ctx.stroke();
+        ctx.setLineDash(DASH_NONE);
+        this.drawBagGlyph(bx, by, a);
+        this.grow(bx, by, r + 4);
+      }
+    }
+    // shake-out lane (beside the body, below the shoulder)
+    if (this.shakeOk) {
+      const A = state.limbs[IDS[idx]].anchor;
+      const L = SHAKE_LANE;
+      shakeLanePoint(idx, A, this.up, (L.down0 + L.down1) / 2, (L.out0 + L.out1) / 2, this.s1);
+      const d = Math.max(0, Math.hypot(tx - this.s1.x, ty - this.s1.y) - 0.24);
+      const on = this.zone === ZONE_SHAKE;
+      const a = on ? 1 : clamp(1 - d / 0.45, 0, 1) * 0.5;
+      if (a > 0.02) {
+        const c = this.laneQuad;
+        shakeLanePoint(idx, A, this.up, L.down0, L.out0, c[0]);
+        shakeLanePoint(idx, A, this.up, L.down0, L.out1, c[1]);
+        shakeLanePoint(idx, A, this.up, L.down1, L.out1, c[2]);
+        shakeLanePoint(idx, A, this.up, L.down1, L.out0, c[3]);
+        ctx.beginPath();
+        let ok = true;
+        for (let k = 0; k < 4 && ok; k++) {
+          ok = H.map(c[k].x, c[k].y, p);
+          if (!ok) break;
+          if (k === 0) ctx.moveTo(p.x, p.y);
+          else ctx.lineTo(p.x, p.y);
+          this.grow(p.x, p.y, 4);
+        }
+        if (ok) {
+          ctx.closePath();
+          if (on) {
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = 'rgba(154,212,222,0.12)';
+            ctx.fill();
+          }
+          ctx.setLineDash(on ? DASH_NONE : DASH_RING);
+          ctx.globalAlpha = a * 0.7;
+          ctx.strokeStyle = C_SHADOW;
+          ctx.lineWidth = 3;
+          ctx.stroke();
+          ctx.globalAlpha = a;
+          ctx.strokeStyle = PALETTE.glacier;
+          ctx.lineWidth = on ? 1.6 : 1.1;
+          ctx.stroke();
+          ctx.setLineDash(DASH_NONE);
+          // a shake glyph: a short wave in the middle of the lane
+          if (H.map(this.s1.x, this.s1.y, p)) {
+            const gx = p.x;
+            const gy = p.y;
+            ctx.beginPath();
+            for (let k = 0; k <= 16; k++) {
+              const u = k / 16;
+              const x = gx - 9 + u * 18;
+              const y = gy + Math.sin(u * Math.PI * 3 + (this.reduced ? 0 : this.time * 10)) * 2.6;
+              if (k === 0) ctx.moveTo(x, y);
+              else ctx.lineTo(x, y);
+            }
+            ctx.globalAlpha = a * 0.7;
+            ctx.strokeStyle = C_SHADOW;
+            ctx.lineWidth = 3.2;
+            ctx.stroke();
+            ctx.globalAlpha = a;
+            ctx.strokeStyle = PALETTE.glacier;
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+          }
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /** A tiny chalk-bucket glyph (soft bucket, rim, drawstring) centred at (x, y). */
+  private drawBagGlyph(x: number, y: number, a: number): void {
+    const ctx = this.ctx;
+    ctx.beginPath();
+    // body
+    ctx.moveTo(x - 5.5, y - 3.5);
+    ctx.lineTo(x - 4.6, y + 4);
+    ctx.quadraticCurveTo(x, y + 6.6, x + 4.6, y + 4);
+    ctx.lineTo(x + 5.5, y - 3.5);
+    // rim
+    ctx.moveTo(x - 6.4, y - 4.2);
+    ctx.lineTo(x + 6.4, y - 4.2);
+    ctx.lineJoin = 'round';
+    ctx.globalAlpha = a * 0.7;
+    ctx.strokeStyle = C_SHADOW;
+    ctx.lineWidth = 3.4;
+    ctx.stroke();
+    ctx.globalAlpha = a;
+    ctx.strokeStyle = PALETTE.chalk;
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+    // a puff of chalk over the rim
+    ctx.beginPath();
+    ctx.arc(x - 1.6, y - 7.2, 1.3, 0, Math.PI * 2);
+    ctx.arc(x + 1.9, y - 8.2, 1, 0, Math.PI * 2);
+    ctx.fillStyle = PALETTE.chalk;
+    ctx.fill();
   }
 
   private drawHipDrag(state: ClimberState): void {
