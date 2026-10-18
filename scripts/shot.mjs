@@ -28,7 +28,7 @@ if (evalJs) {
   await page.evaluate(evalJs);
   await page.waitForTimeout(+opt('after', 1200));
 }
-await page.screenshot({ path: out });
+await page.screenshot({ path: out, timeout: 180000 });
 if (showConsole || logs.some((l) => l.includes('error'))) console.log(logs.join('\n'));
 await browser.close();
 console.log('saved', out);
