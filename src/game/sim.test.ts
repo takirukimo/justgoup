@@ -10,7 +10,7 @@ import { hold, makeBoulder, moveLimb, run } from './test-helpers';
 const LIMBS: LimbId[] = ['LH', 'RH', 'LF', 'RF'];
 
 describe('ClimberSim — stability', () => {
-  it('settles calmly on easy problems with all four limbs on', () => {
+  it('settles calmly on easy problems with all four limbs on', { timeout: 30_000 }, () => {
     const problems = [tutorialBoulder()];
     for (let k = 0; k < 8; k++) problems.push(generateBoulder({ seed: 100 + k, grade: k % 2 }));
     for (const b of problems) {

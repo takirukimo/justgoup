@@ -93,9 +93,16 @@ export class BetaBot {
         if (!st) break;
         // shift the weight toward the reach position while still on four limbs, then let go
         if (this.opts.useHips) sim.setHipTarget({ x: st.reachPose.px, y: st.reachPose.py });
+        if (this.prepTension < 0) this.prepTension = s.tension;
         const d = Math.hypot(s.pelvis.x - st.reachPose.px, s.pelvis.y - st.reachPose.py);
         const v = Math.hypot(s.velocity.x, s.velocity.y);
-        if (this.t > this.opts.prepTime || (this.t > 0.12 && (d < 0.05 || (v < 0.05 && this.t > 0.3)))) this.beginMove(st, limb);
+        // the reach position may not be reachable on four limbs (the moving limb's envelope holds
+        // the body back): when the shift starts to hurt, let go and make the move from here
+        const strained = this.t > 0.12 && s.tension > Math.max(0.8, this.prepTension + 0.22);
+        if (this.t > this.opts.prepTime || strained || (this.t > 0.12 && (d < 0.05 || (v < 0.05 && this.t > 0.3)))) {
+          this.prepTension = -1;
+          this.beginMove(st, limb);
+        }
         break;
       }
       case 'drag': {
@@ -172,6 +179,8 @@ export class BetaBot {
     }
   }
 
+  /** Tension when the current weight shift began (−1 = not shifting). */
+  private prepTension = -1;
   private clipLimb: LimbId = 'RH';
   /** Quickdraws clipped by the bot. */
   clips = 0;
@@ -227,7 +236,8 @@ export class BetaBot {
     const plan = planBetaDetailed(this.sim.boulder, {
       start: ids,
       startPose: { px: s.pelvis.x, py: s.pelvis.y, cx: s.chest.x, cy: s.chest.y },
-      maxNodes: 900,
+      maxNodes: this.sim.boulder.mode === 'rope' ? 2600 : 900,
+      clipped: s.clipped,
     });
     if (!plan) {
       this.fail('replan failed');

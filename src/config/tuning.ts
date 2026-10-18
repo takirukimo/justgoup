@@ -78,6 +78,11 @@ export const SIM = {
   reachMaxForce: 0.45,
   /** Fraction of max reach at which the body starts to follow the dragged limb. */
   reachFollowFrac: 0.95,
+  /**
+   * The live climber's reach posture brings a dragged limb's target this far (m) inside its
+   * anatomical envelope (the planner uses the bare limit), so releasing over the hold is reliable.
+   */
+  reachComfort: 0.05,
   /** Linear damping (1/s) while climbing / airborne / hanging on the rope. */
   dampClimb: 3.4,
   dampAir: 0.12,
@@ -89,7 +94,7 @@ export const SIM = {
    */
   armMinPlane: 0.05,
   legMinPlane: 0.17,
-  /** Extra reach tolerance (m) for snapping a dragged limb onto a hold. */
+  /** Extra reach tolerance (m) beyond the anatomical envelope for snapping a dragged limb onto a hold. */
   reachTolerance: 0.07,
   /** Smoothing rate (1/s) of loads/stress (weight shifts are not instantaneous). */
   loadSmoothing: 14,
@@ -165,8 +170,26 @@ export const SIM = {
   barnPenalty: 0.8,
   spanPenalty: 0.3,
   crouchPenalty: 0.22,
-  reachStrain: 0.32,
+  reachStrain: 0.42,
   corePenalty: 0.45,
+
+  // ── Anatomy (reach envelopes, src/game/anatomy.ts) ──
+  /**
+   * Envelope ratio (r / r(φ)) where an awkward limb position (deep high step, crossover, hand far
+   * down) starts to strain, and the extra stress it adds at the edge (× the direction's strain weight).
+   */
+  edgeStart: 0.8,
+  edgeStrain: 0.3,
+  /** Beyond the edge (forced there, e.g. by a slip): extra stress ramps to edgeOver → the limb pops off. */
+  edgeOverStart: 1.02,
+  edgeOverFull: 1.12,
+  edgeOver: 1.7,
+  /** Snap clearance (m): a limb can't be placed on another limb's contact or right on its segment. */
+  limbClearance: 0.075,
+  /** Feet and hands never share a spot: minimum contact separation (m). */
+  handFootGap: 0.1,
+  /** A hand is never placed lower than this (m) above every attached foot. */
+  handAboveFeet: 0.1,
 
   // ── Pump ──
   /** Base creep per second, strain-driven rate, campus extra, recovery in a good rest. */

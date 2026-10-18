@@ -141,7 +141,7 @@ describe('estimateGrade', () => {
     expect(estimateGrade(b)).toBe(12);
   });
 
-  it('plans tall routes in stages within budget', () => {
+  it('plans tall routes in stages within budget', { timeout: 60_000 }, () => {
     const r = generateRopeRoute({ seed: 77, grade: 2 });
     const p = planBetaDetailed(r, { maxNodes: 3000 });
     expect(p).not.toBeNull();

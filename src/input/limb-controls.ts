@@ -6,7 +6,11 @@
 //     (wall-anchored: the target only moves when the finger moves, never when the camera pans),
 //     sim.dragTo() every move, release → sim.endDrag() and its events go out on the bus
 //     ('sim:event'), followed by 'input:drag-end';
-//   • while dragging: the reach boundary arc (on the wall, via a per-frame homography), a dashed
+//   • while dragging: the reach boundary (on the wall, via a per-frame homography) — the limb's
+//     anatomical reach envelope when the sim provides one (optional ClimberSim.reachEnvelope(): a
+//     foot can't reach above its hip, a hand only a little way across the chest or down past the
+//     hips), else a circle of maxReach — with a soft fill, a hairline edge and an emphasised edge
+//     toward the finger; a dashed
 //     anchor → target line, a reticle at the target, reachable / candidate hold highlights through
 //     the renderer, a "GOOD · JUG" grip label, and in rope mode a "CLIP" label on the quickdraw;
 //   • the hip handle pulls the hips toward the finger (sim.setHipTarget) with a soft arrow.
@@ -252,6 +256,10 @@ export class LimbControls implements LimbControlsAPI {
   private readonly target: Vec2 = { x: 0, y: 0 };
   private reach = 0;
   private outOfReach = false;
+  /** Reach envelope polygon of the dragged limb (wall-local, [0] = anchor), when the sim provides one. */
+  private envPoly: Vec2[] = [];
+  private envOn = false;
+  private readonly rayHit: Vec2 = { x: 0, y: 0 };
   private cand: HoldDef | null = null;
   private candKnown = false;
   private quality = 0;
@@ -803,6 +811,7 @@ export class LimbControls implements LimbControlsAPI {
     this.target.x = L.pos.x;
     this.target.y = L.pos.y;
     this.reach = sim.maxReach(limb) + SIM.reachTolerance;
+    this.refreshEnvelope(sim, limb);
     this.cand = null;
     this.candKnown = false;
     this.quality = 0;
@@ -1002,7 +1011,10 @@ export class LimbControls implements LimbControlsAPI {
     const idx = this.dragIdx;
     const limb = IDS[idx];
     const L = state.limbs[limb];
-    this.outOfReach = Math.hypot(this.target.x - L.anchor.x, this.target.y - L.anchor.y) > this.reach + 0.01;
+    this.refreshEnvelope(sim, limb);
+    this.outOfReach = this.envOn
+      ? polyOutside(this.envPoly, this.target.x, this.target.y) > 0.01
+      : Math.hypot(this.target.x - L.anchor.x, this.target.y - L.anchor.y) > this.reach + 0.01;
     // the anchor moves as the body sways: the candidate (reach-limited) can change without a move
     this.evalCandidate(false);
     if (this.cand) {
@@ -1025,7 +1037,7 @@ export class LimbControls implements LimbControlsAPI {
         this.highlightsDirty = true;
       }
       let next: QuickdrawDef | null = null;
-      if (idx < 2 && sim.boulder.mode === 'rope') next = nextReachableDraw(sim, state, L);
+      if (idx < 2 && sim.boulder.mode === 'rope') next = nextReachableDraw(sim, state, L, this.envOn ? this.envPoly : null);
       if (next !== this.nextDrawReach) {
         this.nextDrawReach = next;
         this.highlightsDirty = true;
@@ -1509,6 +1521,116 @@ export class LimbControls implements LimbControlsAPI {
     }
   }
 
+  /** Pull the dragged limb's reach envelope from the sim (optional API; circle fallback). */
+  private refreshEnvelope(sim: ClimberSimAPI, limb: LimbId): void {
+    const env = (sim as ClimberSimAPI & { reachEnvelope?: (l: LimbId, out?: Vec2[]) => Vec2[] }).reachEnvelope;
+    if (typeof env !== 'function') {
+      this.envOn = false;
+      return;
+    }
+    const poly = env.call(sim, limb, this.envPoly);
+    this.envOn = Array.isArray(poly) && poly.length >= 4;
+    if (this.envOn) this.envPoly = poly;
+  }
+
+  /** Boundary point of the envelope polygon along the ray from (ax, ay) at angle `a`, into `out`. */
+  private envRay(ax: number, ay: number, a: number, out: Vec2): boolean {
+    const poly = this.envPoly;
+    const dx = Math.cos(a);
+    const dy = Math.sin(a);
+    let best = -1;
+    // edges between boundary vertices (vertex 0 is the anchor itself)
+    for (let i = 1; i + 1 < poly.length; i++) {
+      const p0 = poly[i];
+      const p1 = poly[i + 1];
+      const ex = p1.x - p0.x;
+      const ey = p1.y - p0.y;
+      const den = dx * ey - dy * ex;
+      if (Math.abs(den) < 1e-12) continue;
+      const qx = p0.x - ax;
+      const qy = p0.y - ay;
+      const t = (qx * ey - qy * ex) / den;
+      const u = (qx * dy - qy * dx) / den;
+      if (t > 0 && u >= -1e-9 && u <= 1 + 1e-9 && t > best) best = t;
+    }
+    if (best <= 0) return false;
+    out.x = ax + dx * best;
+    out.y = ay + dy * best;
+    return true;
+  }
+
+  /** Anatomical reach envelope: soft fill, faint dashed edge, emphasised edge + ticks toward the finger. */
+  private drawEnvelope(ax: number, ay: number, tAng: number, out: boolean): void {
+    const ctx = this.ctx;
+    const H = this.homo;
+    const p = this.s0;
+    const poly = this.envPoly;
+    ctx.beginPath();
+    let started = false;
+    for (let k = 0; k < poly.length; k++) {
+      if (!H.map(poly[k].x, poly[k].y, p)) continue;
+      if (!started) {
+        ctx.moveTo(p.x, p.y);
+        started = true;
+      } else ctx.lineTo(p.x, p.y);
+      this.grow(p.x, p.y, 8);
+    }
+    if (started) {
+      ctx.closePath();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = 'rgba(246,244,239,0.045)';
+      ctx.fill();
+      ctx.setLineDash(DASH_RING);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(246,244,239,0.22)';
+      ctx.stroke();
+    }
+    // emphasised edge toward the target (breaks where the envelope has no boundary: the forbidden
+    // wedge, e.g. straight up from a hip)
+    const span = (52 * Math.PI) / 180;
+    const M = 26;
+    const b = this.rayHit;
+    ctx.setLineDash(DASH_NONE);
+    ctx.beginPath();
+    started = false;
+    for (let k = 0; k <= M; k++) {
+      const a = tAng - span + (2 * span * k) / M;
+      if (!this.envRay(ax, ay, a, b) || !H.map(b.x, b.y, p)) {
+        started = false;
+        continue;
+      }
+      if (!started) {
+        ctx.moveTo(p.x, p.y);
+        started = true;
+      } else ctx.lineTo(p.x, p.y);
+    }
+    ctx.strokeStyle = C_SHADOW;
+    ctx.lineWidth = 3.5;
+    ctx.globalAlpha = 0.7;
+    ctx.stroke();
+    ctx.strokeStyle = out ? PALETTE.signal : PALETTE.chalk;
+    ctx.lineWidth = 1.6;
+    ctx.globalAlpha = 0.9;
+    ctx.stroke();
+    // spec-sheet ticks along it, pointing away from the anchor; the major tick at the target bearing
+    const TK = 8;
+    const step = span / TK;
+    for (let k = -TK; k <= TK; k++) {
+      const a = tAng + k * step;
+      if (!this.envRay(ax, ay, a, b)) continue;
+      const major = k === 0;
+      const len = major ? 0.075 : k % 2 === 0 ? 0.045 : 0.028;
+      if (!H.map(b.x, b.y, p)) continue;
+      if (!H.map(b.x + Math.cos(a) * len, b.y + Math.sin(a) * len, this.s1)) continue;
+      ctx.globalAlpha = (1 - Math.abs(k) / (TK + 1)) * (major ? 0.95 : 0.7);
+      ctx.lineWidth = major ? 1.6 : 1;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(this.s1.x, this.s1.y);
+      ctx.stroke();
+    }
+  }
+
   private drawLimbDrag(state: ClimberState, idx: number): void {
     const ctx = this.ctx;
     const H = this.homo;
@@ -1522,7 +1644,8 @@ export class LimbControls implements LimbControlsAPI {
     const p = this.s0;
     const out = this.outOfReach;
 
-    if (this.assist) {
+    if (this.assist && this.envOn) this.drawEnvelope(ax, ay, tAng, out);
+    else if (this.assist) {
       // reachable disc (soft fill) + full boundary (faint dashes)
       const N = 72;
       ctx.beginPath();
@@ -1757,14 +1880,36 @@ function sameIds(a: readonly string[], b: readonly string[]): boolean {
   return true;
 }
 
-/** Rope mode: the next unclipped quickdraw if a free hand could reach it. */
-function nextReachableDraw(sim: ClimberSimAPI, state: ClimberState, L: LimbSnapshot): QuickdrawDef | null {
+/** Rope mode: the next unclipped quickdraw if a free hand could reach it (envelope when known). */
+function nextReachableDraw(sim: ClimberSimAPI, state: ClimberState, L: LimbSnapshot, env: Vec2[] | null): QuickdrawDef | null {
   const draws = sim.boulder.quickdraws;
   if (!draws) return null;
   for (const q of draws) {
     if (state.clipped.includes(q.id)) continue;
-    const d = Math.hypot(q.x - L.anchor.x, q.y - SIM.quickdrawDrop - L.anchor.y);
+    const cy = q.y - SIM.quickdrawDrop;
+    // the envelope already carries the snap tolerance; the clip radius reaches a little further
+    if (env) return polyOutside(env, q.x, cy) <= GAME.clipRadius - SIM.reachTolerance ? q : null;
+    const d = Math.hypot(q.x - L.anchor.x, cy - L.anchor.y);
     return d <= sim.maxReach(L.id) + GAME.clipRadius ? q : null;
   }
   return null;
+}
+
+/** Distance (wall m) of (x, y) outside a closed polygon; 0 inside. */
+function polyOutside(poly: readonly Vec2[], x: number, y: number): number {
+  let inside = false;
+  let best = Infinity;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i];
+    const b = poly[j];
+    if (a.y > y !== b.y > y && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+    const ex = b.x - a.x;
+    const ey = b.y - a.y;
+    const ll = ex * ex + ey * ey;
+    let t = ll > 1e-18 ? ((x - a.x) * ex + (y - a.y) * ey) / ll : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const d = Math.hypot(x - (a.x + ex * t), y - (a.y + ey * t));
+    if (d < best) best = d;
+  }
+  return inside ? 0 : best;
 }

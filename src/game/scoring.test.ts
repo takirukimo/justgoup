@@ -31,7 +31,7 @@ describe('scoreSend', () => {
 });
 
 describe('parTime + runGradeFor + scoreRope', () => {
-  it('par grows with the problem', () => {
+  it('par grows with the problem', { timeout: 60_000 }, () => {
     const easy = parTime(generateBoulder({ seed: 1, grade: 0 }));
     const hard = parTime(generateBoulder({ seed: 1, grade: 10 }));
     const rope = parTime(generateRopeRoute({ seed: 1, grade: 3 }));

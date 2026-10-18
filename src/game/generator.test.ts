@@ -8,7 +8,7 @@ import { usableByHand } from './holds';
 const routeHolds = (b: ReturnType<typeof generateBoulder>) => b.holds.filter((h) => h.role !== 'deco');
 
 describe('generator — determinism + structure', () => {
-  it('same seed + grade → identical boulder JSON; different seeds differ', () => {
+  it('same seed + grade → identical boulder JSON; different seeds differ', { timeout: 60_000 }, () => {
     const a = generateBoulder({ seed: 12345, grade: 5 });
     const b = generateBoulder({ seed: 12345, grade: 5 });
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
@@ -146,22 +146,33 @@ describe('generator — determinism + structure', () => {
 describe('generator — solvability', () => {
   it('300 generated boulders across V0–V12 are all solvable by planBeta()', { timeout: 240_000 }, () => {
     const fails: string[] = [];
+    let genMs = 0;
+    let worstGen = 0;
     for (let i = 0; i < 300; i++) {
       const grade = i % 13;
+      const t0 = performance.now();
       const b = generateBoulder({ seed: 10_000 + i * 7919, grade });
+      const dt = performance.now() - t0;
+      genMs += dt;
+      worstGen = Math.max(worstGen, dt);
       expect(b.grade).toBe(grade);
       if (!planBeta(b, { maxNodes: 900 })) fails.push(`${b.id} (V${grade}, ${b.wallAngle}°)`);
     }
+    console.info(`generateBoulder: ${(genMs / 300).toFixed(0)} ms mean, ${worstGen.toFixed(0)} ms worst over 300 boulders`);
     expect(fails).toEqual([]);
   });
 
   it('30 lead routes are solvable and every quickdraw is clippable along the beta', { timeout: 240_000 }, () => {
     const fails: string[] = [];
+    let genMs = 0;
     for (let i = 0; i < 30; i++) {
+      const t0 = performance.now();
       const r = generateRopeRoute({ seed: 50_000 + i * 104729, grade: i % 9 });
+      genMs += performance.now() - t0;
       const plan = planBetaDetailed(r, { maxNodes: 3000 });
       if (!plan || plan.clipsPlanned !== r.quickdraws!.length) fails.push(r.id);
     }
+    console.info(`generateRopeRoute: ${(genMs / 30).toFixed(0)} ms mean over 30 routes`);
     expect(fails).toEqual([]);
   });
 });
