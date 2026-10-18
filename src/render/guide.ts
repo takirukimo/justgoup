@@ -105,6 +105,7 @@ export class GuideModel extends THREE.Group {
     this.head = createGuideHead();
     this.head.rotation.y = Math.PI;
     this.rig.bones[BONE.neck].add(this.head);
+    this.rig.setHeadProxies(this.head);
     this.blinkW = headBlinkWeights(this.head);
     this.rig.restGoal(this.goal);
     this.rig.solve(this.goal, 0);
@@ -345,6 +346,9 @@ export class GuideModel extends THREE.Group {
     g.chest.lerp(T.chest, snap ? 1 : dampK(10, d));
     g.pelvisRight.copy(this.R);
     g.chestRight.copy(this.R);
+    // self-collision escapes toward the guide's front (no wall); feet stay planted on the mats
+    g.wall = false;
+    g.away.copy(this.F);
     for (let s = 0; s < 2; s++) {
       const h = T.hands[s];
       const gh: LimbGoal = g.hands[s];
@@ -357,9 +361,13 @@ export class GuideModel extends THREE.Group {
       gh.curlB += (h.b - gh.curlB) * k;
       gh.thumb += (h.thumb - gh.thumb) * k;
       gh.lift = 0;
+      gh.pinned = false;
+      gh.layer = s === 1 ? 1 : 0;
       const gf: LimbGoal = g.feet[s];
       gf.jointTarget = true;
       gf.autoPoint = false;
+      gf.pinned = true;
+      gf.layer = 0;
       gf.target.lerp(T.feet[s], k);
       gf.dir.lerp(T.footDir[s], k).normalize();
       gf.up.copy(UPV);
