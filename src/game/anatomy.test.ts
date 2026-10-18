@@ -63,12 +63,13 @@ describe('anatomy — reach envelopes', () => {
     expect(Math.max(...ARM_ENVELOPE.map((k) => k[1]))).toBeCloseTo(BODY.armMax, 12);
     // straight down for an arm is continuous through the wrap: −170° ≡ 190°
     expect(envelopeRadius(1, -170)).toBeCloseTo(envelopeRadius(1, 190), 12);
-    // a foot never goes straight up; at most ~0.33 m above the hip joint, out to the side
+    // a foot never goes straight up; at most ~0.17 m above the hip joint (what the joint-limited 3D
+    // body can reach with the hips off the wall), out to the side
     expect(envelopeRadius(3, 180)).toBe(0);
     let top = 0;
     for (let phi = 90; phi <= 160; phi += 0.5) top = Math.max(top, -Math.cos(deg(phi)) * envelopeRadius(3, phi));
-    expect(top).toBeGreaterThan(0.28);
-    expect(top).toBeLessThan(0.36);
+    expect(top).toBeGreaterThan(0.14);
+    expect(top).toBeLessThan(0.2);
   });
 
   it('φ follows the shared body-frame convention (legs from down, arms from up, + outward)', () => {
@@ -254,8 +255,9 @@ describe('anatomy — ClimberSim', () => {
     expect(sim.getState().pelvis.y).toBeLessThan(y0 + 0.03);
   });
 
-  it('a foot can high-step to a hold ~0.25 m above and 0.35 m out from the hip', () => {
-    const sim = new ClimberSim(lab([hold('hi', hip.x + 0.35, hip.y + 0.25, 'jug', 0.09, 'foot')]));
+  it('a foot can high-step onto a hold at hip height, 0.35 m out (toe ~0.15 m above the hip joint)', () => {
+    // the toe stands on top of the hold, ~7 cm above its centre
+    const sim = new ClimberSim(lab([hold('hi', hip.x + 0.35, hip.y + 0.08, 'jug', 0.09, 'foot')]));
     sim.start();
     run(sim, 1);
     const ev = moveLimb(sim, 'RF', 'hi');
@@ -267,7 +269,7 @@ describe('anatomy — ClimberSim', () => {
   });
 
   it('dragging the hips down below a high foot is stopped where the leg would fold past its limit', () => {
-    const sim = new ClimberSim(lab([hold('hi', hip.x + 0.38, hip.y + 0.12, 'jug', 0.09, 'foot')]));
+    const sim = new ClimberSim(lab([hold('hi', hip.x + 0.38, hip.y + 0.04, 'jug', 0.09, 'foot')]));
     sim.start();
     run(sim, 1);
     moveLimb(sim, 'RF', 'hi');

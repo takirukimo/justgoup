@@ -535,8 +535,11 @@ export class ClimberSim implements ClimberSimAPI {
 
   setHipTarget(p: Vec2 | null): void {
     if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) {
-      if (!this.hipTarget) this.hipTarget = { x: p.x, y: p.y };
-      else {
+      if (!this.hipTarget) {
+        this.hipTarget = { x: p.x, y: p.y };
+        this.hipOrigin.x = this.P.x;
+        this.hipOrigin.y = this.P.y;
+      } else {
         this.hipTarget.x = p.x;
         this.hipTarget.y = p.y;
       }
@@ -1350,8 +1353,11 @@ export class ClimberSim implements ClimberSimAPI {
       let cap = 0;
       let c = 0;
       if (this.hipTarget) {
-        tx = this.hipTarget.x;
-        ty = this.hipTarget.y;
+        // aim at the furthest point toward the finger the attached limbs allow, so the hip spring
+        // settles at the anatomical limit instead of fighting the envelope constraints (bobbing)
+        this.feasibleHip(this.hipTarget.x, this.hipTarget.y, this.hipAim);
+        tx = this.hipAim.x;
+        ty = this.hipAim.y;
         k = SIM.hipStiffness;
         cap = SIM.hipMaxForce * g;
         c = SIM.hipDamping;
@@ -1434,6 +1440,68 @@ export class ClimberSim implements ClimberSimAPI {
     this.Pv.y = (P.y - opy) / h;
     this.Cv.x = (C.x - ocx) / h;
     this.Cv.y = (C.y - ocy) / h;
+  }
+
+  private readonly hipAim: Vec2 = { x: 0, y: 0 };
+  /** Pelvis position when the current hip drag began: the feasible-aim search starts from here. */
+  private readonly hipOrigin: Vec2 = { x: 0, y: 0 };
+  private readonly hipAx = new Float64Array(4);
+  private readonly hipAy = new Float64Array(4);
+  private readonly hipPose: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
+
+  /**
+   * Furthest pelvis position on the line from the hip drag's origin toward (tx, ty) at which every
+   * attached limb stays inside its envelope (torso moved rigidly with the pelvis). Written to out.
+   * Searching from a fixed origin (not the moving pelvis) keeps the aim still once it hits the limit,
+   * so other forces can't make the hips creep along the boundary.
+   */
+  private feasibleHip(tx: number, ty: number, out: Vec2): void {
+    const P = this.P;
+    const C = this.C;
+    const ox = C.x - P.x;
+    const oy = C.y - P.y;
+    const ol = Math.hypot(ox, oy) || 1;
+    const ux = ox / ol;
+    const uy = oy / ol;
+    const O = this.hipOrigin;
+    const ok = (t: number): boolean => {
+      const q = this.hipPose;
+      q.px = O.x + (tx - O.x) * t;
+      q.py = O.y + (ty - O.y) * t;
+      q.cx = q.px + ox;
+      q.cy = q.py + oy;
+      computeAnchors(q, this.hipAx, this.hipAy);
+      for (let i = 0; i < 4; i++) {
+        const L = this.limbs[i];
+        if (!(L.hold || L.smear) || L.dragging || L.busy) continue;
+        if (envProject(i, this.hipAx[i], this.hipAy[i], ux, uy, L.cx, L.cy) > this.softAllow(L) + 0.004) return false;
+      }
+      return true;
+    };
+    if (ok(1)) {
+      out.x = tx;
+      out.y = ty;
+      return;
+    }
+    if (!ok(0)) {
+      // the stance changed under the drag (a slip, a smear): restart the search from here
+      O.x = P.x;
+      O.y = P.y;
+      if (!ok(0)) {
+        out.x = P.x;
+        out.y = P.y;
+        return;
+      }
+    }
+    let lo = 0;
+    let hi = 1;
+    for (let it = 0; it < 10; it++) {
+      const mid = (lo + hi) * 0.5;
+      if (ok(mid)) lo = mid;
+      else hi = mid;
+    }
+    out.x = O.x + (tx - O.x) * lo;
+    out.y = O.y + (ty - O.y) * lo;
   }
 
   /**

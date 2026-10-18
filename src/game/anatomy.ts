@@ -41,11 +41,14 @@ export const LEG_ENVELOPE: readonly EnvelopeKnot[] = [
   [-30, 0.86, 0.35],
   [0, 0.93, 0.12],
   [45, 0.93, 0.12],
-  [90, 0.84, 0.4],
-  [115, 0.64, 0.75],
-  [135, 0.46, 1],
-  [150, 0.32, 1],
-  [160, 0.22, 1],
+  // Above horizontal the limit is what the 3D body can really reach with the hips held 0.3–0.45 m
+  // off the wall (measured against the joint-limited IK in src/render/climber.ts): a high step tops
+  // out ~0.17 m above the hip joint, out to the side with the knee up and out.
+  [90, 0.8, 0.4],
+  [115, 0.38, 0.75],
+  [135, 0.24, 1],
+  [150, 0.17, 1],
+  [160, 0.12, 1],
 ];
 
 /**
