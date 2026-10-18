@@ -8,10 +8,12 @@
 //   proxies=1       draw the collision proxies     nocol=1 self-collision off (A/B)
 //   t=<s>           freeze the clock               targets=0 hide target markers
 //   focus=upper|lower  frame only the upper body (head, arms) or the legs
+//   window.__bench(n)  ms / limit evaluations / chain solves / contacts per pose() for each case
+//   rig.diagnose(li)   (via window.__limits[i].m.rig) why a limb's target is (un)reachable
 
 import * as THREE from 'three';
 import type { ClimberPhase, ClimberState, LimbId, LimbSnapshot, Vec2 } from '../src/core/types';
-import { BODY } from '../src/config/tuning';
+import { BODY, SIM } from '../src/config/tuning';
 import { ClimberModel } from '../src/render/climber';
 import { RopeMesh } from '../src/render/rope-mesh';
 import { WallFrame } from '../src/render/wall-frame';
@@ -197,6 +199,21 @@ export function limitState(name: LimitPose, ox: number, t: number): ClimberState
   const ry = -ux / ul;
   const sh = BODY.shoulderHalf;
   const hh = BODY.hipHalf;
+  // pelvis depth exactly as the sim estimates it from the feet on holds (statics.estimateDepth)
+  if (phase === 'climbing') {
+    let n = 0;
+    let sum = 0;
+    const feet: [Vec2, number][] = [
+      [lf, -1],
+      [rf, 1],
+    ];
+    for (const [f, sg] of feet) {
+      const l = Math.hypot(f.x - (pelvis.x + sg * rx * hh), f.y - (pelvis.y + sg * ry * hh));
+      sum += Math.min(0.62, Math.max(0.14, Math.sqrt(Math.max(0, SIM.legDepthLen ** 2 - l * l))));
+      n++;
+    }
+    pd = sum / n;
+  }
   return {
     phase,
     pelvis: add(pelvis),
@@ -461,4 +478,17 @@ export function runLimits(canvas: HTMLCanvasElement, qs: URLSearchParams, labels
   };
   requestAnimationFrame(loop);
   (window as unknown as Record<string, unknown>).__limits = cells;
+  // QA: average ms per ClimberModel.pose() (IK + limits + self-collision) for each pose
+  (window as unknown as Record<string, unknown>).__bench = (n = 300): string =>
+    cells
+      .map((c) => {
+        const st = limitState(c.name, c.ox, 1);
+        const t0 = performance.now();
+        for (let i = 0; i < n; i++) {
+          st.time = 1 + i / 60;
+          c.m.pose(st, frame, 1 / 60);
+        }
+        return `${c.name} ${((performance.now() - t0) / n).toFixed(3)}ms evals ${c.m.rig.evals} chains ${c.m.rig.chains} contacts ${c.m.rig.contacts}`;
+      })
+      .join('\n');
 }

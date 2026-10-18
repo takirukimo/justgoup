@@ -6,11 +6,18 @@
 //               shoes (or approach shoes), mitten hands with thumbs and chalked fingertips, a
 //               chalk bag on a belt, and an optional harness with belay loop + figure-8 knot.
 //               One material for everything (palette regions), so the body is ONE draw call
-//               (+1 for the harness). Posed by analytic two-bone IK from a BodyGoal.
+//               (+1 for the harness). Posed from a BodyGoal by joint-limited two-bone IK: every
+//               limb's elbow / knee swivel is searched for the one closest to its pole that keeps
+//               the anatomical limits (JOINT_LIMITS: hip / shoulder cones and rotation, knee /
+//               elbow flexion, ankle, wrist, spine twist, head look) and clears the wall; a target
+//               outside that range is pulled in (the hand / foot hangs short, no joint breaks).
+//               Then capsule self-collision (torso, pelvis, neck, fitted head + horn spheres,
+//               limbs; depth-layer hint for crossings) swivels elbows / knees out of contact.
 //  ClimberModel — maps ClimberState (wall-local sim output) to BodyGoals every frame: hands on
-//               holds, toes on holds with dropped heels, frog-stance knees, damped secondary
-//               motion (breathing, sway, Elvis-leg tremor, body shake, head tracking) and
-//               phase poses (falling, landed, hanging, topped + celebrate).
+//               holds, toes on holds with dropped heels, frog-stance knees, drop knees with the
+//               hip turned in, high steps with the hips sitting back, matched hands / feet side
+//               by side, damped secondary motion (breathing, sway, Elvis-leg tremor, body shake,
+//               head tracking) and phase poses (falling, landed, hanging, topped + celebrate).
 
 import * as THREE from 'three';
 import type { ChalkId, ClimberState, ColorwayId, HeadId, HoldType, LimbId, LimbSnapshot, Vec2 } from '../core/types';
@@ -366,6 +373,16 @@ const R_SHIN = [0.056, 0.042] as const;
 const R_ELBOW_WALL = 0.05;
 const R_KNEE_WALL = 0.068;
 const WALL_MARGIN = 0.012;
+/** Swivel search: step, coarse step (existence tests), hysteresis margin (radians). */
+const SW_STEP = Math.PI / 12;
+const SW_COARSE = Math.PI / 6;
+const SW_HYST = 0.5;
+/** The warm start remembers a swivel this far inside the valid range (boundaries are fragile). */
+const SW_WARM = 0.06;
+/** Joint-violation radians per metre of wall penetration when no swivel clears both. */
+const SW_WALL_COST = 6;
+/** A swivel missing the joint limits by less than this (radians) is accepted rather than pulling the end in. */
+const SW_SOFT = 0.16;
 
 // closest points of two segments (scratch, no allocation)
 const _sd1 = new THREE.Vector3();
@@ -763,6 +780,16 @@ export class BodyRig {
   /** Chosen swivel direction (elbow / knee apex) and the side preferred when a limit clamps it. */
   readonly apex = [0, 1, 2, 3].map(() => new THREE.Vector3(0, 0, 1));
   private swivelSign = [1, 1, 1, 1];
+  private lastTh = [0, 0, 0, 0];
+  /**
+   * Wall QA (last solve): how far the hips would have to move out from the wall for a limb's
+   * anatomical mid joint to clear it, and the spare clearance of each knee / elbow.
+   */
+  readonly wallNeed = [0, 0, 0, 0];
+  readonly wallSlack = [1, 1, 1, 1];
+  private vWall = 0;
+  /** Collision re-solves run the wrist / ankle range once (the first solve already settled it). */
+  private quick = false;
   /** QA: the limb's target was outside the anatomical range and the end was pulled in (last solve). */
   readonly fallback = [false, false, false, false];
   private reqEnd = [0, 1, 2, 3].map(() => new THREE.Vector3());
@@ -817,6 +844,10 @@ export class BodyRig {
   private headWallPitch = 0;
   /** Contacts resolved in the last solve (QA counter). */
   contacts = 0;
+  /** Limit evaluations / chain solves in the last solve (QA counters). */
+  evals = 0;
+  chains = 0;
+  readonly evalsL = [0, 0, 0, 0];
   /** Self-collision on/off (QA). */
   collide = true;
 
@@ -1970,6 +2001,10 @@ export class BodyRig {
     this.solveHead(g, dt);
 
     // ── limbs: limited IK, then self-collision, then the bones ──
+    this.evals = 0;
+    this.chains = 0;
+    this.evalsL.fill(0);
+    this.wallNeed.fill(0);
     for (let s = 0; s < 2; s++) {
       this.tgtW[s].copy(g.hands[s].target);
       this.poleW[s].copy(g.hands[s].pole);
@@ -2005,10 +2040,13 @@ export class BodyRig {
     let yaw = 0;
     let pitch = 0;
     if (_t0.lengthSq() > 1e-8) {
-      yaw = Math.atan2(-_t0.x, -_t0.z);
+      // a target overhead counts as in front (a chest leaning into the wall puts the holds above
+      // just behind its frontal plane: without this the yaw flips to ±180° and the head spins)
+      const fz = _t0.y > 0 ? Math.max(-_t0.z, _t0.y * 0.4) : -_t0.z;
+      yaw = Math.atan2(-_t0.x, fz);
       // targets behind the head: keep turning the way we already are (no left/right flip)
       if (Math.abs(yaw) > 2.4 && this.yaw !== 0 && Math.sign(yaw) !== Math.sign(this.yaw)) yaw = Math.sign(this.yaw) * Math.PI;
-      pitch = Math.atan2(_t0.y - 0.15, Math.hypot(_t0.x, _t0.z));
+      pitch = Math.atan2(_t0.y - 0.15, Math.hypot(_t0.x, fz));
     }
     const L = JOINT_LIMITS;
     const k = dt <= 0 ? 1 : 1 - Math.exp(-dt * 9);
@@ -2080,7 +2118,8 @@ export class BodyRig {
     if (over > 0) S.addScaledVector(_t3, Math.min(0.06, over) / d);
     _t3.subVectors(J.wrist[s], S).normalize();
     clampAngle(dir, _t3, JOINT_LIMITS.wristDev * DEG);
-    for (let iter = 0; iter < 3; iter++) {
+    const iters = this.quick ? 1 : 3;
+    for (let iter = 0; iter < iters; iter++) {
       basisQuat(dir, up, qh);
       if (goal.jointTarget) J.wrist[s].copy(tgt);
       else J.wrist[s].copy(tgt).sub(_t2.copy(this.cGrip).applyQuaternion(qh));
@@ -2213,7 +2252,8 @@ export class BodyRig {
       }
     }
     // limited IK; the ankle range re-orients the foot about the toe (the toe stays on the hold)
-    for (let iter = 0; iter < 3; iter++) {
+    const iters = this.quick ? 1 : 3;
+    for (let iter = 0; iter < iters; iter++) {
       basisQuat(dir, up, qf);
       if (goal.jointTarget) J.ankle[s].copy(tgt);
       else J.ankle[s].copy(tgt).sub(_t2.copy(this.cToe).applyQuaternion(qf));
@@ -2311,6 +2351,7 @@ export class BodyRig {
    */
   private chain(li: number, root: THREE.Vector3, target: THREE.Vector3, pole: THREE.Vector3, outMid: THREE.Vector3, outEnd: THREE.Vector3): number {
     this.reqEnd[li].copy(target);
+    this.chains++;
     let k = this.chainCircle(li, root, target);
     let th = this.swivel(li, pole);
     this.fallback[li] = Number.isNaN(th);
@@ -2319,14 +2360,14 @@ export class BodyRig {
       // if even that is out of range, toward a point under the hip / by the hip
       this.pullEnd(li, root, target, this.cSafe);
       this.chainCircle(li, root, this.cSafe);
-      if (Number.isNaN(this.swivel(li, pole))) this.safeEnd(li, root, this.cSafe);
+      if (Number.isNaN(this.swivel(li, pole, true))) this.safeEnd(li, root, this.cSafe);
       let lo = 0;
       let hi = 1;
-      for (let i = 0; i < 7; i++) {
+      for (let i = 0; i < 6; i++) {
         const m = (lo + hi) * 0.5;
         this.cTgt.copy(this.cSafe).lerp(target, m);
         this.chainCircle(li, root, this.cTgt);
-        if (Number.isNaN(this.swivel(li, pole))) hi = m;
+        if (Number.isNaN(this.swivel(li, pole, true))) hi = m;
         else lo = m;
       }
       this.cTgt.copy(this.cSafe).lerp(target, lo);
@@ -2336,6 +2377,9 @@ export class BodyRig {
     }
     const ap = this.apex[li].copy(this.cE1).multiplyScalar(Math.cos(th)).addScaledVector(this.cE2, Math.sin(th));
     outMid.copy(this.cC).addScaledVector(ap, this.cH);
+    this.wallSlack[li] = this.wallOn
+      ? this.cA.subVectors(outMid, this.wallP).dot(this.wallN) - (li >= 2 ? R_KNEE_WALL : R_ELBOW_WALL) - WALL_MARGIN
+      : 1;
     this.cA.subVectors(this.cEnd, outMid);
     const l = this.cA.length();
     if (l > 1e-9) outEnd.copy(outMid).addScaledVector(this.cA, this.cL2 / l);
@@ -2374,8 +2418,12 @@ export class BodyRig {
     return k;
   }
 
-  /** Swivel angle (radians from the pole direction) of the closest valid mid joint, or NaN. */
-  private swivel(li: number, pole: THREE.Vector3): number {
+  /**
+   * Swivel angle (radians from the pole direction) of the closest valid mid joint, or NaN. Prefers
+   * swivels that satisfy the joint limits AND keep the elbow / knee off the wall, then joint limits
+   * alone. Warm-started from the last solve; `coarse` only tests existence (30° steps).
+   */
+  private swivel(li: number, pole: THREE.Vector3, coarse = false): number {
     const d = this.cD;
     const e1 = this.cE1.copy(pole).addScaledVector(d, -pole.dot(d));
     if (e1.lengthSq() < 1e-8) {
@@ -2387,60 +2435,150 @@ export class BodyRig {
     }
     e1.normalize();
     this.cE2.crossVectors(d, e1);
-    if (this.wallOn) {
-      const t = this.swivelSearch(li, true);
-      if (!Number.isNaN(t)) return t;
+    const v0 = this.violation(li, 0);
+    const w0 = this.vWall;
+    if (v0 <= 0 && w0 <= 0) return (this.lastTh[li] = 0);
+    if (coarse) {
+      if (v0 <= 0) return 0;
+      for (let k = 1; k <= 6; k++) {
+        if (this.violation(li, k * SW_COARSE) <= 0) return k * SW_COARSE;
+        if (k < 6 && this.violation(li, -k * SW_COARSE) <= 0) return -k * SW_COARSE;
+      }
+      return Number.NaN;
     }
-    return this.swivelSearch(li, false);
+    // warm start: last solve's swivel, if still fully valid → bisect toward the pole
+    const last = this.lastTh[li];
+    if (last !== 0) {
+      if (this.violation(li, last) <= 0 && this.vWall <= 0) {
+        // bracket the boundary between `last` and the pole with growing steps, then bisect
+        const sl = last > 0 ? 1 : -1;
+        let good = last;
+        let bad = 0;
+        let step = 0.12;
+        for (let i = 0; i < 5; i++) {
+          const t = good - sl * step;
+          if (t * sl <= 0) break;
+          if (this.violation(li, t) <= 0 && this.vWall <= 0) good = t;
+          else {
+            bad = t;
+            break;
+          }
+          step *= 2;
+        }
+        const th = this.refineSwivel(li, bad, good, true);
+        const inward = th > 0 ? SW_WARM : -SW_WARM;
+        // the other side wins only when clearly closer (hysteresis)
+        const lim = Math.abs(th) - SW_HYST;
+        const sg = th > 0 ? -1 : 1;
+        for (let k = 1; k * SW_COARSE < lim; k++) {
+          if (this.violation(li, sg * k * SW_COARSE) <= 0 && this.vWall <= 0) {
+            const o = this.refineSwivel(li, sg * (k - 1) * SW_COARSE, sg * k * SW_COARSE, true);
+            this.swivelSign[li] = sg;
+            this.lastTh[li] = o + sg * SW_WARM;
+            return o;
+          }
+        }
+        this.lastTh[li] = th + inward;
+        return th;
+      }
+    }
+    // sweep both sides outward: first fully valid (F) and first joint-valid (J) step per side, and
+    // the least-bad swivel (joint violation + wall penetration) in case nothing is fully valid
+    let pF = 0;
+    let nF = 0;
+    let pJ = 0;
+    let nJ = 0;
+    let bestC = v0 + SW_WALL_COST * w0;
+    let bestK = 0;
+    let bestV = v0;
+    let needJ = v0 <= 0 ? w0 : Infinity;
+    for (let k = 1; k <= 12; k++) {
+      if (!pF) {
+        const v = this.violation(li, k * SW_STEP);
+        const c = v + SW_WALL_COST * this.vWall;
+        if (v < bestV) bestV = v;
+        if (c < bestC) {
+          bestC = c;
+          bestK = k;
+        }
+        if (v <= 0) {
+          if (!pJ) pJ = k;
+          if (this.vWall <= 0) pF = k;
+          else if (this.vWall < needJ) needJ = this.vWall;
+        }
+      }
+      if (!nF && k < 12) {
+        const v = this.violation(li, -k * SW_STEP);
+        const c = v + SW_WALL_COST * this.vWall;
+        if (v < bestV) bestV = v;
+        if (c < bestC) {
+          bestC = c;
+          bestK = -k;
+        }
+        if (v <= 0) {
+          if (!nJ) nJ = k;
+          if (this.vWall <= 0) nF = k;
+          else if (this.vWall < needJ) needJ = this.vWall;
+        }
+      }
+      if (pF && nF) break;
+      const f = pF || nF;
+      if (f && k >= f + 2) break;
+    }
+    const kF = pF || nF ? this.pickSide(li, pF, nF) : 0;
+    if (kF) {
+      const sg = kF > 0 ? 1 : -1;
+      const th = this.refineSwivel(li, sg * (Math.abs(kF) - 1) * SW_STEP, kF * SW_STEP, true);
+      this.swivelSign[li] = sg;
+      this.lastTh[li] = th + sg * SW_WARM;
+      return th;
+    }
+    // out of the joints' range by more than a few degrees: pull the end in
+    if (v0 > 0 && !pJ && !nJ && bestV > SW_SOFT) return Number.NaN;
+    // anatomical swivels exist but all put the joint into the wall (or the limits are only just
+    // missed): least-bad compromise, refined
+    this.wallNeed[li] = Math.max(this.wallNeed[li], Number.isFinite(needJ) ? needJ : 0);
+    let lo = (bestK - 1) * SW_STEP;
+    let hi = (bestK + 1) * SW_STEP;
+    for (let i = 0; i < 4; i++) {
+      const m1 = lo + (hi - lo) * 0.382;
+      const m2 = lo + (hi - lo) * 0.618;
+      const c1 = this.violation(li, m1) + SW_WALL_COST * this.vWall;
+      const c2 = this.violation(li, m2) + SW_WALL_COST * this.vWall;
+      if (c1 < c2) hi = m2;
+      else lo = m1;
+    }
+    this.lastTh[li] = 0;
+    return (lo + hi) * 0.5;
   }
 
-  private swivelSearch(li: number, wall: boolean): number {
-    if (this.violation(li, 0, wall) <= 0) return 0;
-    const STEP = Math.PI / 12;
-    let pos = Number.NaN;
-    let neg = Number.NaN;
-    for (let k = 1; k <= 12; k++) {
-      if (this.violation(li, k * STEP, wall) <= 0) {
-        pos = this.refineSwivel(li, (k - 1) * STEP, k * STEP, wall);
-        break;
-      }
-    }
-    for (let k = 1; k <= 12; k++) {
-      if (this.violation(li, -k * STEP, wall) <= 0) {
-        neg = this.refineSwivel(li, -(k - 1) * STEP, -k * STEP, wall);
-        break;
-      }
-    }
-    if (Number.isNaN(pos) && Number.isNaN(neg)) return Number.NaN;
-    let th: number;
-    if (Number.isNaN(neg)) th = pos;
-    else if (Number.isNaN(pos)) th = neg;
-    else {
-      // hysteresis: stay on the side used last time unless the other one is clearly closer
-      const pref = this.swivelSign[li] > 0 ? pos : neg;
-      const other = this.swivelSign[li] > 0 ? neg : pos;
-      th = Math.abs(other) + 0.5 < Math.abs(pref) ? other : pref;
-    }
-    this.swivelSign[li] = th >= 0 ? 1 : -1;
-    return th;
+  /** Signed step of the side to use (hysteresis: keep last side unless the other is ≥ 2 steps closer). */
+  private pickSide(li: number, p: number, n: number): number {
+    if (!p) return -n;
+    if (!n) return p;
+    const pref = this.swivelSign[li] > 0 ? p : -n;
+    const other = this.swivelSign[li] > 0 ? -n : p;
+    return Math.abs(other) + 2 <= Math.abs(pref) ? other : pref;
   }
 
   /** Bisection between an invalid and a valid swivel angle → the boundary (valid side). */
-  private refineSwivel(li: number, bad: number, good: number, wall: boolean): number {
-    for (let i = 0; i < 6; i++) {
+  private refineSwivel(li: number, bad: number, good: number, full: boolean): number {
+    for (let i = 0; i < 4; i++) {
       const m = (bad + good) * 0.5;
-      if (this.violation(li, m, wall) <= 0) good = m;
+      if (this.violation(li, m) <= 0 && (!full || this.vWall <= 0)) good = m;
       else bad = m;
     }
     return good;
   }
 
   /**
-   * How far a swivel breaks the limb's limits (0 = anatomical): the hip / shoulder cone, the hip /
-   * shoulder rotation (twist of the knee / elbow apex about the bone) and, with `wall`, the mid
-   * joint's clearance from the wall. Uses the circle from chainCircle + the basis from swivel.
+   * How far a swivel breaks the limb's limits (0 = anatomical): the hip / shoulder cone and the hip /
+   * shoulder rotation (twist of the knee / elbow apex about the bone). The mid joint's wall
+   * penetration goes to `vWall`. Uses the circle from chainCircle + the basis from swivel.
    */
-  private violation(li: number, th: number, wall: boolean): number {
+  private violation(li: number, th: number): number {
+    this.evals++;
+    this.evalsL[li]++;
     const leg = li >= 2;
     const sg = SIGN[li & 1];
     const L = JOINT_LIMITS;
@@ -2492,9 +2630,10 @@ export class BodyRig {
         else if (psi < -L.shoulderRotIn * DEG) v += -L.shoulderRotIn * DEG - psi;
       }
     }
-    if (wall && this.wallOn) {
+    this.vWall = 0;
+    if (this.wallOn) {
       const dep = this.cN.subVectors(mid, this.wallP).dot(this.wallN) - (leg ? R_KNEE_WALL : R_ELBOW_WALL) - WALL_MARGIN;
-      if (dep < 0) v += 1e-3 - dep * 4;
+      if (dep < 0) this.vWall = -dep;
     }
     return v;
   }
@@ -2596,7 +2735,7 @@ export class BodyRig {
     if (head) {
       // turn the head away from the contact side (positive yaw = look toward −X)
       const lat = this.kC.subVectors(_cp2, this.joints.head).dot(this.CX);
-      this.headPushAcc += (lat >= 0 ? 1 : -1) * pen * 7;
+      this.headPushAcc += (lat >= 0 ? 1 : -1) * pen * 5;
     }
     return 1;
   }
@@ -2608,15 +2747,17 @@ export class BodyRig {
     const gj = lj < 2 ? g.hands[lj] : g.feet[lj - 2];
     if (gi.layer !== gj.layer) return gi.layer > gj.layer ? 1 : -1;
     // heuristic: the limb whose end crossed further toward the other side is the crossing one
+    return this.crossAmount(li) <= this.crossAmount(lj) ? 1 : -1;
+  }
+
+  /** How far a limb's end sits on its own side of its root (negative = crossed toward the other side). */
+  private crossAmount(l: number): number {
     const J = this.joints;
-    const cross = (l: number): number => {
-      const s = l & 1;
-      const arm = l < 2;
-      const r = arm ? J.shoulder[s] : J.hip[s];
-      const e = arm ? J.wrist[s] : J.ankle[s];
-      return this.kC.subVectors(e, r).dot(arm ? this.CX : this.PX) * SIGN[s];
-    };
-    return cross(li) <= cross(lj) ? 1 : -1;
+    const s = l & 1;
+    const arm = l < 2;
+    const r = arm ? J.shoulder[s] : J.hip[s];
+    const e = arm ? J.wrist[s] : J.ankle[s];
+    return this.kC.subVectors(e, r).dot(arm ? this.CX : this.PX) * SIGN[s];
   }
 
   /** Limb part vs limb part: the front limb moves toward `away`, the back one toward the wall. */
@@ -2708,11 +2849,13 @@ export class BodyRig {
         this.poleW[i].subVectors(mid, root).addScaledVector(p, 1.35);
         const lg = arm ? g.hands[s] : g.feet[s];
         if (!lg.pinned && e.lengthSq() > 0) this.tgtW[i].addScaledVector(e, 1.1);
+        this.quick = true;
         if (arm) this.solveArm(g, s);
         else this.solveLeg(g, s);
+        this.quick = false;
       }
     }
-    this.headAvoidT = clampN(this.headPushAcc, -0.55, 0.55);
+    this.headAvoidT = clampN(this.headPushAcc, -0.3, 0.3);
   }
 
   /** QA: why a limb's target is (un)reachable — samples its swivel circle (cone, rotation, wall). */
@@ -2731,8 +2874,8 @@ export class BodyRig {
     const rows: string[] = [`limb ${li} dist ${end.distanceTo(root).toFixed(3)} h ${this.cH.toFixed(3)} fb ${this.fallback[li]}`];
     for (let k = 0; k < 24; k++) {
       const th = (k * Math.PI) / 12;
-      const v = this.violation(li, th, false);
-      const vw = this.violation(li, th, true);
+      const v = this.violation(li, th);
+      const vw = this.vWall;
       const u = this.cA;
       const ap = this.cV;
       let cone = '';
