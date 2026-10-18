@@ -4,6 +4,11 @@ import { ROUTE_COLORS } from '../config/brand';
 import { dailyBoulder, dailyGrade, generateBoulder, generateRopeRoute, todayKey, tutorialBoulder, TUTORIAL_SEQUENCE } from './generator';
 import { planBeta, planBetaDetailed } from './solver';
 import { nominalCapacity, usableByHand } from './holds';
+import { leadProfile } from './archetypes';
+import { angleAt, profileOf } from './wall-profile';
+import { Rng } from '../core/rng';
+import { ClimberSim } from './climber-sim';
+import { autoClimb } from './bot';
 
 const routeHolds = (b: ReturnType<typeof generateBoulder>) => b.holds.filter((h) => h.role !== 'deco');
 
@@ -178,6 +183,58 @@ describe('generator — determinism + structure', () => {
       return sum / Math.max(1, n);
     };
     expect(mean((_r, y) => y < 4.2)).toBeGreaterThan(mean((r, y) => y > 0.55 * r.height && y < 0.75 * r.height));
+  });
+});
+
+describe('generator — lead tower variety', () => {
+  it('lines vary: some routes cross the wall on a diagonal, others meander or zigzag up the middle', { timeout: 120_000 }, () => {
+    const dx = [0, 1, 2, 3, 4, 5, 6, 7, 8].map((k) => {
+      const r = generateRopeRoute({ seed: 4400 + k * 53, grade: 2 + (k % 5) });
+      const starts = r.holds.filter((h) => h.role === 'start');
+      const top = r.holds.find((h) => h.role === 'top')!;
+      return Math.abs(top.x - starts.reduce((a, h) => a + h.x, 0) / starts.length);
+    });
+    expect(dx.some((d) => d >= 2.0), dx.join()).toBe(true);
+    expect(dx.some((d) => d < 1.2), dx.join()).toBe(true);
+  });
+
+  it('profiled towers (GEN.profiles): vertical start → steepening headwall → roof crux at 55–75 % → eased lip → finish', () => {
+    for (let k = 0; k < 40; k++) {
+      const grade = k % 11;
+      const { panels, length } = leadProfile(grade, new Rng(77 + k * 31), GAME.ropeWall.height);
+      expect(panels.length).toBeGreaterThanOrEqual(5);
+      expect(panels[0].angle).toBeLessThanOrEqual(5);
+      expect(length).toBeGreaterThanOrEqual(GAME.ropeWall.height - 0.01);
+      // the crux is the steepest panel: 45° (easy) … 60°+ (hard), starting at 55–75 % of the route
+      let ci = 0;
+      for (let i = 1; i < panels.length; i++) if (panels[i].angle > panels[ci].angle) ci = i;
+      expect(ci).toBe(3);
+      expect(panels[ci].angle).toBeGreaterThanOrEqual(grade >= 8 ? 55 : 41);
+      expect(panels[ci].y0 / length).toBeGreaterThanOrEqual(0.5);
+      expect(panels[ci].y0 / length).toBeLessThanOrEqual(0.75);
+      // the headwall steepens on the way up; every lip after the crux eases off by ≤ 26° at a time
+      for (let i = 1; i <= ci; i++) expect(panels[i].angle).toBeGreaterThan(panels[i - 1].angle - 4);
+      for (let i = ci + 1; i < panels.length; i++) {
+        expect(panels[i].angle).toBeLessThan(panels[i - 1].angle);
+        expect(panels[i - 1].angle - panels[i].angle).toBeLessThanOrEqual(26);
+      }
+    }
+  });
+
+  it('a profiled tower is generated (no ladder fallback) and the bot climbs it clipping every draw', { timeout: 200_000 }, () => {
+    const r = generateRopeRoute({ seed: 2718, grade: 4, profiles: true });
+    const prof = profileOf(r)!;
+    expect(prof).not.toBeNull();
+    expect(prof.maxAngle).toBeGreaterThanOrEqual(45);
+    // the route climbs through the roof crux, on the reward holds over its lip
+    const hands = r.holds.filter((h) => h.role === 'hand');
+    expect(hands.some((h) => angleAt(prof, h.y) >= 45)).toBe(true);
+    expect(hands.some((h) => h.type !== 'jug')).toBe(true);
+    const sim = new ClimberSim(r);
+    const res = autoClimb(sim, { maxTime: 900 });
+    expect(res.sent, res.bot.log.join('; ')).toBe(true);
+    // every draw, the anchor (the topping clip) included
+    expect(sim.getState().clipped.length).toBe(r.quickdraws!.length);
   });
 });
 
