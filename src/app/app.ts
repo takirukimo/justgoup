@@ -149,6 +149,12 @@ export class App implements RunHost {
       return;
     }
     await this.toMenu('title', true);
+    // rules can change between versions: hand out anything this profile already earned
+    const late = collectUnlocks(p);
+    if (late.length) {
+      this.announceUnlocks(late);
+      this.svc.save();
+    }
   }
 
   // ═══════════════════════════════ frame ═══════════════════════════════

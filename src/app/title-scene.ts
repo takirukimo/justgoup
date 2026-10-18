@@ -1,6 +1,7 @@
 // The living backdrop behind every menu: a CHIRAL problem on the wall, the climber hanging on its
 // start holds (breathing, idling) and Steini on the mats keeping an eye on things.
 
+import type { GuideState } from '../core/contracts';
 import type { BoulderDef, ClimberState } from '../core/types';
 import { hashString } from '../core/rng';
 import { ClimberSim } from '../game/climber-sim';
@@ -11,7 +12,7 @@ export type BackdropFraming = 'title' | 'locker';
 
 const FRAMING: Record<BackdropFraming, { lift: number; distance: number }> = {
   title: { lift: 0.3, distance: 7.4 },
-  locker: { lift: -0.62, distance: 4.4 },
+  locker: { lift: -1.25, distance: 4.5 },
 };
 
 export class TitleScene {
@@ -22,6 +23,7 @@ export class TitleScene {
   private loaded = false;
   private framing: BackdropFraming = 'title';
   private upgrade: Promise<void> | null = null;
+  private guide: GuideState | null = null;
 
   constructor(svc: Services) {
     this.svc = svc;
@@ -52,7 +54,10 @@ export class TitleScene {
         this.boulder = b;
         this.sim = new ClimberSim(b, { invincible: true });
         this.loaded = false;
-        if (this.active) this.load();
+        if (this.active) {
+          this.load();
+          this.applyCamera(false);
+        }
       })
       .catch((err: unknown) => console.warn('[app] title wall generation failed', err));
     return this.upgrade;
@@ -100,14 +105,17 @@ export class TitleScene {
     const half = this.boulder.width / 2 - 0.5;
     const gx = Math.max(-half, Math.min(half, sx + (sx > 0 ? -1.05 : 1.05)));
     const chest = this.sim.getState().chest;
-    renderer.setGuide({ x: gx, depth: 1.5, pose: 'idle', lookAt: { x: chest.x, y: chest.y } });
+    this.guide = { x: gx, depth: 1.5, pose: 'idle', lookAt: { x: chest.x, y: chest.y } };
     this.loaded = true;
   }
 
   private applyCamera(instant: boolean): void {
     const { renderer } = this.svc;
-    // title: the climber sits between the lockup and the PLAY stack; locker: close-up above the sheet
-    renderer.setTitleFraming(this.framing === 'locker' ? FRAMING.locker : FRAMING.title);
+    // title: the climber sits between the lockup and the PLAY stack; locker: close-up above the
+    // sheet, just the player's climber (Steini steps out of the shot)
+    const locker = this.framing === 'locker';
+    renderer.setTitleFraming(locker ? FRAMING.locker : FRAMING.title);
+    renderer.setGuide(locker ? null : this.guide);
     renderer.setCameraMode('title', instant ? { instant: true } : undefined);
   }
 }

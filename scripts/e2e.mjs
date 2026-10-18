@@ -3,8 +3,9 @@
 //
 // usage: node scripts/e2e.mjs [baseUrl] [--out dir] [--ts 3] [--q low] [--only a,b,c] [--keep]
 //   baseUrl defaults to http://localhost:5207 (start the dev server first:
-//   VITE_CACHE_DIR=node_modules/.vite-integration npx vite --port 5207 --strictPort)
-//   steps: onboarding, sendtrain, leaderboard, locker, settings, community, editor, lead
+//   VITE_CACHE_DIR=node_modules/.vite-integration npx vite --config dev/e2e.vite.config.mjs --port 5207 --strictPort
+//   — that config never reloads the page mid-run; restart it after source changes)
+//   steps: onboarding, sendtrain, leaderboard, locker, settings, community, editor, daily, communityplay, lead
 //   --only runs a subset (later steps seed a returning-player profile when onboarding is skipped).
 import { chromium } from 'playwright-core';
 import { mkdirSync } from 'node:fs';
@@ -360,6 +361,30 @@ if (want('sendtrain')) {
   await shot('results-send');
   const res = await page.evaluate(() => document.querySelector('.stamp-txt')?.textContent ?? '');
   ok(/SENT/.test(res), `results show a send (${res})`);
+
+  // the run goes on: boulder 02, then the first fall ends the run (forced fall: QA shortcut)
+  await tapText('NEXT BOULDER');
+  await waitScreen('preview', 120000);
+  await veilClear();
+  await page.waitForTimeout(1200);
+  const pv2 = await page.evaluate(() => document.querySelector('#ui')?.textContent ?? '');
+  ok(/BOULDER 02/.test(pv2), 'NEXT BOULDER opens boulder 02 of the run');
+  await shot('preview-boulder-02');
+  await tap('.pv-hit', 'TAP TO START');
+  await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'climb start (02)', 60000);
+  await page.waitForTimeout(600);
+  await page.evaluate(() => window.__jgu.sim.forceFall());
+  await page.waitForTimeout(700);
+  await shot('fall');
+  await waitScreen('results', 90000);
+  await waitFor(() => /#\d+/.test(document.querySelector('#ui')?.textContent ?? ''), 'leaderboard rank on the results', 30000).catch(() => false);
+  await page.waitForTimeout(3000);
+  await shot('results-run-over');
+  const ro = await page.evaluate(() => ({ stamp: document.querySelector('.stamp-txt')?.textContent ?? '', text: document.querySelector('#ui')?.textContent ?? '' }));
+  ok(/RUN OVER|OFF|FALL/i.test(ro.stamp) || /RUN OVER/i.test(ro.text), `results show the run is over (${ro.stamp})`);
+  ok(/#\d+/.test(ro.text), 'run-over results show the leaderboard rank');
+  const best = await page.evaluate(() => window.__jgu.app.profile.best.boulder);
+  ok(best > 0, `profile best updated (${best})`);
   await tapText('MENU');
   await waitScreen('modes', 60000);
   await veilClear();
@@ -460,8 +485,90 @@ if (want('editor')) {
   const after = await page.evaluate(() => window.__jgu.editor.getDraft().holds.length);
   ok(after > before, `editor placed holds by tapping (${before} → ${after})`);
   await shot('editor-holds');
-  await page.evaluate(() => window.__jgu.editor.close());
+
+  // remix a generated sample, then TEST it: the app runs a test climb and hands back to the editor
+  await tap('.ed-tool-more', 'editor menu');
+  await tap('.ed-sample-go', 'LOAD sample');
+  await tapText('REPLACE');
+  await waitFor(() => {
+    const d = window.__jgu.editor.getDraft();
+    return d.holds.length > 8 && !document.querySelector('.ed-sample-go.is-busy');
+  }, 'sample problem', 120000);
+  await page.waitForTimeout(1500);
+  await shot('editor-sample');
+  await tap('.ed-test', 'TEST');
+  await waitScreen('preview', 120000);
+  await veilClear();
+  await page.waitForTimeout(1200);
+  ok((await page.evaluate(() => window.__jgu.app.activeSession?.sim.boulder.holds.length ?? 0)) > 8, 'editor TEST starts a test climb of the draft');
+  await shot('editor-test-preview');
+  await tap('.pv-hit', 'TAP TO START');
+  await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'test climb start', 60000);
+  await page.waitForTimeout(800);
+  await tap('.hud-pause', 'pause');
+  await waitScreen('pause');
+  await tapText('QUIT');
+  await waitFor(() => window.__jgu.app.current === 'editor' && window.__jgu.editor.isOpen, 'editor reopened after the test', 60000);
+  await veilClear();
+  await page.waitForTimeout(1200);
+  await shot('editor-after-test');
+  ok(true, 'editor reopened with the draft after quitting the test climb');
+
+  // publish through the app (the PUBLISH button itself unlocks only after a sent test climb)
+  const pub = await page.evaluate(async () => {
+    const j = window.__jgu;
+    const before = j.app.profile.myProblems.length;
+    const d = j.editor.getDraft();
+    j.bus.emit('editor:publish', { boulder: { ...d, name: 'E2E Line' } });
+    for (let i = 0; i < 100 && j.app.profile.myProblems.length === before; i++) await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 800));
+    const list = await j.backend.listProblems({ sort: 'new', limit: 50 });
+    return { mine: j.app.profile.myProblems.length - before, listed: list.some((p) => p.name === 'E2E Line') };
+  });
+  ok(pub.mine === 1 && pub.listed, `editor:publish saves to the profile and the community wall (${JSON.stringify(pub)})`);
+  await page.waitForTimeout(600);
+  await shot('editor-published-toast');
+
+  await tap('.ed-x', 'close editor');
   await waitFor(() => window.__jgu.app.current === 'menu', 'editor closed', 30000);
+  await waitScreen('title');
+  await veilClear();
+  await page.waitForTimeout(600);
+  await shot('title-after-editor');
+}
+
+// ───────────────────────────── Daily + Community: start a climb, read the route, back out ─────────────────────────────
+if (want('daily')) {
+  await tap('.title-play', 'PLAY');
+  await waitScreen('modes');
+  await page.locator('.mode-card', { hasText: 'Daily' }).first().tap();
+  await waitScreen('preview', 120000);
+  await veilClear();
+  await page.waitForTimeout(1500);
+  await shot('daily-preview');
+  const d = await page.evaluate(() => window.__jgu.app.activeSession?.boulder.id ?? '');
+  ok(/daily/i.test(d), `Daily Boulder loads today's problem (${d})`);
+  await tap('.pv-back', 'back');
+  await waitScreen('modes', 60000);
+  await veilClear();
+  await tap('.btn-back', 'back');
+  await waitScreen('title');
+}
+
+if (want('communityplay')) {
+  await tapText('COMMUNITY');
+  await waitScreen('community');
+  await waitFor(() => !document.querySelector('.skel-card'), 'community cards', 30000);
+  await page.locator('#ui .cm-play, #ui .cm-card button').first().tap();
+  await waitScreen('preview', 120000);
+  await veilClear();
+  await page.waitForTimeout(1500);
+  await shot('community-preview');
+  ok((await page.evaluate(() => window.__jgu.app.activeSession?.boulder.holds.length ?? 0)) > 4, 'community problem loads for a climb');
+  await tap('.pv-back', 'back');
+  await waitScreen('community', 60000);
+  await veilClear();
+  await tap('.btn-back', 'back');
   await waitScreen('title');
 }
 

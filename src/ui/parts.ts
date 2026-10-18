@@ -48,7 +48,7 @@ export function backendBadge(text: string): HTMLElement {
 }
 
 export function onlineBadge(isGlobal: boolean): HTMLElement {
-  return backendBadge(isGlobal ? 'GLOBAL' : 'OFFLINE · LOCAL ONLY');
+  return backendBadge(isGlobal ? 'GLOBAL' : 'OFFLINE');
 }
 
 export function gradeChip(g: number, opts: { font?: boolean; size?: 'sm' | 'md' | 'lg' } = {}): HTMLElement {

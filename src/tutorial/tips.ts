@@ -76,9 +76,14 @@ function pickFrom(list: readonly Tip[], seed: number | undefined): string {
   return list[i].text;
 }
 
-/** One of Steini's tips. Same seed → same tip on every device; no seed → random. */
-export function randomTip(seed?: number): string {
-  return pickFrom(TIP_DEFS, seed);
+const BOULDER_TIPS: readonly Tip[] = TIP_DEFS.filter((t) => !t.topics.includes('rope'));
+
+/**
+ * One of Steini's tips. Same seed → same tip on every device; no seed → random.
+ * `mode: 'boulder'` leaves out the lead-climbing tips (no rope on a boulder).
+ */
+export function randomTip(seed?: number, mode?: 'boulder' | 'rope'): string {
+  return pickFrom(mode === 'boulder' ? BOULDER_TIPS : TIP_DEFS, seed);
 }
 
 const FALL_TOPICS: Record<FallReason, readonly Topic[]> = {

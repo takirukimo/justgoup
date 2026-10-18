@@ -169,7 +169,7 @@ export class SendTrainRun extends BaseRun {
       this.lastBoulder = b;
       const run: HudRunInfo = { ...this.baseRun('boulder', b), score: this.score, streak: this.streak, hintsLeft: this.hints.left };
       const restart = this.score > 0 ? { title: 'Start a new run?', body: `This run ends here and its ${this.score.toLocaleString('en-US')} pts go to the leaderboard.`, ok: 'NEW RUN' } : null;
-      const climbing = this.climb(b, { run, hints: this.hints, tip: randomTip(this.seed + this.index * 7), restartPrompt: restart });
+      const climbing = this.climb(b, { run, hints: this.hints, tip: randomTip(this.seed + this.index * 7, 'boulder'), restartPrompt: restart });
       // the next problem generates in the worker while this one is climbed
       void this.svc.gen.boulder(this.optsFor(this.index + 1)).catch(() => undefined);
       const res = await climbing;
@@ -451,7 +451,7 @@ export class DailyRun extends BaseRun {
     let first = true;
     for (;;) {
       const run = this.baseRun('daily', b);
-      const res = await this.climb(b, { run, hints: { left: HINTS_PER_RUN }, tip: randomTip(hashString(key)) }, first ? undefined : { kicker: 'DAILY BOULDER', title: 'ANOTHER GO' });
+      const res = await this.climb(b, { run, hints: { left: HINTS_PER_RUN }, tip: randomTip(hashString(key), 'boulder') }, first ? undefined : { kicker: 'DAILY BOULDER', title: 'ANOTHER GO' });
       first = false;
       if (res.kind === 'quit') return;
       if (res.kind === 'retry') continue;
@@ -527,7 +527,7 @@ export class CommunityRun extends BaseRun {
     let veil: { kicker: string; title: string } | undefined = { kicker: `COMMUNITY · BY ${(b.author || 'A CLIMBER').toUpperCase()}`, title: b.name };
     for (;;) {
       const run = this.baseRun('community', b);
-      const res = await this.climb(b, { run, hints: { left: HINTS_PER_RUN }, tip: randomTip(hashString(pr.id)) }, veil);
+      const res = await this.climb(b, { run, hints: { left: HINTS_PER_RUN }, tip: randomTip(hashString(pr.id), 'boulder') }, veil);
       veil = { kicker: 'COMMUNITY', title: 'ANOTHER GO' };
       if (res.kind === 'quit') return;
       if (res.kind === 'retry') continue;
