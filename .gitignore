@@ -6,3 +6,6 @@ dist-single
 .env
 .env.local
 screenshots/
+
+# Claude Code agent worktrees / local state
+.claude/
