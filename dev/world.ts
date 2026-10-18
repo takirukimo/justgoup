@@ -106,6 +106,56 @@ function sampleBoulder(): BoulderDef {
   };
 }
 
+// Hold gallery (holds=1): every type × product shape × size class, in rows, on a vertical wall.
+function galleryBoulder(): BoulderDef {
+  const holds: HoldDef[] = [];
+  let id = 0;
+  const rows: Partial<HoldDef>[][] = [
+    // jugs, buckets, horns, pinches
+    [
+      { type: 'jug', size: 0.09 }, { type: 'jug', size: 0.12, shape: 'bucket' }, { type: 'jug', size: 0.1, shape: 'wood' },
+      { type: 'pinch', size: 0.08 }, { type: 'pinch', size: 0.075, shape: 'horn' }, { type: 'pinch', size: 0.09, shape: 'horn' },
+    ],
+    // edges: deep incut, flat, slopey, rail, dual-tex, wood
+    [
+      { type: 'edge', size: 0.07, edgeDepthMm: 34, lipAngle: 20 }, { type: 'edge', size: 0.065, edgeDepthMm: 22, lipAngle: 0 },
+      { type: 'edge', size: 0.065, edgeDepthMm: 16, lipAngle: -12 }, { type: 'edge', size: 0.06, edgeDepthMm: 22, shape: 'rail' },
+      { type: 'edge', size: 0.07, edgeDepthMm: 24, shape: 'dual-tex' }, { type: 'edge', size: 0.07, edgeDepthMm: 24, shape: 'wood' },
+    ],
+    // crimps + micros
+    [
+      { type: 'crimp', size: 0.05, edgeDepthMm: 13, lipAngle: 12 }, { type: 'crimp', size: 0.045, edgeDepthMm: 9, lipAngle: 0 },
+      { type: 'crimp', size: 0.04, edgeDepthMm: 7, lipAngle: -6 }, { type: 'crimp', size: 0.035, edgeDepthMm: 5, shape: 'micro' },
+      { type: 'foot', size: 0.03 }, { type: 'foot', size: 0.025, shape: 'chip' },
+    ],
+    // slopers: friendly, hard, macro, dual-tex + pockets
+    [
+      { type: 'sloper', size: 0.09, lipAngle: -20 }, { type: 'sloper', size: 0.09, lipAngle: -40 }, { type: 'sloper', size: 0.13, shape: 'macro', lipAngle: -30 },
+      { type: 'sloper', size: 0.1, shape: 'dual-tex', lipAngle: -28 },
+    ],
+    [
+      { type: 'pocket', size: 0.06, fingers: 1 }, { type: 'pocket', size: 0.065, fingers: 2 }, { type: 'pocket', size: 0.07, fingers: 3 },
+      { type: 'pocket', size: 0.075, fingers: 4 },
+    ],
+  ];
+  const cols = ROUTE_COLORS.map((c) => c.hex);
+  rows.forEach((row, r) => {
+    const y = 3.9 - r * 0.62;
+    row.forEach((h, k) => {
+      const x = -1.75 + (k * 3.5) / Math.max(1, row.length - 1);
+      holds.push({ id: `g${id++}`, x, y, angle: -Math.PI / 2, role: 'hand', color: cols[(r * 3 + k) % cols.length], seed: 11 + id * 7, type: 'jug', size: 0.08, ...h } as HoldDef);
+    });
+  });
+  // volumes: pyramid, frustum, wedge, dual-tex, half-dome, ridge (+ a hold bolted onto the ridge)
+  for (let k = 0; k < 6; k++) {
+    holds.push({ id: `v${k}`, x: -1.8 + k * 0.72, y: 0.75, type: 'volume', size: 0.3, angle: -Math.PI / 2, role: 'hand', color: k % 2 ? '#E9E5DD' : '#55606E', seed: k + 6 * 3 });
+  }
+  holds.push({ id: 'onv', x: 1.8, y: 0.8, type: 'edge', size: 0.05, angle: -Math.PI / 2, role: 'hand', color: '#D54051', seed: 99, onVolume: 'v5', edgeDepthMm: 20 });
+  holds.push({ id: 's0', x: -0.2, y: 1.4, type: 'jug', size: 0.1, angle: -Math.PI / 2, role: 'start', color: '#D54051', seed: 5 });
+  holds.push({ id: 't0', x: 0.4, y: 4.3, type: 'jug', size: 0.1, angle: -Math.PI / 2, role: 'top', color: '#D54051', seed: 6 });
+  return { id: 'gallery', name: 'Hold Gallery', grade: 4, mode: 'boulder', wallAngle: 0, width: GAME.boulderWall.width, height: GAME.boulderWall.height, holds, color: '#D54051', seed: 3 };
+}
+
 // Prefer SIM's generator + sim when they exist and compile (built in parallel by another agent).
 const genMods = import.meta.glob('../src/game/generator.ts');
 const simMods = import.meta.glob('../src/game/climber-sim.ts');
@@ -207,7 +257,7 @@ async function main(): Promise<void> {
   const canvas = document.getElementById('gl') as HTMLCanvasElement;
   const r = new GameRenderer(canvas, { quality, toneMapping: qs.get('tm') === 'agx' ? 'agx' : 'aces' });
   await r.init();
-  const b = (await tryGenerator()) ?? sampleBoulder();
+  const b = qs.get('holds') === '1' ? galleryBoulder() : (await tryGenerator()) ?? sampleBoulder();
   if (qs.has('preset')) {
     const wp = await import('../src/game/wall-profile');
     const spec = (wp.PROFILE_PRESETS as Record<string, readonly (readonly [number, number])[]>)[qs.get('preset') as string];

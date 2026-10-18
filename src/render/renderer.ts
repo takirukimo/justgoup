@@ -212,7 +212,8 @@ export class GameRenderer implements RendererAPI {
       out.type = h.type;
       out.angle = h.angle;
       out.size = h.size;
-      out.depth = this.wall.holds.geoms.get(id)?.depth ?? h.size * 0.5;
+      // a hold bolted onto a volume stands off the wall by the volume's face height there
+      out.depth = (this.wall.holds.geoms.get(id)?.depth ?? h.size * 0.5) + (this.wall.holds.mounts.get(id)?.lift ?? 0);
       return true;
     });
     this.scene.add(this.climber);

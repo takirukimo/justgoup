@@ -126,6 +126,12 @@ export function createSurfaceMaterial(o: SurfaceOpts = {}): SurfaceMaterial {
 	roughnessFactor = mix(roughnessFactor, 0.32, surfMetal);`,
       )
       .replace(
+        '#include <normal_fragment_maps>',
+        /* glsl */ `#include <normal_fragment_maps>
+	// glossy (smooth, dual-tex) zones lose most of the grain of the speckle normal map
+	normal = normalize(mix(normal, nonPerturbedNormal, clamp(vSurf.w, 0.0, 1.0) * 0.8));`,
+      )
+      .replace(
         '#include <metalnessmap_fragment>',
         /* glsl */ `#include <metalnessmap_fragment>
 	metalnessFactor = mix(metalnessFactor, 0.9, surfMetal);`,

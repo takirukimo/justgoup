@@ -15,7 +15,7 @@ import type { ClimbMode, HoldDef, HoldType } from '../core/types';
 import { Rng } from '../core/rng';
 import { clamp, smoothstep } from '../core/math';
 import { Batch, beam, tr, type BakeFn } from './batch';
-import { holdGeometry, decoColor } from './holds';
+import { holdGeometry, holdVariant, decoColor, woodColor } from './holds';
 import { createSurfaceMaterial, type SurfaceMaterial } from './shading';
 import {
   BANNER_ASPECT,
@@ -338,6 +338,7 @@ export class GymEnvironment {
       // routes
       const hrng = new Rng(f.seed * 131 + 7);
       const types: HoldType[] = ['jug', 'edge', 'crimp', 'sloper', 'pinch', 'pocket'];
+      const srng = new Rng(f.seed * 71 + 5);
       for (let r = 0; r < f.routes; r++) {
         const col = ROUTE_COLORS[hrng.int(0, ROUTE_COLORS.length - 1)].hex;
         let x = hrng.range(-len / 2 + 0.5, len / 2 - 0.5);
@@ -350,6 +351,14 @@ export class GymEnvironment {
             id: '', x, y, type, size: hrng.range(0.045, 0.11), angle: -Math.PI / 2 + hrng.range(-0.8, 0.8),
             role: 'deco', color: col, seed: hrng.int(0, 1e6),
           };
+          // product variety on the other routes too (own rng: positions stay where they were)
+          const sv = srng.next();
+          if (type === 'jug' && sv < 0.35) h.shape = 'bucket';
+          else if (type === 'pinch' && sv < 0.35) h.shape = 'horn';
+          else if (type === 'edge' && sv < 0.2) h.shape = 'rail';
+          else if (type === 'sloper' && sv < 0.25) h.shape = sv < 0.1 ? 'macro' : 'dual-tex';
+          else if (sv > 0.93) h.shape = 'wood';
+          if (type === 'pocket') h.fingers = srng.pick([1, 2, 3, 4] as const);
           addEnvHold(holdBatch, h, localMat, m4);
           if (hrng.chance(0.6)) {
             const fh: HoldDef = { ...h, x: clamp(x + hrng.range(-0.4, 0.4), -len / 2 + 0.2, len / 2 - 0.2), y: Math.max(0.42, y - hrng.range(0.5, 0.9)), type: 'foot', size: hrng.range(0.022, 0.04), seed: h.seed + 1 };
@@ -914,9 +923,9 @@ function addEnvHold(
   localMat: (x: number, y: number, z: number, rz: number, out: THREE.Matrix4) => THREE.Matrix4,
   m4: THREE.Matrix4,
 ): void {
-  const hg = holdGeometry(h.type, h.seed, h.size, 1);
+  const hg = holdGeometry(h.type, h.seed, h.size, 1, holdVariant(h));
   localMat(h.x, h.y, -0.0015, h.angle + Math.PI / 2, m4);
-  const c = new THREE.Color(h.color);
+  const c = h.shape === 'wood' ? woodColor(h.color, 0.12) : new THREE.Color(h.color);
   const hsl = { h: 0, s: 0, l: 0 };
   c.getHSL(hsl);
   c.setHSL(hsl.h, hsl.s * 0.82, hsl.l * 0.82);

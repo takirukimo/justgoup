@@ -12,7 +12,7 @@ import * as THREE from 'three';
 import { PALETTE } from '../config/brand';
 import type { HighlightKind, HoldHighlight } from '../core/contracts';
 import type { WallFrame } from './wall-frame';
-import type { HoldSet } from './holds';
+import type { HoldMount, HoldSet } from './holds';
 import { makeCanvas } from './textures';
 
 const KIND_BIT: Record<HighlightKind, number> = { reachable: 1, hint: 2, selected: 4, candidate: 8, tutorial: 16 };
@@ -111,6 +111,8 @@ interface Active {
   phase: number;
   /** Surface y of the highlighted thing (its panel frame orients the ring). */
   wallY: number;
+  /** A hold bolted onto a volume: the ring sits on the volume face instead. */
+  mount: HoldMount | null;
 }
 
 function arrowTexture(kind: 'arrow' | 'chevron'): THREE.CanvasTexture {
@@ -285,7 +287,7 @@ export class Highlights {
   }
 
   private newActive(): Active {
-    return { holdId: '', kinds: 0, quality: 0, seen: false, ring: null, sprite: null, spriteKind: null, outline: null, pos: new THREE.Vector3(), radius: 0.1, phase: 0, wallY: 0 };
+    return { holdId: '', kinds: 0, quality: 0, seen: false, ring: null, sprite: null, spriteKind: null, outline: null, pos: new THREE.Vector3(), radius: 0.1, phase: 0, wallY: 0, mount: null };
   }
 
   private place(a: Active): void {
@@ -297,11 +299,14 @@ export class Highlights {
         this.frame.toWorldXYZ(e.x, e.y, 0.03, a.pos);
         a.radius = e.radius;
         a.wallY = e.y;
+        a.mount = null;
       }
       return;
     }
     a.wallY = h.y;
-    this.frame.toWorldXYZ(h.x, h.y, 0, a.pos).addScaledVector(this.frame.normalAt(h.y, this.tmpN, false), 0.006);
+    a.mount = this.holds.mounts.get(a.holdId) ?? null;
+    if (a.mount) a.pos.copy(a.mount.pos).addScaledVector(this.tmpN.set(0, 0, 1).applyQuaternion(a.mount.quat), 0.006);
+    else this.frame.toWorldXYZ(h.x, h.y, 0, a.pos).addScaledVector(this.frame.normalAt(h.y, this.tmpN, false), 0.006);
     a.radius = g ? Math.max(g.halfX, g.halfY) * (h.type === 'volume' ? 0.85 : 1.12) + 0.035 : h.size + 0.04;
   }
 
@@ -315,7 +320,8 @@ export class Highlights {
       }
       a.ring.mat.uniforms.uStyle.value = style;
       a.ring.mesh.position.copy(a.pos);
-      this.frame.quaternionAt(a.wallY, a.ring.mesh.quaternion);
+      if (a.mount) a.ring.mesh.quaternion.copy(a.mount.quat);
+      else this.frame.quaternionAt(a.wallY, a.ring.mesh.quaternion);
     } else if (a.ring) {
       this.group.remove(a.ring.mesh);
       this.ringPool.push(a.ring);

@@ -9,7 +9,7 @@
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import type { BoulderDef, HoldDef, HoldType } from '../core/types';
+import type { BoulderDef, HoldDef, HoldShape, HoldType } from '../core/types';
 import { Rng } from '../core/rng';
 import type { WallFrame } from './wall-frame';
 import { createSurfaceMaterial, ensureSurfaceAttributes, type SurfaceMaterial } from './shading';
@@ -66,8 +66,8 @@ const SLOPER: ProfilePt[] = (() => {
 /** Lathe profiles: (r, z). */
 const POCKET: ProfilePt[] = [
   pp(1.0, 0.0, 0.4), pp(0.97, 0.18, 0.1), pp(0.86, 0.38, 0, 0.03), pp(0.68, 0.52, 0, 0.1),
-  pp(0.5, 0.58, 0, 0.3), pp(0.38, 0.54, 0.1, 0.5), pp(0.32, 0.42, 0.35, 0.55), pp(0.3, 0.28, 0.55, 0.5),
-  pp(0.24, 0.16, 0.7, 0.4), pp(0.12, 0.12, 0.75, 0.3), pp(0.0, 0.11, 0.75, 0.3),
+  pp(0.5, 0.58, 0, 0.35), pp(0.4, 0.55, 0.12, 0.6), pp(0.33, 0.43, 0.45, 0.55), pp(0.3, 0.28, 0.68, 0.45),
+  pp(0.24, 0.16, 0.82, 0.35), pp(0.12, 0.12, 0.85, 0.25), pp(0.0, 0.11, 0.85, 0.25),
 ];
 const FOOT: ProfilePt[] = [pp(1.0, 0, 0.4), pp(0.92, 0.22, 0.1), pp(0.72, 0.42, 0, 0.05), pp(0.42, 0.55, 0, 0.1), pp(0.0, 0.6, 0, 0.12)];
 
@@ -164,7 +164,9 @@ function sweep(prof: ProfilePt[], o: SweepOpts): Built {
       uv[k * 2] = x;
       uv[k * 2 + 1] = arc[j];
       const wallAo = Math.max(0, 1 - z / (maxZ * 0.28 + 1e-6)) * 0.32;
-      surf[k * 4] = p.chalk * (0.55 + 0.45 * s);
+      // chalk lies in patches (where hands actually go), never as an even coat
+      const patch = Math.max(0, Math.min(1, 0.55 + 0.6 * o.noise(x * 2.6 + 3.1, y * 2.6, z * 2.6)));
+      surf[k * 4] = p.chalk * (0.55 + 0.45 * s) * patch;
       surf[k * 4 + 1] = 0;
       surf[k * 4 + 2] = Math.min(0.85, p.ao * (0.5 + 0.5 * s) + wallAo);
       surf[k * 4 + 3] = 0;
@@ -196,6 +198,11 @@ interface LatheOpts {
   holeShift: number; // +y shift of the inner part (pocket opening toward the grip side)
   noise: Noise3;
   noiseAmp: number;
+  /** Pockets: x / y scale of the opening (r < 0.5 of the profile) relative to the rim. */
+  holeSX?: number;
+  holeSY?: number;
+  /** Pockets: z of the pocket floor (unit; the profile's inner bottom). */
+  floor?: number;
 }
 
 function lathe(prof: ProfilePt[], o: LatheOpts): Built {
@@ -212,9 +219,15 @@ function lathe(prof: ProfilePt[], o: LatheOpts): Built {
     for (let j = 0; j < nV; j++) {
       const p = prof[j];
       const inner = Math.max(0, 1 - p.y / 0.5); // p.y holds r for lathe profiles
-      let x = p.y * ct * o.sx;
-      let y = p.y * st * o.sy + o.holeShift * inner;
+      // the opening (inside the rim) scales on its own: a mono is a round hole, a 4-finger pocket a wide slot
+      const hole = Math.min(1, Math.max(0, (0.62 - p.y) / 0.3));
+      const hsx = 1 + ((o.holeSX ?? 1) - 1) * hole;
+      const hsy = 1 + ((o.holeSY ?? 1) - 1) * hole;
+      let x = p.y * ct * o.sx * hsx;
+      let y = p.y * st * o.sy * hsy + o.holeShift * inner;
       let z = p.z;
+      // deeper / shallower pocket floor
+      if (o.floor !== undefined && p.y < 0.36) z = Math.min(z, o.floor + (p.z - 0.11) * 0.5);
       // tilt the pocket: deeper toward the grip side
       z -= inner * Math.max(0, st) * 0.05;
       const contact = Math.min(1, z / (maxZ * 0.3 + 1e-6));
@@ -303,7 +316,13 @@ interface VolumeBuilt {
   face: { c: THREE.Vector3; n: THREE.Vector3; ax: THREE.Vector3; r: number };
 }
 
-/** Volume in unit size (radius ≈ 1). kind: 0 pyramid, 1 frustum, 2 wedge, 3 dual-tex pyramid. */
+/** Volume shapes buildVolume knows (variant % VOLUME_KINDS). */
+export const VOLUME_KINDS = 6;
+
+/**
+ * Volume in unit size (radius ≈ 1). kind: 0 pyramid, 1 frustum, 2 wedge, 3 dual-tex pyramid,
+ * 4 faceted half-dome, 5 ridge (a long prism with hipped ends).
+ */
 export function buildVolume(rng: Rng, kind: number): VolumeBuilt {
   const fb = new FacetBuilder();
   const faces: { pts: THREE.Vector3[] }[] = [];
@@ -311,7 +330,56 @@ export function buildVolume(rng: Rng, kind: number): VolumeBuilt {
     fb.face(pts, shade, gloss, 0.25);
     faces.push({ pts });
   };
-  if (kind === 2) {
+  if (kind === 4) {
+    // faceted half-dome: rings of flat facets (a geodesic look that matches the other volumes)
+    const seg = 9;
+    const rings = 3;
+    const R = rng.range(0.92, 1.05);
+    const H = rng.range(0.5, 0.68);
+    const ringPts: THREE.Vector3[][] = [];
+    const a0 = rng.range(0, Math.PI);
+    for (let r = 0; r <= rings; r++) {
+      const phi = (r / rings) * (Math.PI / 2) * 0.92;
+      const rr = Math.cos(phi) * R;
+      const zz = Math.sin(phi) * H;
+      const ring: THREE.Vector3[] = [];
+      for (let k = 0; k < seg; k++) {
+        const a = a0 + ((k + (r % 2) * 0.5) / seg) * Math.PI * 2;
+        ring.push(new THREE.Vector3(Math.cos(a) * rr * 1.06, Math.sin(a) * rr * 0.94, zz));
+      }
+      ringPts.push(ring);
+    }
+    for (let r = 0; r < rings; r++) {
+      const A = ringPts[r];
+      const B = ringPts[r + 1];
+      for (let k = 0; k < seg; k++) {
+        const k2 = (k + 1) % seg;
+        const sh = (k + r) % 2 === 0 ? 1 : 0.9;
+        if (r % 2 === 0) {
+          addFace([A[k], A[k2], B[k]], sh, 0);
+          addFace([A[k2], B[k2], B[k]], sh * 0.96, 0);
+        } else {
+          addFace([A[k], A[k2], B[k2]], sh, 0);
+          addFace([A[k], B[k2], B[k]], sh * 0.96, 0);
+        }
+      }
+    }
+    addFace(ringPts[rings], 1, 0.1);
+  } else if (kind === 5) {
+    // ridge: a long triangular prism, hipped at both ends
+    const hx = rng.range(1.15, 1.4);
+    const hy = rng.range(0.42, 0.55);
+    const h = rng.range(0.42, 0.58);
+    const tx = hx - rng.range(0.3, 0.45);
+    const ry = rng.range(-0.12, 0.12) * hy;
+    const b0 = new THREE.Vector3(-hx, -hy, 0), b1 = new THREE.Vector3(hx, -hy, 0);
+    const b2 = new THREE.Vector3(hx, hy, 0), b3 = new THREE.Vector3(-hx, hy, 0);
+    const r0 = new THREE.Vector3(-tx, ry, h), r1 = new THREE.Vector3(tx, ry, h);
+    addFace([b0, b1, r1, r0], 1, 0);
+    addFace([b1, b2, r1], 0.84, 0);
+    addFace([b2, b3, r0, r1], 0.94, 0);
+    addFace([b3, b0, r0], 0.84, 0);
+  } else if (kind === 2) {
     // wedge: rectangle base, ridge offset toward the grip side
     const hx = rng.range(0.9, 1.15);
     const hy = rng.range(0.5, 0.7);
@@ -380,6 +448,200 @@ export function buildVolume(rng: Rng, kind: number): VolumeBuilt {
     r = Math.min(r, c.distanceTo(a.clone().addScaledVector(e, t)));
   }
   return { geo: fb.build(), face: { c, n: nrm, ax, r } };
+}
+
+// ───────────────────────────── variety (Phase B hold catalogue) ─────────────────────────────
+
+/** The product details of a hold that change its geometry (HoldDef fields; all optional). */
+export interface HoldVariant {
+  shape?: HoldShape;
+  edgeDepthMm?: number;
+  lipAngle?: number;
+  fingers?: 1 | 2 | 3 | 4;
+}
+
+/** A deep closed bucket: a high curled lip over a scooped cavity (unit size). */
+const BUCKET: ProfilePt[] = [
+  pp(-0.85, 0.0, 0.4), pp(-0.82, 0.25, 0.15), pp(-0.7, 0.5, 0, 0.02), pp(-0.45, 0.72, 0, 0.03),
+  pp(-0.15, 0.86, 0, 0.05), pp(0.15, 0.92, 0, 0.1), pp(0.42, 0.9, 0, 0.3), pp(0.58, 0.8, 0, 0.55),
+  pp(0.63, 0.66, 0.05, 0.62), pp(0.56, 0.56, 0.25, 0.56), pp(0.4, 0.5, 0.5, 0.46), pp(0.22, 0.42, 0.66, 0.36),
+  pp(0.13, 0.28, 0.72, 0.3), pp(0.17, 0.14, 0.64, 0.26), pp(0.34, 0.06, 0.52, 0.2), pp(0.55, 0.02, 0.42, 0.12),
+  pp(0.7, 0.0, 0.4, 0.08),
+];
+
+/**
+ * Edge / crimp cross-section from its product numbers (unit size, s = hold radius in m): the shelf
+ * the fingers sit on is `depthMm` deep (z extent at the lip) and tilts by `lipDeg` (+ incut: the
+ * shelf drops toward the wall behind the lip, a hook; − slopey: it falls away over the lip).
+ * `body` is the height of the hold under the lip (unit), `round` the lip radius (unit).
+ */
+function edgeProfile(s: number, depthMm: number, lipDeg: number, body: number, round: number): ProfilePt[] {
+  const D = Math.min(0.95, Math.max(0.07, depthMm / 1000 / s));
+  const yL = 0.3;
+  const tl = Math.tan((Math.max(-30, Math.min(30, lipDeg)) * Math.PI) / 180);
+  const yW = yL - D * tl;
+  const r = Math.min(round, D * 0.45);
+  const shelf = (t: number) => yL + (yW - yL) * t;
+  return [
+    pp(-body, 0.0, 0.4),
+    pp(-body * 0.95, D * 0.3 + 0.03, 0.15),
+    pp(-body * 0.72, D * 0.72 + 0.02, 0, 0.02),
+    pp(-body * 0.3, D * 0.93 + 0.015, 0, 0.04),
+    pp(yL - r * 2.2, D + 0.01, 0, 0.14),
+    pp(yL - r * 0.6, D - r * 0.25, 0, 0.5),
+    pp(yL, D - r, 0.04, 0.66),
+    pp(shelf(0.3) + 0.005, D * 0.7 - r * 0.5, 0.12, 0.72),
+    pp(shelf(0.65), D * 0.35, 0.3, 0.6),
+    pp(yW, 0.0, 0.45, 0.32),
+  ];
+}
+
+/** Sloper dome: `lipDeg` −20 (friendly: a boxier shoulder on the grip side) … −40 (a round, flat dome). */
+function sloperProfile(lipDeg: number, flat = 1): ProfilePt[] {
+  const k = Math.max(0, Math.min(1, (-lipDeg - 18) / 24));
+  const e = 0.55 + 0.8 * k; // superellipse exponent: < 1 boxy, > 1 pointed / flat-sided
+  const peak = 0.16 * k; // the crown moves toward the wall side on hard slopers
+  const out: ProfilePt[] = [];
+  const n = 16;
+  for (let i = 0; i <= n; i++) {
+    const a = (Math.PI * i) / n;
+    const y = -Math.cos(a) * 0.95;
+    const sn = Math.pow(Math.sin(a), e);
+    const z = 0.6 * flat * sn * (1 - (0.16 + 0.2 * k) * Math.max(0, y - peak));
+    const chalk = Math.max(0, Math.min(1, (y + 0.1) / 0.9)) * 0.34;
+    out.push(pp(y, z, i === 0 || i === n ? 0.38 : i === 1 || i === n - 1 ? 0.12 : 0, chalk));
+  }
+  return out;
+}
+
+/** A horn: a tapered post standing out of the wall, curling toward the grip side; you wrap it. */
+function horn(rng: Rng, lod: 0 | 1 | 2): Built {
+  const nU = lod === 1 ? 8 : lod === 2 ? 10 : 14; // around
+  const nV = lod === 1 ? 6 : 9; // along
+  const L = rng.range(1.25, 1.55); // unit length out of the wall
+  const bend = rng.range(0.55, 0.8);
+  const r0 = rng.range(0.27, 0.33);
+  const pos: number[] = [];
+  const uv: number[] = [];
+  const surf: number[] = [];
+  const idx: number[] = [];
+  const noise = makeNoise(rng, 2, 5);
+  for (let j = 0; j <= nV; j++) {
+    const t = j / nV;
+    // centreline: out along z, curving up (+y) toward the tip
+    const cz = L * Math.sin(t * 1.2) / Math.sin(1.2);
+    const cy = bend * t * t;
+    // tangent for the ring frame (in the y–z plane)
+    const tz = (L * 1.2 * Math.cos(t * 1.2)) / Math.sin(1.2);
+    const ty = 2 * bend * t;
+    const tl = Math.hypot(tz, ty) || 1;
+    const ny = tz / tl; // ring "up" axis ⟂ tangent in the y–z plane
+    const nz = -ty / tl;
+    // flared foot, tapering shaft, rounded tip
+    const flare = 1 + 0.55 * Math.pow(Math.max(0, 1 - t / 0.18), 2);
+    const tip = t > 0.86 ? Math.sqrt(Math.max(0, 1 - Math.pow((t - 0.86) / 0.14, 2))) : 1;
+    const r = r0 * (1 - 0.5 * t) * flare * (j === nV ? 0.02 : tip);
+    for (let i = 0; i < nU; i++) {
+      const a = (i / nU) * Math.PI * 2;
+      const ca = Math.cos(a);
+      const sa = Math.sin(a);
+      const lump = 1 + 0.07 * noise(ca * 2, sa * 2, t * 3);
+      const x = ca * r * lump;
+      const y = cy + sa * r * lump * ny;
+      let z = cz + sa * r * lump * nz;
+      if (j === 0) z = 0;
+      pos.push(x, y, Math.max(0, z));
+      uv.push(a * r0, t * L);
+      // chalk on the top / grip side of the shaft, AO at the wall
+      const grip = Math.max(0, sa) * (0.25 + 0.5 * t);
+      surf.push(grip * 0.7, 0, j === 0 ? 0.45 : t < 0.12 ? 0.18 : 0, 0);
+    }
+  }
+  for (let j = 0; j < nV; j++) {
+    for (let i = 0; i < nU; i++) {
+      const i2 = (i + 1) % nU;
+      const a = j * nU + i;
+      const b = j * nU + i2;
+      const c = (j + 1) * nU + i;
+      const d = (j + 1) * nU + i2;
+      idx.push(a, b, c, b, d, c);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setAttribute('aSurf', new THREE.Float32BufferAttribute(surf, 4));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  // bolt through the foot on the lower side (washer just clear of the shaft)
+  return { geo: g, boltVertex: Math.floor(nU * 0.75) };
+}
+
+/** A tiny screw-on foot chip: an angular faceted wedge, flat-shaded. */
+function chip(rng: Rng): THREE.BufferGeometry {
+  const fb = new FacetBuilder();
+  const n = rng.int(4, 6);
+  const a0 = rng.range(0, Math.PI * 2);
+  const base: THREE.Vector3[] = [];
+  const top: THREE.Vector3[] = [];
+  const h = rng.range(0.42, 0.6);
+  for (let k = 0; k < n; k++) {
+    const a = a0 + (k / n) * Math.PI * 2 + rng.range(-0.25, 0.25);
+    const r = rng.range(0.85, 1.1);
+    const x = Math.cos(a) * r * 1.25;
+    const y = Math.sin(a) * r * 0.8;
+    base.push(new THREE.Vector3(x, y, 0));
+    // the top facet leans toward the stepping side (+y): thicker at the top edge
+    top.push(new THREE.Vector3(x * 0.55, y * 0.55 + 0.08, h * (0.7 + 0.3 * Math.max(0, Math.sin(a)))));
+  }
+  for (let k = 0; k < n; k++) {
+    const k2 = (k + 1) % n;
+    fb.face([base[k], base[k2], top[k2], top[k]], 0.92, 0, 0);
+  }
+  fb.face(top, 1, 0, 0.12);
+  return fb.build();
+}
+
+/**
+ * Dual-tex / wood / macro finishes, per vertex (they survive the deco merge): dual-tex keeps a matte,
+ * slightly darker textured zone on the grip side and a glossy smooth zone over the rest, split by a
+ * fine seam; wood gets a warm grain (vertex colour) and loses most of its chalk shine.
+ */
+function applyFinish(g: THREE.BufferGeometry, finish: 'dual' | 'wood', halfY: number, seed: number): void {
+  const p = g.getAttribute('position') as THREE.BufferAttribute;
+  const surf = g.getAttribute('aSurf') as THREE.BufferAttribute;
+  let col = g.getAttribute('color') as THREE.BufferAttribute | undefined;
+  if (!col) {
+    col = new THREE.BufferAttribute(new Float32Array(p.count * 3).fill(1), 3);
+    g.setAttribute('color', col);
+  }
+  const rng = new Rng(seed ^ 0x3d7);
+  const ph = rng.range(0, 6.28);
+  const freq = rng.range(130, 190);
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i);
+    const y = p.getY(i);
+    const z = p.getZ(i);
+    if (finish === 'dual') {
+      // grip zone: the upper 45% (the side the fingers / palm go)
+      const t = y / Math.max(1e-4, halfY);
+      const grip = THREE.MathUtils.smoothstep(t, 0.02, 0.12);
+      const seam = Math.exp(-Math.pow((t - 0.07) / 0.035, 2));
+      const tone = (0.78 + 0.22 * (1 - grip)) * (1 - 0.35 * seam);
+      col.setXYZ(i, col.getX(i) * tone, col.getY(i) * tone, col.getZ(i) * tone);
+      if (surf) surf.setW(i, (1 - grip) * 0.8);
+    } else {
+      // growth rings: bands across the long axis, warped by a low-frequency wobble
+      const w = Math.sin(x * 9 + ph) * 0.004 + Math.sin(z * 13 + ph * 2) * 0.003;
+      const ring = 0.5 + 0.5 * Math.sin((y + w) * freq + ph);
+      const fine = 0.5 + 0.5 * Math.sin((y * 2.7 + x * 0.4 + w * 3) * freq * 2.3);
+      const v = 0.7 + 0.26 * Math.pow(ring, 2.5) + 0.07 * fine;
+      col.setXYZ(i, col.getX(i) * v * 1.05, col.getY(i) * v, col.getZ(i) * v * 0.88);
+      if (surf) surf.setX(i, surf.getX(i) * 0.4);
+    }
+  }
+  col.needsUpdate = true;
+  if (surf) surf.needsUpdate = true;
 }
 
 // ───────────────────────────── bolts ─────────────────────────────
@@ -470,11 +732,19 @@ function ensureColor(g: THREE.BufferGeometry): void {
  * lod 1 = background detail (fewer segments, no bolt) for the neighbouring walls.
  * lod 2 = deco holds on the main wall (two thirds of the segments, no bolt): dimmed and never
  *         touched, they don't need the route holds' tessellation at phone resolution.
+ * `v` (HoldDef shape / edgeDepthMm / lipAngle / fingers) picks the product variant: a deep incut
+ * edge reads differently from a 7 mm crimp, a mono from a three-finger pocket, a horn, a rail,
+ * a bucket, a chip, a macro, dual-tex and wooden holds each have their own build or finish.
  */
-export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 | 1 | 2 = 0): HoldGeometry {
+export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 | 1 | 2 = 0, v: HoldVariant = {}): HoldGeometry {
   const variant = Math.abs(seed) % HOLD_VARIANTS;
   const sb = Math.max(1, Math.round(size * 200));
-  const key = `${type}:${variant}:${sb}:${lod}`;
+  const shape = v.shape;
+  // quantised product numbers keep the cache small (2 mm depth steps, 5° lip steps)
+  const dq = v.edgeDepthMm !== undefined ? Math.round(v.edgeDepthMm / 2) : -1;
+  const lq = v.lipAngle !== undefined ? Math.round(v.lipAngle / 5) : 99;
+  const fq = v.fingers ?? 0;
+  const key = `${type}:${shape ?? '-'}:${variant}:${sb}:${lod}:${dq}:${lq}:${fq}`;
   const segU = (n: number) => (lod === 1 ? Math.max(8, Math.round(n * 0.5)) : lod === 2 ? Math.max(10, Math.round(n * 0.66)) : n);
   geoUsed.set(key, geoEpoch);
   const hit = geoCache.get(key);
@@ -488,36 +758,99 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 
   const rng = new Rng(0x4011d + variant * 7919 + type.length * 131);
   let built: Built | null = null;
   let vol: VolumeBuilt | null = null;
+  let flat: THREE.BufferGeometry | null = null;
   let boltScale = 1;
   const noise = makeNoise(rng, 2.2, 6.5);
+  const depth = (fallback: number) => (dq >= 0 ? dq * 2 : fallback);
+  const lip = (fallback: number) => (lq !== 99 ? lq * 5 : fallback);
   switch (type) {
     case 'jug':
-      built = sweep(JUG, { halfLen: rng.range(1.0, 1.3), segU: segU(18), taperP: rng.range(2.0, 2.8), bend: rng.range(-0.22, 0.05), zKeep: 0.6, noise, noiseAmp: 0.08, boltJ: 14, asym: rng.range(-1, 1) });
+      if (shape === 'bucket') {
+        built = sweep(BUCKET, { halfLen: rng.range(0.85, 1.05), segU: segU(20), taperP: rng.range(1.8, 2.3), bend: rng.range(-0.3, -0.1), zKeep: 0.72, noise, noiseAmp: 0.07, boltJ: 13, asym: rng.range(-0.6, 0.6) });
+      } else {
+        built = sweep(JUG, { halfLen: rng.range(1.0, 1.3), segU: segU(18), taperP: rng.range(2.0, 2.8), bend: rng.range(-0.22, 0.05), zKeep: 0.6, noise, noiseAmp: 0.08, boltJ: 14, asym: rng.range(-1, 1) });
+      }
       break;
-    case 'edge':
-      built = sweep(EDGE, { halfLen: rng.range(1.35, 1.7), segU: segU(18), taperP: rng.range(3, 5), bend: rng.range(-0.12, 0.12), zKeep: 0.5, noise, noiseAmp: 0.06, boltJ: 4, asym: rng.range(-0.8, 0.8) });
-      break;
-    case 'crimp':
-      built = sweep(CRIMP, { halfLen: rng.range(1.4, 1.9), segU: segU(16), taperP: rng.range(2.5, 4), bend: rng.range(-0.2, 0.2), zKeep: 0.5, noise, noiseAmp: 0.05, boltJ: 3, asym: rng.range(-0.8, 0.8) });
-      boltScale = 0.8;
-      break;
-    case 'sloper':
-      built = sweep(SLOPER, { halfLen: rng.range(0.95, 1.2), segU: segU(20), taperP: rng.range(1.9, 2.4), bend: rng.range(-0.1, 0.1), zKeep: 0.75, noise, noiseAmp: 0.08, boltJ: 5, asym: rng.range(-0.6, 0.6), detail: 0.5 });
-      break;
-    case 'pinch': {
-      built = sweep(PINCH, { halfLen: rng.range(1.3, 1.6), segU: segU(18), taperP: rng.range(2.2, 3), bend: rng.range(-0.15, 0.15), zKeep: 0.6, noise, noiseAmp: 0.08, boltJ: 4, asym: rng.range(-1, 1) });
-      built.geo.rotateZ(Math.PI / 2);
+    case 'edge': {
+      const rail = shape === 'rail';
+      const prof = edgeProfile(s, depth(rail ? 22 : 24), lip(8), rail ? 0.42 : 0.52, 0.05);
+      built = sweep(prof, {
+        halfLen: rail ? rng.range(3.4, 4.2) : rng.range(1.7, 2.15),
+        segU: segU(rail ? 28 : 20),
+        taperP: rail ? rng.range(7, 10) : rng.range(4.5, 6.5),
+        bend: rail ? rng.range(-0.06, 0.06) : rng.range(-0.14, 0.1),
+        zKeep: rail ? 0.25 : 0.38,
+        noise,
+        noiseAmp: rail ? 0.025 : 0.032,
+        boltJ: 2,
+        asym: rng.range(-0.7, 0.7),
+        detail: 0.12,
+      });
       break;
     }
-    case 'pocket':
-      built = lathe(POCKET, { seg: lod === 1 ? 12 : lod === 2 ? 16 : 22, sx: rng.range(1.0, 1.25), sy: rng.range(0.8, 0.95), holeShift: rng.range(0.08, 0.2), noise, noiseAmp: 0.06 });
+    case 'crimp': {
+      const micro = shape === 'micro';
+      const prof = edgeProfile(s, depth(micro ? 6 : 10), lip(4), micro ? 0.3 : 0.4, micro ? 0.012 : 0.025);
+      built = sweep(prof, { halfLen: micro ? rng.range(1.1, 1.5) : rng.range(1.8, 2.4), segU: segU(18), taperP: rng.range(3.2, 5), bend: rng.range(-0.25, 0.25), zKeep: 0.4, noise, noiseAmp: micro ? 0.018 : 0.026, boltJ: 2, asym: rng.range(-0.8, 0.8), detail: 0.1 });
+      boltScale = micro ? 0.6 : 0.8;
       break;
+    }
+    case 'sloper': {
+      const macro = shape === 'macro';
+      built = sweep(sloperProfile(lip(-32), macro ? 0.72 : 1), {
+        halfLen: macro ? rng.range(1.45, 1.8) : rng.range(0.95, 1.2),
+        segU: segU(macro ? 24 : 20),
+        taperP: macro ? rng.range(2.4, 3.2) : rng.range(1.9, 2.4),
+        bend: rng.range(-0.1, 0.1),
+        zKeep: macro ? 0.85 : 0.75,
+        noise,
+        noiseAmp: macro ? 0.05 : 0.08,
+        boltJ: 5,
+        asym: rng.range(-0.6, 0.6),
+        detail: 0.5,
+      });
+      break;
+    }
+    case 'pinch': {
+      if (shape === 'horn') {
+        built = horn(rng, lod);
+        boltScale = 0.8;
+      } else {
+        built = sweep(PINCH, { halfLen: rng.range(1.3, 1.6), segU: segU(18), taperP: rng.range(2.2, 3), bend: rng.range(-0.15, 0.15), zKeep: 0.6, noise, noiseAmp: 0.08, boltJ: 4, asym: rng.range(-1, 1) });
+        built.geo.rotateZ(Math.PI / 2);
+      }
+      break;
+    }
+    case 'pocket': {
+      // the opening fits the fingers it takes: a round mono, a two-finger slot, a wide 3–4 finger pocket
+      const f = fq || 3;
+      const hx = f === 1 ? 0.42 : f === 2 ? 0.72 : f === 3 ? 1 : 1.25;
+      const hy = f === 1 ? 0.55 : f === 2 ? 0.6 : f === 3 ? 0.68 : 0.78;
+      const floor = dq >= 0 ? Math.max(0.05, Math.min(0.42, 0.58 - (dq * 2) / 1000 / s)) : 0.11;
+      built = lathe(POCKET, {
+        seg: lod === 1 ? 12 : lod === 2 ? 16 : 22,
+        sx: rng.range(1.0, 1.25) * (f >= 4 ? 1.15 : 1),
+        sy: rng.range(0.8, 0.95),
+        holeShift: rng.range(0.08, 0.2),
+        noise,
+        noiseAmp: 0.06,
+        holeSX: hx,
+        holeSY: hy,
+        floor,
+      });
+      break;
+    }
     case 'foot':
-      built = lathe(FOOT, { seg: lod === 1 ? 9 : lod === 2 ? 11 : 14, sx: rng.range(1.1, 1.5), sy: rng.range(0.7, 0.95), holeShift: 0, noise: makeNoise(rng, 1.5, 4), noiseAmp: 0.14 });
-      boltScale = 0.55;
+      if (shape === 'chip') {
+        flat = chip(rng);
+        boltScale = 0.45;
+      } else {
+        built = lathe(FOOT, { seg: lod === 1 ? 9 : lod === 2 ? 11 : 14, sx: rng.range(1.1, 1.5), sy: rng.range(0.7, 0.95), holeShift: 0, noise: makeNoise(rng, 1.5, 4), noiseAmp: 0.14 });
+        boltScale = 0.55;
+      }
       break;
     case 'volume':
-      vol = buildVolume(rng, variant % 4);
+      vol = buildVolume(rng, shape === 'dual-tex' ? 3 : variant % VOLUME_KINDS);
       break;
   }
 
@@ -537,6 +870,12 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 
       bolts.push(placeBolt(_v, face.n, 0.9));
     }
     if (bolts.length) geo = mergeGeometries([geo, ...bolts], false) as THREE.BufferGeometry;
+  } else if (flat) {
+    geo = flat;
+    geo.scale(s, s, s);
+    const uv = geo.getAttribute('uv') as THREE.BufferAttribute;
+    for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * s, uv.getY(i) * s);
+    if (!lod) geo = mergeGeometries([geo, placeBolt(_v.set(0, 0.04 * s, 0.5 * s), _n.set(0, 0.2, 1).normalize(), Math.max(0.4, s / 0.06) * boltScale)], false) as THREE.BufferGeometry;
   } else if (built) {
     geo = built.geo;
     geo.scale(s, s, s);
@@ -549,6 +888,11 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 
     _v.fromBufferAttribute(p, built.boltVertex);
     _n.fromBufferAttribute(nr, built.boltVertex).normalize();
     if (type === 'pocket') _n.set(0, 0.25, 1).normalize();
+    if (shape === 'horn') {
+      // through the flared foot, below the shaft
+      _v.set(0, -0.5 * s, 0.1 * s);
+      _n.set(0, -0.35, 1).normalize();
+    }
     const bscale = Math.min(1, Math.max(0.5, s / 0.06)) * boltScale;
     if (!lod) geo = mergeGeometries([geo, placeBolt(_v, _n, bscale)], false) as THREE.BufferGeometry;
   } else {
@@ -558,15 +902,23 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 
   geo.computeBoundingBox();
   geo.computeBoundingSphere();
   const bb = geo.boundingBox as THREE.Box3;
+  const halfY = Math.max(Math.abs(bb.min.y), Math.abs(bb.max.y));
+  if (shape === 'dual-tex' || shape === 'macro') applyFinish(geo, 'dual', halfY, seed);
+  else if (shape === 'wood') applyFinish(geo, 'wood', halfY, seed);
   const entry: HoldGeometry = {
     geo,
     halfX: Math.max(Math.abs(bb.min.x), Math.abs(bb.max.x)),
-    halfY: Math.max(Math.abs(bb.min.y), Math.abs(bb.max.y)),
+    halfY,
     depth: bb.max.z,
     face,
   };
   geoCache.set(key, entry);
   return entry;
+}
+
+/** The variant fields of a hold (for holdGeometry). */
+export function holdVariant(h: Pick<HoldDef, 'shape' | 'edgeDepthMm' | 'lipAngle' | 'fingers'>): HoldVariant {
+  return { shape: h.shape, edgeDepthMm: h.edgeDepthMm, lipAngle: h.lipAngle, fingers: h.fingers };
 }
 
 const _pq = new THREE.Quaternion();
@@ -600,6 +952,19 @@ export function decoColor(hex: string, out = new THREE.Color(), routeHex?: strin
   out.set(hex);
   out.getHSL(_hsl, SRGB);
   out.setHSL(_hsl.h, _hsl.s * 0.5, WALL_L + (_hsl.l - WALL_L) * k, SRGB);
+  return out;
+}
+
+/** Natural beech / ash of wooden holds (display sRGB). */
+const WOOD = new THREE.Color('#B9875A');
+
+/**
+ * A wooden hold's colour: natural wood stained `k` toward the route colour; with `routeHex`
+ * (a deco hold behind that route) it recedes like the other deco holds.
+ */
+export function woodColor(hex: string, k: number, routeHex?: string, out = new THREE.Color()): THREE.Color {
+  out.copy(WOOD).lerp(new THREE.Color(hex), k);
+  if (routeHex) decoColor(`#${out.getHexString()}`, out, routeHex);
   return out;
 }
 
@@ -646,11 +1011,25 @@ export interface HoldSetOptions {
  * Builds and owns the meshes for one boulder's holds: one mesh per route hold, deco holds merged,
  * START/TOP tape + route card (one mesh), contact-AO decals (one mesh).
  */
+/** Where a hold bolted onto a volume (HoldDef.onVolume) sits: on the volume's face, square to it. */
+export interface HoldMount {
+  pos: THREE.Vector3;
+  quat: THREE.Quaternion;
+  /** Height of the mounting point above the wall surface (m, along the panel normal). */
+  lift: number;
+}
+
+const _ray = new THREE.Raycaster();
+const _probe = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
+_probe.matrixAutoUpdate = false;
+
 export class HoldSet {
   readonly group = new THREE.Group();
   readonly meshes = new Map<string, THREE.Mesh>();
   readonly holds = new Map<string, HoldDef>();
   readonly geoms = new Map<string, HoldGeometry>();
+  /** Holds bolted onto volumes: their mounting point + orientation on the volume face. */
+  readonly mounts = new Map<string, HoldMount>();
   private decoMesh: THREE.Mesh | null = null;
   private tapeMesh: THREE.Mesh | null = null;
   private aoMesh: THREE.Mesh | null = null;
@@ -674,15 +1053,56 @@ export class HoldSet {
     });
   }
 
+  /**
+   * Mount a hold on its volume: a ray along the panel normal through the hold's wall position finds
+   * the volume's face; the hold sits there square to that face, its grip side turned as on the wall.
+   */
+  private mountOn(h: HoldDef, vol: HoldDef, vg: HoldGeometry): HoldMount | null {
+    const mVol = holdMatrix(vol, this.frame, new THREE.Matrix4());
+    _probe.geometry = vg.geo;
+    _probe.matrixWorld.copy(mVol);
+    const n = this.frame.normalAt(h.y, new THREE.Vector3(), false);
+    const base = this.frame.toWorldXYZ(h.x, h.y, 0, new THREE.Vector3());
+    _ray.set(base.clone().addScaledVector(n, 2), n.clone().negate());
+    _ray.far = 2.2;
+    const hits = _ray.intersectObject(_probe, false);
+    _probe.geometry = new THREE.BufferGeometry();
+    const hit = hits.find((x) => x.face);
+    if (!hit || !hit.face) return null;
+    const z = hit.face.normal.clone().transformDirection(mVol).normalize();
+    if (z.dot(n) < 0.05) return null;
+    // the grip side on the wall (hold-local +y), projected onto the face
+    const wallQ = new THREE.Quaternion().setFromAxisAngle(Z, h.angle + Math.PI / 2).premultiply(this.frame.quaternionAt(h.y, new THREE.Quaternion()));
+    const y = new THREE.Vector3(0, 1, 0).applyQuaternion(wallQ);
+    y.addScaledVector(z, -y.dot(z));
+    if (y.lengthSq() < 1e-6) y.set(0, 1, 0).addScaledVector(z, -z.y);
+    y.normalize();
+    const x = new THREE.Vector3().crossVectors(y, z).normalize();
+    const quat = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
+    const pos = hit.point.clone().addScaledVector(z, -0.0015);
+    return { pos, quat, lift: Math.max(0, hit.point.clone().sub(base).dot(n)) };
+  }
+
   /** Rebuild everything for `holds` on `boulder`. */
   build(boulder: BoulderDef, holds: readonly HoldDef[], opts: HoldSetOptions = {}): void {
     this.clear();
     geoEpoch++;
     const deco: { h: HoldDef; g: HoldGeometry }[] = [];
     const m = new THREE.Matrix4();
+    // holds bolted onto volumes: find their mounting points first (volumes may come later in the list)
+    const byId = new Map<string, HoldDef>();
+    for (const h of holds) byId.set(h.id, h);
+    for (const h of holds) {
+      if (!h.onVolume) continue;
+      const vol = byId.get(h.onVolume);
+      if (!vol || vol.type !== 'volume') continue;
+      const vg = holdGeometry('volume', vol.seed, vol.size, vol.role === 'deco' && !opts.separateAll ? 2 : 0, holdVariant(vol));
+      const mount = this.mountOn(h, vol, vg);
+      if (mount) this.mounts.set(h.id, mount);
+    }
     for (const h of holds) {
       const mergedDeco = h.role === 'deco' && !opts.separateAll;
-      const g = holdGeometry(h.type, h.seed, h.size, mergedDeco ? 2 : 0);
+      const g = holdGeometry(h.type, h.seed, h.size, mergedDeco ? 2 : 0, holdVariant(h));
       this.holds.set(h.id, h);
       this.geoms.set(h.id, g);
       if (h.role === 'deco' && !opts.separateAll) {
@@ -690,14 +1110,18 @@ export class HoldSet {
         continue;
       }
       const look = h.role === 'deco' ? null : routeHoldLook(h.color);
+      const wood = h.shape === 'wood';
+      let color = look ? look.color : decoColor(h.color, undefined, boulder.color);
+      // wooden holds stay wood (the route's colour only stains them; its edge light keeps the route readable)
+      if (wood) color = woodColor(h.color, look ? 0.22 : 0.1, look ? undefined : boulder.color);
       const mat = createSurfaceMaterial({
-        color: look ? look.color : decoColor(h.color, undefined, boulder.color),
-        roughness: look ? look.roughness : 0.74,
+        color,
+        roughness: wood ? 0.66 : look ? look.roughness : 0.74,
         normalMap: speckleNormal(),
-        normalScale: 0.38,
+        normalScale: wood ? 0.12 : 0.38,
         normalRepeat: 22,
         rim: true,
-        envMapIntensity: look ? 0.6 : 0.32,
+        envMapIntensity: wood ? 0.35 : look ? 0.6 : 0.32,
       });
       if (look) {
         const u = mat.userData.surf;
@@ -708,8 +1132,14 @@ export class HoldSet {
       }
       this.routeMats.push(mat);
       const mesh = new THREE.Mesh(g.geo, mat);
-      holdMatrix(h, this.frame, m);
-      m.decompose(mesh.position, mesh.quaternion, mesh.scale);
+      const mount = this.mounts.get(h.id);
+      if (mount) {
+        mesh.position.copy(mount.pos);
+        mesh.quaternion.copy(mount.quat);
+      } else {
+        holdMatrix(h, this.frame, m);
+        m.decompose(mesh.position, mesh.quaternion, mesh.scale);
+      }
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       mesh.name = `hold:${h.id}`;
@@ -722,9 +1152,12 @@ export class HoldSet {
       const col = new THREE.Color();
       for (const { h, g } of deco) {
         const geo = g.geo.clone();
-        holdMatrix(h, this.frame, m);
+        const mount = this.mounts.get(h.id);
+        if (mount) m.compose(mount.pos, mount.quat, ONE);
+        else holdMatrix(h, this.frame, m);
         geo.applyMatrix4(m);
-        decoColor(h.color, col, boulder.color);
+        if (h.shape === 'wood') woodColor(h.color, 0.1, boulder.color, col);
+        else decoColor(h.color, col, boulder.color);
         const c = geo.getAttribute('color') as THREE.BufferAttribute;
         for (let i = 0; i < c.count; i++) c.setXYZ(i, c.getX(i) * col.r, c.getY(i) * col.g, c.getZ(i) * col.b);
         parts.push(geo);
@@ -757,7 +1190,7 @@ export class HoldSet {
     let k = 0;
     for (const h of holds) {
       const g = this.geoms.get(h.id);
-      if (!g) continue;
+      if (!g || this.mounts.has(h.id)) continue;
       q.setFromAxisAngle(Z, h.angle + Math.PI / 2).premultiply(this.frame.quaternionAt(h.y, _pq));
       const spread = h.type === 'volume' ? 1.08 : 1.3;
       const pad = h.type === 'volume' ? 0.035 : 0.018;
@@ -882,6 +1315,7 @@ export class HoldSet {
     this.meshes.clear();
     this.holds.clear();
     this.geoms.clear();
+    this.mounts.clear();
     for (const mesh of [this.decoMesh, this.aoMesh, this.tapeMesh]) {
       if (!mesh) continue;
       this.group.remove(mesh);
