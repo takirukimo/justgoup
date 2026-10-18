@@ -2,11 +2,12 @@
 // BetaBot, so the climber is posed exactly as in the game.
 //   mode=boulder|rope  seed  grade  angle  simt=<s fast-forward>  fall=<s>  cam=<CameraMode>
 //   dbg=px,py,pz,lx,ly,lz[,fov]  head  cw  guide=1  hud=0  pause=1 (freeze after fast-forward)
+//   profiles=1 (folded multi-angle walls)  style=<RouteStyle> (e.g. cave, overhang)
 
 import * as THREE from 'three';
 import { GameRenderer } from '../src/render/renderer';
 import type { CameraMode, SimEvent } from '../src/core/contracts';
-import type { BoulderDef, ColorwayId, HeadId } from '../src/core/types';
+import type { BoulderDef, ColorwayId, HeadId, RouteStyle } from '../src/core/types';
 import { generateBoulder, generateRopeRoute } from '../src/game/generator';
 import { ClimberSim } from '../src/game/climber-sim';
 import { BetaBot } from '../src/game/bot';
@@ -23,7 +24,11 @@ export async function runGame(canvas: HTMLCanvasElement, qs: URLSearchParams, hu
   const r = new GameRenderer(canvas, { quality: 'high' });
   await r.init();
   lap('init');
-  const b: BoulderDef = mode === 'rope' ? generateRopeRoute({ seed, grade, mode, wallAngle: angle }) : generateBoulder({ seed, grade, mode, wallAngle: angle });
+  const profiles = qs.has('profiles') ? qs.get('profiles') === '1' : undefined;
+  const style = (qs.get('style') ?? undefined) as RouteStyle | undefined;
+  const b: BoulderDef =
+    mode === 'rope' ? generateRopeRoute({ seed, grade, mode, wallAngle: angle, profiles }) : generateBoulder({ seed, grade, mode, wallAngle: angle, profiles, style });
+  console.log(`[character-game] wall ${b.wallAngle}° profile ${JSON.stringify(b.profile ?? null)}`);
   lap('generate');
   r.loadBoulder(b);
   lap('loadBoulder');

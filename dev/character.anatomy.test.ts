@@ -21,6 +21,11 @@ import { measureRig, PEN_BAD, FLOOR_BAD, type Measure } from './character-probe'
 
 interface Tally {
   frames: number;
+  /** Frames with a body capsule (head / horns, torso, elbow, knee…) more than WALL_BAD inside the wall. */
+  wallFrames: number;
+  wall: { v: number; what: string; tag: string };
+  wallBy: Record<string, number>;
+  wallLog: string[];
   penFrames: number;
   floorFrames: number;
   worst: { v: number; what: string; tag: string };
@@ -39,6 +44,10 @@ interface Tally {
 
 const fresh = (): Tally => ({
   frames: 0,
+  wallFrames: 0,
+  wall: { v: 0, what: '', tag: '' },
+  wallBy: {},
+  wallLog: [],
   penFrames: 0,
   floorFrames: 0,
   worst: { v: 0, what: '', tag: '' },
@@ -57,6 +66,39 @@ const fresh = (): Tally => ({
 
 /** An elbow / knee moving this much more than its limb's ends in one 60 Hz frame reads as a pop. */
 const JUMP_BAD = 0.03;
+/** A body capsule this far inside the (folded) wall surface counts as a wall penetration. */
+const WALL_BAD = 0.02;
+
+const PROXY = ['chest', 'belly', 'pelvis', 'neck'];
+const _wa = new THREE.Vector3();
+/**
+ * Deepest penetration of the rig's collision proxies into the wall, measured with the frame's exact
+ * (folded) mapping — independent of the rig's own clearance model. The forearm / shin ends that hold
+ * on (wrists, ankles: their hand / foot is ON the wall by design) are left out.
+ */
+function wallPen(model: ClimberModel, frame: WallFrame): { v: number; what: string } {
+  let worst = 0;
+  let what = '';
+  let i = 0;
+  const headN = model.rig.headProxyCount;
+  model.rig.forEachProxy((a, b, ra, rb) => {
+    const k = i++;
+    const limbK = k - 4 - headN;
+    const name = k < 4 ? PROXY[k] : k < 4 + headN ? `head${k - 4}` : ['uarmL', 'farmL', 'thighL', 'shinL', 'uarmR', 'farmR', 'thighR', 'shinR'][limbK] ?? `p${k}`;
+    const distal = limbK >= 0 && limbK % 2 === 1;
+    for (let j = 0; j <= 4; j++) {
+      const u = j / 4;
+      if (distal && u > 0.6) break;
+      _wa.copy(a).lerp(b, u);
+      const dep = frame.fromWorld(_wa).depth - (ra + (rb - ra) * u);
+      if (-dep > worst) {
+        worst = -dep;
+        what = name;
+      }
+    }
+  });
+  return { v: worst, what };
+}
 
 function techTags(st: ClimberState): string[] {
   const out: string[] = [];
@@ -84,6 +126,8 @@ function run(b: BoulderDef, T: Tally, opts: { secs: number; fallAt?: number; tag
   const model = new ClimberModel({ head: (process.env.HEAD ?? 'ibex') as HeadId, colorway: 'basalt', chalk: 'classic' });
   model.setHarness(!!rope);
   if (process.env.NOCOLLIDE) model.rig.collide = false;
+  // baseline: the rig clears only the single body plane through the wall origin (pre-fold behaviour)
+  if (process.env.NOFOLD) model.rig.setWallFolds = () => undefined;
   const holds = new Map(b.holds.map((h) => [h.id, h]));
   model.setHoldLookup((id, out) => {
     const h = holds.get(id);
@@ -95,6 +139,7 @@ function run(b: BoulderDef, T: Tally, opts: { secs: number; fallAt?: number; tag
     return true;
   });
   const frame = new WallFrame(b.wallAngle);
+  frame.setWall(b);
   const dt = 1 / 60;
   let events: SimEvent[] = [];
   const m: Measure = { pen: 0, what: '', floor: 0, floorWhat: '' };
@@ -117,11 +162,23 @@ function run(b: BoulderDef, T: Tally, opts: { secs: number; fallAt?: number; tag
       if (e.type === 'top') topped = true;
     }
     const st = sim.getState();
+    frame.setBodyY((st.pelvis.y + st.chest.y) / 2);
     model.pose(st, frame, dt);
     measureRig(model.rig, frame.normal, frame.origin, m, T.pairs);
     const tags = techTags(st);
     const where = `${opts.tag} t=${(i * dt).toFixed(2)} ${st.phase}${tags.length ? ' [' + tags.join(',') + ']' : ''}`;
     T.frames++;
+    if (st.phase !== 'falling') {
+      const w = wallPen(model, frame);
+      if (w.v > WALL_BAD) {
+        T.wallFrames++;
+        const key = w.what.startsWith('head') ? 'head' : w.what;
+        T.wallBy[key] = (T.wallBy[key] ?? 0) + 1;
+        if (T.wallLog.length < (process.env.WALLLOG ? +process.env.WALLLOG : 0) && i % 20 === 0)
+          T.wallLog.push(`${(w.v * 100).toFixed(1)}cm ${w.what} ${where} P=${st.pelvis.x.toFixed(2)},${st.pelvis.y.toFixed(2)} C=${st.chest.x.toFixed(2)},${st.chest.y.toFixed(2)} d=${st.pelvisDepth.toFixed(2)}`);
+      }
+      if (w.v > T.wall.v) T.wall = { v: w.v, what: w.what, tag: `${where} P=${st.pelvis.x.toFixed(2)},${st.pelvis.y.toFixed(2)} d=${st.pelvisDepth.toFixed(2)}` };
+    }
     const ph = (T.phases[st.phase] ??= { frames: 0, pen: 0 });
     ph.frames++;
     if (m.pen > PEN_BAD) {
@@ -186,7 +243,9 @@ function run(b: BoulderDef, T: Tally, opts: { secs: number; fallAt?: number; tag
       // a second of the celebration, then stop
       for (let k = 0; k < 60; k++) {
         sim.step(dt);
-        model.pose(sim.getState(), frame, dt);
+        const st2 = sim.getState();
+        frame.setBodyY((st2.pelvis.y + st2.chest.y) / 2);
+        model.pose(st2, frame, dt);
         measureRig(model.rig, frame.normal, frame.origin, m, T.pairs);
         T.frames++;
         if (m.pen > PEN_BAD) T.penFrames++;
@@ -216,7 +275,9 @@ function report(name: string, T: Tally): void {
     .map(([k, v]) => `${k} ${v.frames} (${pct(v.pen, v.frames)})`)
     .join('  ');
   process.stderr.write(
-    `\n== ${name} ==\nframes ${T.frames}  pen>${PEN_BAD * 100}cm ${pct(T.penFrames, T.frames)}  pen>5cm ${pct(T.pen5Frames, T.frames)}  floor ${pct(T.floorFrames, T.frames)}  pops ${pct(T.jumpFrames, T.frames)}  ik-fallback ${pct(T.fbFrames, T.frames)}\n` +
+    `\n== ${name} ==\nframes ${T.frames}  pen>${PEN_BAD * 100}cm ${pct(T.penFrames, T.frames)}  pen>5cm ${pct(T.pen5Frames, T.frames)}  floor ${pct(T.floorFrames, T.frames)}  wall>${WALL_BAD * 100}cm ${pct(T.wallFrames, T.frames)}  pops ${pct(T.jumpFrames, T.frames)}  ik-fallback ${pct(T.fbFrames, T.frames)}\n` +
+      `worst wall ${(T.wall.v * 100).toFixed(1)} cm ${T.wall.what} @ ${T.wall.tag}\nwall by part: ${JSON.stringify(T.wallBy)}\n` +
+      (T.wallLog.length ? `walls:\n  ${T.wallLog.join('\n  ')}\n` : '') +
       `worst pen ${(T.worst.v * 100).toFixed(1)} cm ${T.worst.what} @ ${T.worst.tag}\n` +
       `worst floor ${(T.floor.v * 100).toFixed(1)} cm ${T.floor.what} @ ${T.floor.tag}\n` +
       `worst pop ${(T.jump.v * 100).toFixed(1)} cm ${T.jump.what} @ ${T.jump.tag}\n` +
@@ -248,6 +309,26 @@ describe('climber anatomy in real play (offline)', () => {
       expect(T.penFrames / T.frames).toBeLessThan(0.02);
       expect(T.floorFrames).toBe(0);
     }
+  });
+
+  it('folded walls: caves, steep stacks and kickers (profiles on)', () => {
+    const T = fresh();
+    const styles = ['cave', 'overhang', 'mixed', 'cave', 'compression', 'dyno'] as const;
+    const seeds = SOAK ? [3, 11, 23, 42, 57] : [11, 42];
+    let k = 0;
+    let tops = 0;
+    for (const seed of seeds)
+      for (const style of styles) {
+        const grade = 2 + ((seed + k) % 5);
+        const b = generateBoulder({ seed: seed * 37 + k, grade, mode: 'boulder', profiles: true, style });
+        const prof = b.profile ? b.profile.map((p) => Math.round(p.angle)).join('/') : `${b.wallAngle}`;
+        const r = run(b, T, { secs: 70, tag: `P s${seed} V${grade} ${style} [${prof}]` });
+        if (r.topped) tops++;
+        k++;
+      }
+    report(`folded walls (${k} problems, ${tops} topped)`, T);
+    expect(T.frames).toBeGreaterThan(0);
+    if (process.env.STRICT) expect(T.wallFrames / T.frames).toBeLessThan(0.02);
   });
 
   it('lead routes: chalking, shake-outs, clips and a whipper', () => {

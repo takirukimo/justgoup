@@ -25,6 +25,7 @@ import { BODY, GAME } from '../config/tuning';
 import { CHALKS, COLORWAYS, SKIN_TONE, type ColorwayDef } from '../config/skins';
 import { PALETTE } from '../config/brand';
 import type { WallFrame } from './wall-frame';
+import type { PanelSpan } from '../game/wall-profile';
 import { createHead, disposeHead, headBlinkWeights, setHeadBlink } from './heads/index';
 import { MeshBuilder, loft, sstep, superCos, superSin, type AttribFn } from './heads/geo';
 import { ATLAS_RECTS, REGION, TORSO_E, TORSO_Y0, TORSO_Y1, createBodyMaterial, createOutfitAtlas, type BodyMaterial, type OutfitStyle, type TorsoSection, type UvRect } from './materials';
@@ -842,6 +843,13 @@ export class BodyRig {
   private wallN = new THREE.Vector3(0, 0, 1);
   private wallP = new THREE.Vector3();
   private awayV = new THREE.Vector3();
+  /**
+   * Folded wall (setWallFolds): the panels as a polyline in the world (y, z) plane — per span its
+   * bottom (y, z), bottom → top (dy, dz) and outward normal (ny, nz) — so wall clearance follows
+   * every panel (a knee under a roof, the horns by the lip). foldN = 0: the plane (wallP, wallN).
+   */
+  private folds = new Float64Array(0);
+  private foldN = 0;
   // chain solve scratch (one chain at a time)
   private cD = new THREE.Vector3();
   private cE1 = new THREE.Vector3();
@@ -886,6 +894,14 @@ export class BodyRig {
   private headAvoid = 0;
   private headAvoidT = 0;
   private headWallPitch = 0;
+  /** Turn of the head away from the wall (a long snout / the horns cannot clear it by nodding alone). */
+  private headWallYaw = 0;
+  /**
+   * Last solve: how far the head (snout, horns, cap brim) is still inside the wall after nodding and
+   * turning (m, 0 = clear), and its spare clearance when clear. ClimberModel leans the chest out by it.
+   */
+  headWallDeficit = 0;
+  headWallSpare = 0;
   /** Extra head turn / nod that keeps the face out of the arms (damped). */
   private headArmYaw = 0;
   private headArmPitch = 0;
@@ -1955,6 +1971,72 @@ export class BodyRig {
     this.headN = head ? fitHeadProxies(head, this.headLocal) : 0;
   }
 
+  /**
+   * Wall clearance against a folded wall (WallFrame.spans(), panel coordinates relative to `origin`)
+   * instead of the goal's single plane; null = back to the plane. Call when the wall changes.
+   */
+  setWallFolds(spans: readonly PanelSpan[] | null, origin?: THREE.Vector3): void {
+    const n = spans ? spans.length : 0;
+    if (!spans || n < 2) {
+      this.foldN = 0;
+      return;
+    }
+    if (this.folds.length < n * 6) this.folds = new Float64Array(n * 6);
+    const oy = origin ? origin.y : 0;
+    const oz = origin ? origin.z : 0;
+    const F = this.folds;
+    for (let i = 0; i < n; i++) {
+      const sp = spans[i];
+      const o = i * 6;
+      F[o] = oy + sp.bottom.y;
+      F[o + 1] = oz + sp.bottom.z;
+      F[o + 2] = sp.top.y - sp.bottom.y;
+      F[o + 3] = sp.top.z - sp.bottom.z;
+      F[o + 4] = sp.normal.y;
+      F[o + 5] = sp.normal.z;
+    }
+    this.foldN = n;
+  }
+
+  /**
+   * Signed distance (m) of a rig-space point from the wall surface, + in front of it: the goal's plane,
+   * or the folded wall's polyline (first panel continued below the floor, last one above the top; a
+   * point nearest a fold takes its sign from both panels' normals). No allocation.
+   */
+  wallDepth(p: THREE.Vector3): number {
+    const n = this.foldN;
+    if (n === 0) return (p.x - this.wallP.x) * this.wallN.x + (p.y - this.wallP.y) * this.wallN.y + (p.z - this.wallP.z) * this.wallN.z;
+    const F = this.folds;
+    let best = Infinity;
+    let sd = 0;
+    for (let i = 0; i < n; i++) {
+      const o = i * 6;
+      const qy = p.y - F[o];
+      const qz = p.z - F[o + 1];
+      const dy = F[o + 2];
+      const dz = F[o + 3];
+      const l2 = dy * dy + dz * dz;
+      let t = l2 > 1e-12 ? (qy * dy + qz * dz) / l2 : 0;
+      let j = -1;
+      if (t < 0 && i > 0) {
+        t = 0;
+        j = i - 1;
+      } else if (t > 1 && i < n - 1) {
+        t = 1;
+        j = i + 1;
+      }
+      const ry = qy - t * dy;
+      const rz = qz - t * dz;
+      const dist = Math.sqrt(ry * ry + rz * rz);
+      if (dist < best) {
+        best = dist;
+        const s = j < 0 ? ry * F[o + 4] + rz * F[o + 5] : ry * (F[o + 4] + F[j * 6 + 4]) + rz * (F[o + 5] + F[j * 6 + 5]);
+        sd = s >= 0 ? dist : -dist;
+      }
+    }
+    return sd;
+  }
+
   /** Pose every bone from the goal (rig space). dt drives the head damping + chalk-bag swing. */
   solve(g: BodyGoal, dt: number): void {
     const B = this.bones;
@@ -2086,19 +2168,51 @@ export class BodyRig {
     pitch = softClamp(pitch, -L.headPitchDown * DEG, L.headPitchUp * DEG, 0.22) - g.headNod;
     this.yaw += (yaw - this.yaw) * k;
     this.pitch += (pitch - this.pitch) * k;
-    // keep the snout / horns off the wall: tilt the head when it would touch the wall
+    // keep the snout / horns off the wall: tilt the head when it would touch the wall, and when a nod
+    // is not enough (a long ibex face close to the wall, horns under a roof) turn the face to the side
+    // the way a climber pressed to the wall does
     let wallTarget = 0;
+    let wallYaw = 0;
+    const WALL_NEED = 0.025;
     if (this.wallOn && this.headN > 0) {
       const m0 = this.headClearance(neck, this.pitch, g.headRoll);
-      if (m0 < 0.025) {
+      let mBest = m0;
+      if (m0 < WALL_NEED) {
         const mUp = this.headClearance(neck, this.pitch + 0.35, g.headRoll);
         const mDn = this.headClearance(neck, this.pitch - 0.35, g.headRoll);
         const up = mUp >= mDn;
         const m1 = up ? mUp : mDn;
-        if (m1 > m0 + 1e-4) wallTarget = (up ? 0.35 : -0.35) * clampN((0.025 - m0) / (m1 - m0), 0, 2);
+        if (m1 > m0 + 1e-4) wallTarget = (up ? 0.35 : -0.35) * clampN((WALL_NEED - m0) / (m1 - m0), 0, 2);
+        mBest = this.headClearance(neck, this.pitch + wallTarget, g.headRoll);
+      }
+      if (mBest < WALL_NEED - 0.005) {
+        // smallest turn that clears, on the side already turned to (no left/right flapping)
+        const pw = this.pitch + wallTarget;
+        const pref = this.headWallYaw !== 0 ? Math.sign(this.headWallYaw) : this.yaw !== 0 ? Math.sign(this.yaw) : 1;
+        const lim = L.headYaw * DEG + 0.15;
+        let bestM = mBest;
+        let bestY = 0;
+        for (let kk = 1; kk <= 5; kk++) {
+          const step = kk * 0.24;
+          for (let sgI = 0; sgI < 2; sgI++) {
+            const sg = sgI === 0 ? pref : -pref;
+            const y = this.yaw + sg * step;
+            if (Math.abs(y) > lim) continue;
+            const m = this.headClearance(neck, pw, g.headRoll, y);
+            if (m > bestM + 0.004) {
+              bestM = m;
+              bestY = sg * step;
+            }
+          }
+          if (bestM >= WALL_NEED) break;
+        }
+        wallYaw = bestY;
       }
     }
-    this.headWallPitch += (wallTarget - this.headWallPitch) * (dt <= 0 ? 1 : 1 - Math.exp(-dt * 14));
+    const kw = dt <= 0 ? 1 : 1 - Math.exp(-dt * 14);
+    this.headWallPitch += (wallTarget - this.headWallPitch) * kw;
+    this.headWallYaw += (wallYaw - this.headWallYaw) * (dt <= 0 ? 1 : 1 - Math.exp(-dt * 9));
+    const yawW = this.yaw + this.headWallYaw;
     // keep the face (snout, horns, cap brim) out of the arms: a long ibex face swings into an arm when
     // the head turns to watch a hand reach across. Test the head against both arms as last solved and
     // take the smallest turn (then nod) that clears them, keeping the side already chosen.
@@ -2107,16 +2221,19 @@ export class BodyRig {
     if (this.headN > 0) {
       const p0 = this.pitch + this.headWallPitch;
       const need = 0.008;
-      const m0 = this.headArmClearance(neck, p0, this.yaw + this.headArmYaw * 0.5, g.headRoll);
+      const m0 = this.headArmClearance(neck, p0, yawW + this.headArmYaw * 0.5, g.headRoll);
       if (m0 < need) {
         const pref = this.headArmYaw !== 0 ? Math.sign(this.headArmYaw) : 1;
+        // a turn that clears the arms may not swing the face back into the wall
+        const wallOk = this.wallOn ? Math.min(WALL_NEED * 0.5, this.headClearance(neck, p0, g.headRoll, yawW)) : -Infinity;
         let found = false;
         for (let k = 1; k <= 6 && !found; k++) {
           const step = k * 0.17;
-          for (const sg of [pref, -pref]) {
-            const y = this.yaw + sg * step;
+          for (let sgI = 0; sgI < 2; sgI++) {
+            const sg = sgI === 0 ? pref : -pref;
+            const y = yawW + sg * step;
             if (Math.abs(y) > L.headYaw * DEG + 0.25) continue;
-            if (this.headArmClearance(neck, p0, y, g.headRoll) >= need) {
+            if (this.headArmClearance(neck, p0, y, g.headRoll) >= need && (!this.wallOn || this.headClearance(neck, p0, g.headRoll, y) >= wallOk)) {
               armYaw = sg * step;
               found = true;
               break;
@@ -2125,8 +2242,9 @@ export class BodyRig {
         }
         if (!found) {
           // turning alone cannot clear it (an arm right across the face): nod down past it as well
-          for (const pp of [-0.3, 0.3]) {
-            if (this.headArmClearance(neck, p0 + pp, this.yaw + pref * 0.5, g.headRoll) >= need) {
+          for (let pI = 0; pI < 2; pI++) {
+            const pp = pI === 0 ? -0.3 : 0.3;
+            if (this.headArmClearance(neck, p0 + pp, yawW + pref * 0.5, g.headRoll) >= need) {
               armYaw = pref * 0.5;
               armPitch = pp;
               break;
@@ -2138,7 +2256,17 @@ export class BodyRig {
     const ka = dt <= 0 ? 1 : 1 - Math.exp(-dt * 10);
     this.headArmYaw += (armYaw - this.headArmYaw) * ka;
     this.headArmPitch += (armPitch - this.headArmPitch) * ka;
-    _e.set(this.pitch + this.headWallPitch + this.headArmPitch, this.yaw + this.headArmYaw, g.headRoll, 'YXZ');
+    const pitchF = this.pitch + this.headWallPitch + this.headArmPitch;
+    const yawF = yawW + this.headArmYaw;
+    if (this.wallOn && this.headN > 0) {
+      const m = this.headClearance(neck, pitchF, g.headRoll, yawF) - 0.01;
+      this.headWallDeficit = Math.max(0, -m);
+      this.headWallSpare = Math.max(0, m);
+    } else {
+      this.headWallDeficit = 0;
+      this.headWallSpare = 1;
+    }
+    _e.set(pitchF, yawF, g.headRoll, 'YXZ');
     _q1.setFromEuler(_e);
     neck.quaternion.copy(this.qChest).multiply(_q1);
     this.joints.head.set(0, BODY.neck, 0).applyQuaternion(neck.quaternion).add(neck.position);
@@ -2168,16 +2296,16 @@ export class BodyRig {
     return m;
   }
 
-  /** Smallest wall clearance of the head spheres for a head pitch (rig space). */
-  private headClearance(neck: THREE.Bone, pitch: number, roll: number): number {
-    _e.set(pitch, this.yaw, roll, 'YXZ');
+  /** Smallest wall clearance of the head spheres for a head pitch (and yaw; default the current one), rig space. */
+  private headClearance(neck: THREE.Bone, pitch: number, roll: number, yaw = this.yaw): number {
+    _e.set(pitch, yaw, roll, 'YXZ');
     _q1.setFromEuler(_e);
     _qa.copy(this.qChest).multiply(_q1);
     let m = Infinity;
     const H = this.headLocal;
     for (let j = 0; j < this.headN; j++) {
       this.hs.set(H[j * 4], H[j * 4 + 1], H[j * 4 + 2]).applyQuaternion(_qa).add(neck.position);
-      const c = this.hs.sub(this.wallP).dot(this.wallN) - H[j * 4 + 3];
+      const c = this.wallDepth(this.hs) - H[j * 4 + 3];
       if (c < m) m = c;
     }
     return m;
@@ -2493,7 +2621,7 @@ export class BodyRig {
     }
     outMid.copy(this.cC).addScaledVector(ap, this.cH);
     this.wallSlack[li] = this.wallOn
-      ? this.cA.subVectors(outMid, this.wallP).dot(this.wallN) - (li >= 2 ? R_KNEE_WALL : R_ELBOW_WALL) - WALL_MARGIN
+      ? this.wallDepth(outMid) - (li >= 2 ? R_KNEE_WALL : R_ELBOW_WALL) - WALL_MARGIN
       : 1;
     this.cA.subVectors(this.cEnd, outMid);
     const l = this.cA.length();
@@ -2747,7 +2875,7 @@ export class BodyRig {
     }
     this.vWall = 0;
     if (this.wallOn) {
-      const dep = this.cN.subVectors(mid, this.wallP).dot(this.wallN) - (leg ? R_KNEE_WALL : R_ELBOW_WALL) - WALL_MARGIN;
+      const dep = this.wallDepth(mid) - (leg ? R_KNEE_WALL : R_ELBOW_WALL) - WALL_MARGIN;
       if (dep < 0) this.vWall = -dep;
     }
     return v;
@@ -3018,10 +3146,15 @@ export class BodyRig {
         rot = `ψ ${((Math.atan2(this.kC.crossVectors(n, ap).dot(u), n.dot(ap)) * sg) / DEG).toFixed(0)}`;
       }
       const mid = this.cMid;
-      const dep = mid.clone().sub(this.wallP).dot(this.wallN);
+      const dep = this.wallDepth(mid);
       rows.push(`sw ${k * 15} v ${v.toFixed(3)} vw ${vw.toFixed(3)} ${cone} ${rot} depth ${dep.toFixed(2)}`);
     }
     return rows.join('\n');
+  }
+
+  /** QA: number of head collision spheres (forEachProxy visits them after chest, belly, pelvis, neck). */
+  get headProxyCount(): number {
+    return this.headN;
   }
 
   /** QA: visit every collision proxy (a, b, radius at a, radius at b; a = b for spheres). */
@@ -3186,6 +3319,14 @@ export class ClimberModel extends THREE.Group {
   private sHike = 0;
   /** Calm-idle weight (0..1): weight shifts, visible breathing, look-arounds on good holds. */
   private sCalm = 0;
+  /** Chest leaned out from the wall so the head clears it (rig.headWallDeficit, integrated). */
+  private headPush = 0;
+  /**
+   * Hips / chest eased out from the wall when no anatomical knee / elbow swivel clears it (rig.wallNeed:
+   * a high foot right under a hip held tight to the wall, an elbow pinned between the chest and the wall).
+   */
+  private hipPush = 0;
+  private armPush = 0;
   // ── Phase B techniques (LimbSnapshot.chalking / shakingOut / flying / pump / footMode) ──
   /** Per hand: seconds into the chalk-up (−1 = not chalking) and the blend toward the bag. */
   private chalkT = [-1, -1];
@@ -3226,6 +3367,12 @@ export class ClimberModel extends THREE.Group {
   private v3 = new THREE.Vector3();
   private q = new THREE.Quaternion();
   private p2: Vec2 = { x: 0, y: 0 };
+  /** Per-contact wall frame on folded walls (the panel under a hand / foot): normal + up-the-wall. */
+  private nLoc = new THREE.Vector3();
+  private uLoc = new THREE.Vector3();
+  /** The folded wall the rig's clearance was built for (WallFrame.spans() identity + origin). */
+  private foldKey: readonly PanelSpan[] | null = null;
+  private foldO = new THREE.Vector3();
 
   constructor(opts?: { head?: HeadId; colorway?: ColorwayId; chalk?: ChalkId }) {
     super();
@@ -3370,8 +3517,20 @@ export class ClimberModel extends THREE.Group {
     this.sSit += (sit - this.sSit) * (snap ? 1 : dampK(5, d));
     this.sHike += (hike - this.sHike) * (snap ? 1 : dampK(5, d));
 
+    // knees / elbows the rig could not keep out of the wall last frame: ease the hips / chest out by
+    // what they lack, and back in (slowly) once every limb has an anatomical swivel clear of it
+    {
+      const W = this.rig.wallNeed;
+      const legN = onWall ? Math.max(W[2], W[3]) : 0;
+      const armN = onWall ? Math.max(W[0], W[1]) : 0;
+      const wantH = legN > 0 ? this.hipPush + legN * 1.4 : this.hipPush * 0.985;
+      const wantA = armN > 0 ? this.armPush + armN * 1.4 : this.armPush * 0.985;
+      const kIn = snap ? 0 : dampK(2, d);
+      this.hipPush += (Math.min(0.22, wantH) - this.hipPush) * (legN > 0 ? (snap ? 1 : dampK(8, d)) : kIn);
+      this.armPush += (Math.min(0.2, wantA) - this.armPush) * (armN > 0 ? (snap ? 1 : dampK(8, d)) : kIn);
+    }
     // ── pelvis + chest ──
-    frame.toWorld(state.pelvis, Math.max(0.13, state.pelvisDepth) + this.sSit, this.rawP);
+    frame.toWorld(state.pelvis, Math.max(0.13, state.pelvisDepth) + this.sSit + this.hipPush, this.rawP);
     let chestDepth = Math.min(0.42, Math.max(0.17, 0.15 + 0.36 * state.pelvisDepth));
     if (ph === 'climbing' || ph === 'idle' || ph === 'topped') {
       for (let s = 0; s < 2; s++) {
@@ -3385,6 +3544,14 @@ export class ClimberModel extends THREE.Group {
       chestDepth = Math.max(0.15, chestDepth);
     } else if (ph === 'falling') chestDepth = state.pelvisDepth + 0.04;
     else chestDepth = state.pelvisDepth + 0.06;
+    // the head still in the wall after the neck nodded and turned (a long snout pressed to the wall,
+    // horns under a roof): lean the chest out until it clears, and ease back in once there is room
+    {
+      const def = onWall ? this.rig.headWallDeficit : 0;
+      const want = def > 0 ? this.headPush + def * 1.2 : Math.max(0, this.headPush - Math.max(0, this.rig.headWallSpare - 0.015));
+      this.headPush += (Math.min(0.32, want) - this.headPush) * (snap ? (def > 0 ? 1 : 0) : dampK(def > 0 ? 9 : 2.5, d));
+      chestDepth += Math.max(this.headPush, this.armPush, this.hipPush * 0.6);
+    }
     this.sChestDepth += (chestDepth - this.sChestDepth) * (snap ? 1 : dampK(7, d));
     frame.toWorld(state.chest, this.sChestDepth, this.rawC);
 
@@ -3505,11 +3672,18 @@ export class ClimberModel extends THREE.Group {
     g.chestRight.copy(this.Rb).applyQuaternion(this.q);
     g.pelvisTilt = this.sHike;
 
-    // wall plane + escape direction (toward the camera) for joint limits and self-collision
+    // wall plane + escape direction (toward the camera) for joint limits and self-collision; a folded
+    // wall gives the rig every panel (WallFrame.spans() is cached per wall, so this is an identity check)
     g.wall = true;
     g.wallN.copy(Nw);
     g.wallP.copy(frame.origin);
     g.away.copy(Nw);
+    const spans = frame.folded ? frame.spans() : null;
+    if (spans !== this.foldKey || (spans && !this.foldO.equals(frame.origin))) {
+      this.rig.setWallFolds(spans, frame.origin);
+      this.foldKey = spans;
+      this.foldO.copy(frame.origin);
+    }
 
     // ── hands ──
     for (let s = 0; s < 2; s++) this.poseHand(state, frame, s, d, snap, celebrating ? ct : -1);
@@ -3571,6 +3745,11 @@ export class ClimberModel extends THREE.Group {
     const Nw = frame.normal;
     const ph = state.phase;
     const t = this.time;
+    // body-relative offsets use the body frame (Nw / Uw); a hand on the wall orients to the panel it is
+    // on (Nl / Ul: a grip on a roof faces the roof, not the vertical wall the hips are in front of)
+    const local = frame.folded && (ph === 'climbing' || ph === 'idle' || ph === 'topped');
+    const Nl = local ? frame.normalAt(L.pos.y, this.nLoc) : Nw;
+    const Ul = local ? frame.upAt(L.pos.y, this.uLoc) : Uw;
     const S = this.shoulderApprox(s, this.S);
     const info = this.lookupHold(L.holdId, s);
     let depth = L.depth;
@@ -3652,10 +3831,19 @@ export class ClimberModel extends THREE.Group {
         // out of the bag: a puff of chalk off the fingers
         this.chalkPuffed[s] = true;
         if (this.onChalkDip) {
-          this.v1.subVectors(J.bagMouth, frame.origin).addScaledVector(J.bagUp, 0.05);
-          this.p2.x = this.v1.dot(Rw);
-          this.p2.y = this.v1.dot(Uw);
-          this.onChalkDip(this.p2, this.v1.dot(Nw), HAND_IDS[s] as 'LH' | 'RH');
+          this.v1.copy(J.bagMouth).addScaledVector(J.bagUp, 0.05);
+          if (frame.folded) {
+            // once per dip (not per frame): the folded mapping may allocate
+            const w = frame.fromWorld(this.v1);
+            this.p2.x = w.p.x;
+            this.p2.y = w.p.y;
+            this.onChalkDip(this.p2, w.depth, HAND_IDS[s] as 'LH' | 'RH');
+          } else {
+            this.v1.sub(frame.origin);
+            this.p2.x = this.v1.dot(Rw);
+            this.p2.y = this.v1.dot(Uw);
+            this.onChalkDip(this.p2, this.v1.dot(Nw), HAND_IDS[s] as 'LH' | 'RH');
+          }
         }
       }
     }
@@ -3689,7 +3877,7 @@ export class ClimberModel extends THREE.Group {
     this.pumpS[s] += ((L.pump ?? 0) - this.pumpS[s]) * (snap ? 1 : dampK(3, d));
     hg.pump = this.pumpS[s];
     const pumpTrem = L.holdId && onWall ? sstep(0.55, 1, this.pumpS[s]) : 0;
-    if (pumpTrem > 1e-3) this.v0.addScaledVector(Nw, wobble(t * 23, s * 4.7) * 0.0035 * pumpTrem);
+    if (pumpTrem > 1e-3) this.v0.addScaledVector(Nl, wobble(t * 23, s * 4.7) * 0.0035 * pumpTrem);
 
     // smoothing
     const lam = sk > 0.5 ? 40 : fk > 0.3 ? 45 : L.holdId ? 40 : L.dragging ? 30 : ph === 'falling' ? 50 : 16;
@@ -3733,32 +3921,32 @@ export class ClimberModel extends THREE.Group {
       shape = SHAPE_LOOSE;
     } else if (fk > 0.5) {
       // reaching through the throw: fingers straight along the arm, palm to the wall
-      dir.copy(this.v2).addScaledVector(Nw, -0.12).normalize();
-      up.copy(Nw).addScaledVector(dir, -dir.dot(Nw));
-      if (up.lengthSq() < 1e-6) up.copy(Nw);
+      dir.copy(this.v2).addScaledVector(Nl, -0.12).normalize();
+      up.copy(Nl).addScaledVector(dir, -dir.dot(Nl));
+      if (up.lengthSq() < 1e-6) up.copy(Nl);
       shape = SHAPE_REACH;
     } else if (L.holdId && ph !== 'falling' && ph !== 'landed') {
       // fingers wrap over the hold: opposite to the hold's good direction, blended with the arm line
-      this.v3.copy(this.v2).addScaledVector(Nw, -this.v2.dot(Nw));
-      if (this.v3.lengthSq() < 1e-6) this.v3.copy(Uw);
+      this.v3.copy(this.v2).addScaledVector(Nl, -this.v2.dot(Nl));
+      if (this.v3.lengthSq() < 1e-6) this.v3.copy(Ul);
       this.v3.normalize();
       if (info) {
         const ca = Math.cos(info.angle);
         const sa = Math.sin(info.angle);
-        dir.copy(Rw).multiplyScalar(-ca).addScaledVector(Uw, -sa).multiplyScalar(0.65).addScaledVector(this.v3, 0.35);
+        dir.copy(Rw).multiplyScalar(-ca).addScaledVector(Ul, -sa).multiplyScalar(0.65).addScaledVector(this.v3, 0.35);
       } else dir.copy(this.v3);
       dir.normalize();
-      up.copy(Nw).multiplyScalar(0.8).addScaledVector(dir, 0.35);
-      dir.addScaledVector(Nw, -0.3).normalize();
+      up.copy(Nl).multiplyScalar(0.8).addScaledVector(dir, 0.35);
+      dir.addScaledVector(Nl, -0.3).normalize();
       shape = GRIP[info ? info.type : 'edge'];
     } else if (L.busy) {
-      dir.copy(Uw).multiplyScalar(0.6).addScaledVector(Nw, -0.5).normalize();
-      up.copy(Nw).multiplyScalar(0.6).addScaledVector(Rw, -side * 0.6);
+      dir.copy(Ul).multiplyScalar(0.6).addScaledVector(Nl, -0.5).normalize();
+      up.copy(Nl).multiplyScalar(0.6).addScaledVector(Rw, -side * 0.6);
       shape = SHAPE_CLIP;
     } else if (L.dragging) {
-      dir.copy(this.v2).addScaledVector(Nw, -this.v2.dot(Nw) * 0.7).addScaledVector(Nw, -0.12).normalize();
-      up.copy(Nw).addScaledVector(dir, -dir.dot(Nw));
-      if (up.lengthSq() < 1e-6) up.copy(Nw);
+      dir.copy(this.v2).addScaledVector(Nl, -this.v2.dot(Nl) * 0.7).addScaledVector(Nl, -0.12).normalize();
+      up.copy(Nl).addScaledVector(dir, -dir.dot(Nl));
+      if (up.lengthSq() < 1e-6) up.copy(Nl);
       shape = SHAPE_REACH;
     } else {
       // dangling / free: fingers down, palm toward the body
@@ -3807,15 +3995,19 @@ export class ClimberModel extends THREE.Group {
     pole.normalize();
   }
 
-  private poseFoot(state: ClimberState, frame: WallFrame, s: number, d: number, snap: boolean, overhang: number): void {
+  private poseFoot(state: ClimberState, frame: WallFrame, s: number, d: number, snap: boolean, bodyOverhang: number): void {
     const g = this.goal;
     const fg = g.feet[s];
     const L = state.limbs[FOOT_IDS[s]];
     const side = SIGN[s];
     const Rw = frame.right;
-    const Uw = frame.up;
-    const Nw = frame.normal;
     const ph = state.phase;
+    // on the wall a foot works in the frame of the panel it is on (folded walls: a toe on the kicker,
+    // a heel hook over the roof lip); off it (falls, the harness sit) in the body frame
+    const local = frame.folded && (ph === 'climbing' || ph === 'idle' || ph === 'topped');
+    const Uw = local ? frame.upAt(L.pos.y, this.uLoc) : frame.up;
+    const Nw = local ? frame.normalAt(L.pos.y, this.nLoc) : frame.normal;
+    const overhang = local ? Math.max(0, Math.sin(frame.angleAt(L.pos.y, true) * DEG)) : bodyOverhang;
     const t = this.time;
     const Hp = this.Hp.copy(g.pelvis).addScaledVector(g.pelvisRight, side * BODY.hipHalf);
     const info = this.lookupHold(L.holdId, 2 + s);
