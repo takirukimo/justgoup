@@ -82,7 +82,7 @@
  * call (mutated in place); copy what you need to keep.
  */
 
-import type { BoulderDef, ClimberPhase, ClimberState, HoldDef, LimbId, LimbSnapshot, QuickdrawDef, Vec2 } from '../core/types';
+import type { BoulderDef, ClimberPhase, ClimberState, FootMode, HoldDef, LimbId, LimbSnapshot, QuickdrawDef, Vec2 } from '../core/types';
 import type { ClimberSimAPI, FallReason, ReleaseOptions, SimEvent, SimOptions } from '../core/contracts';
 import { BODY, GAME, SIM } from '../config/tuning';
 import { clamp, clamp01, damp, DEG, smoothstep } from '../core/math';
@@ -94,7 +94,9 @@ import {
   LIMB_INDEX,
   maxReachIdx,
   placementBlocked,
+  pullQuality,
   pumpCapFactor,
+  pushQuality,
   startPlacement,
   type LimbContact,
   topHolds,
@@ -105,6 +107,10 @@ import { anatomicStrain, envClamp, envelopePolygon, envEval, envProject, PROJ_OU
 import {
   computeAnchors,
   evaluateStance,
+  FOOT_DROP,
+  FOOT_HEEL,
+  FOOT_PUSH,
+  FOOT_TOE,
   initialPose,
   bestLean,
   LEAN_OUT,
@@ -160,6 +166,12 @@ interface LimbRt {
   busyKind: 'clip' | 'chalk' | null;
   /** Hands: hanging free by the side, shaking the forearm out. */
   shakeOut: boolean;
+  /** Feet: how the attached foot is used (inferred from where it was put), null while free. */
+  mode: FootMode | null;
+  /** Feet: flagging (no hold; the leg is a counterweight). Offset of the foot from its hip in the body frame. */
+  flag: boolean;
+  flagO: number;
+  flagU: number;
   load: number;
   stress: number;
   cap: number;
@@ -237,6 +249,10 @@ function newLimb(): LimbRt {
     busyDraw: null,
     busyKind: null,
     shakeOut: false,
+    mode: null,
+    flag: false,
+    flagO: 0,
+    flagU: 0,
     load: 0,
     stress: 0,
     cap: 0,
@@ -386,6 +402,10 @@ export class ClimberSim implements ClimberSimAPI {
   private readonly pumpWarned = [false, false];
   /** Signed barn-door amount of the last static solution. */
   private barnAmt = 0;
+  /** Flagging legs for the statics: [onLF, xLF, yLF, onRF, xRF, yRF]. */
+  private readonly flagArr = new Float64Array(6);
+  /** Substeps until the next foot-technique re-check (rock-over onto a heel hook etc.). */
+  private footTick = 0;
 
   constructor(boulder: BoulderDef, opts: ClimberSimOptions = {}) {
     this.boulder = boulder;
@@ -414,6 +434,7 @@ export class ClimberSim implements ClimberSimAPI {
       prm.strength = this.strength;
       prm.handPump = this.handPump;
       prm.handFric = this.handFric;
+      prm.flags = this.flagArr;
     }
     const limbs = {} as Record<LimbId, LimbSnapshot>;
     for (const id of LIMB_IDS) limbs[id] = snapshot(id);
@@ -540,6 +561,8 @@ export class ClimberSim implements ClimberSimAPI {
     if (L.busy || L.dragging) return false;
     const held = L.hold;
     const wasAttached = !!held || L.smear;
+    if (L.flag) this.clearFlag(i);
+    L.mode = null;
     L.prevHold = held;
     L.prevSmear = L.smear;
     L.prevX = L.cx;
@@ -607,10 +630,14 @@ export class ClimberSim implements ClimberSimAPI {
       if (i < 2) this.wearChalk(i, this.sweatM);
       out.push({ type: 'grab', limb, holdId: hold.id, quality });
       if (i < 2 && this.topIds.has(hold.id)) out.push({ type: 'top-touch', limb });
+      if (i >= 2 && L.mode && L.mode !== 'edge') out.push({ type: 'technique', limb, technique: L.mode as 'heel' | 'toe' | 'drop' });
     } else if (i < 2 && this.releaseZone(i, p.x, p.y) === 'chalk' && this.startChalk(i, out)) {
       // reached back to the chalk bag (behind the hips)
     } else if (i < 2 && this.releaseZone(i, p.x, p.y) === 'shake' && this.canShakeOut(i)) {
       this.startShakeOut(i, out);
+    } else if (i >= 2 && this.flagZone(i, p.x, p.y)) {
+      this.setFlag(i, p.x, p.y);
+      out.push({ type: 'technique', limb, technique: 'flag' });
     } else if (i >= 2 && this.boulder.wallAngle <= SIM.smearMaxAngle && this.smearSpot(i, p.x, p.y)) {
       const c = this.smearTmp;
       this.attachSmear(i, c.x, c.y);
@@ -1088,6 +1115,8 @@ export class ClimberSim implements ClimberSimAPI {
         o.cx = tmp.x;
         o.cy = tmp.y;
       }
+      L.flag = false;
+      L.mode = this.inferFootMode(i, h, L.cx, L.cy, null);
     }
     this.measureGap(i);
   }
@@ -1103,7 +1132,123 @@ export class ClimberSim implements ClimberSimAPI {
     L.age = 0;
     L.slipT = 0;
     L.stamp = ++this.stampSeq;
+    L.flag = false;
+    L.mode = 'smear';
     this.measureGap(i);
+  }
+
+  // ═══════════════════════════════ foot techniques ═══════════════════════════════
+
+  /**
+   * How a foot on hold h at contact (cx, cy) is used, from where it is relative to its hip (research
+   * §2.2/§2.3), with hysteresis against `current` (null = a fresh placement):
+   *  • heel — a pull-able hold the foot can't stand on (its good direction points toward the hip) at /
+   *    above hip height and out to the side, on a wall of SIM.heelMinAngle or steeper,
+   *  • toe — the same kind of hold further away / lower (a toe pulling under a lip, the far side of a
+   *    feature), from SIM.toeMinAngle,
+   *  • drop — a sidepull-like foothold out to the side below the hip, facing away from the body (the
+   *    knee turns in, the hip goes to the wall),
+   *  • edge — everything else (standing on it).
+   */
+  private inferFootMode(i: number, h: HoldDef, cx: number, cy: number, current: FootMode | null): FootMode {
+    this.frameNow();
+    const ax = this.ax[i];
+    const ay = this.ay[i];
+    const vx = cx - ax;
+    const vy = cy - ay;
+    const dist = Math.hypot(vx, vy);
+    if (dist < 1e-6) return 'edge';
+    // wall frame (what the player sees): height above the hip joint, distance out to the side
+    const side = i === 2 ? -1 : 1;
+    const up = vy;
+    const out = Math.abs(vx);
+    const dx = -vx / dist;
+    const dy = -vy / dist;
+    const push = pushQuality(h, dx, dy);
+    const pull = pullQuality(h, dx, dy);
+    const wall = this.boulder.wallAngle;
+    const hooked = current === 'heel' || current === 'toe';
+    // heel hook: at / above hip height out to the side on a steep wall, on a hold the heel can pull on
+    // (hysteresis: it stays a heel hook until the hips rise over it — a rock-over)
+    if (wall >= SIM.heelMinAngle && pull >= (hooked ? 0.3 : 0.4) && up >= (current === 'heel' ? -0.22 : -0.1) && out >= (current === 'heel' ? 0.1 : 0.15) && dist <= 0.85) return 'heel';
+    // toe hook: a hold the foot can pull on but not stand on (the far side of a feature, under a lip),
+    // or any pull-able foothold on a roof
+    if (wall >= SIM.toeMinAngle && ((pull >= (hooked ? 0.45 : 0.6) && push < (hooked ? 0.6 : 0.5)) || (wall >= 60 && pull >= 0.5))) return 'toe';
+    void side;
+    // drop knee: a sidepull-like foothold out to the side below the hip, facing away from the body
+    const hx = Math.cos(h.angle);
+    const dropOk = current === 'drop' ? Math.abs(hx) >= 0.5 && push >= 0.4 : Math.abs(hx) >= 0.6 && push >= 0.5;
+    if (dropOk && wall >= -2 && hx * (cx - this.P.x) > 0 && out >= 0.1 && up <= 0.05 && up >= -0.62) return 'drop';
+    return 'edge';
+  }
+
+  /** Re-check the attached feet's techniques (a rock-over turns a heel hook into a standing foot). */
+  private updateFootModes(): void {
+    for (let i = 2; i < 4; i++) {
+      const L = this.limbs[i];
+      if (!L.hold || L.dragging) continue;
+      const m = this.inferFootMode(i, L.hold, L.cx, L.cy, L.mode);
+      if (m === L.mode) continue;
+      L.mode = m;
+      if (m !== 'edge' && this.phase === 'climbing') this.events.push({ type: 'technique', limb: LIMB_IDS[i], technique: m as 'heel' | 'toe' | 'drop' });
+    }
+  }
+
+  /**
+   * Is a foot released over blank wall at (x, y) a flag? Out to the side of its hip (≥ SIM.flagReach):
+   * about level with the hip on walls that take a smear, anywhere from hip height down on steeper ones;
+   * on walls too steep to smear also crossed behind the other leg (a back flag).
+   */
+  private flagZone(i: number, x: number, y: number): boolean {
+    this.frameNow();
+    // wall frame (what the player sees): out to the side of the hip, height relative to the hip
+    const side = i === 2 ? -1 : 1;
+    const out = side * (x - this.ax[i]);
+    const up = y - this.ay[i];
+    const smearable = this.boulder.wallAngle <= SIM.smearMaxAngle;
+    // where a smear works (vertical / slab) only a leg held out about level with the hip flags
+    if (out >= SIM.flagReach && up <= 0.3 && up >= (smearable ? -0.05 : -0.55)) return true;
+    if (smearable) return false;
+    const across = side * (x - this.P.x);
+    return across <= -0.12 && up <= -0.15 && up >= -0.9;
+  }
+
+  private setFlag(i: number, x: number, y: number): void {
+    const L = this.limbs[i];
+    const u = this.frameNow();
+    // the foot stays where the leg can be (inside its envelope), relative to the hip (it moves with the body)
+    const c = envClamp(i, this.ax[i], this.ay[i], u.x, u.y, x, y, 0);
+    const vx = c.x - this.ax[i];
+    const vy = c.y - this.ay[i];
+    const side = i === 2 ? -1 : 1;
+    L.flag = true;
+    L.mode = 'flag';
+    L.flagU = vx * u.x + vy * u.y;
+    L.flagO = side * (vx * u.y - vy * u.x);
+    L.hold = null;
+    L.smear = false;
+    L.stamp = ++this.stampSeq;
+  }
+
+  private clearFlag(i: number): void {
+    const L = this.limbs[i];
+    L.flag = false;
+    if (L.mode === 'flag') L.mode = null;
+    const j = (i - 2) * 3;
+    this.flagArr[j] = 0;
+  }
+
+  /** Flagging feet → the statics' counterweight array (from the rendered foot positions). */
+  private syncFlags(): void {
+    for (let i = 2; i < 4; i++) {
+      const L = this.limbs[i];
+      const j = (i - 2) * 3;
+      if (L.flag && !L.dragging) {
+        this.flagArr[j] = 1;
+        this.flagArr[j + 1] = L.px;
+        this.flagArr[j + 2] = L.py;
+      } else this.flagArr[j] = 0;
+    }
   }
 
   /**
@@ -1198,6 +1343,8 @@ export class ClimberSim implements ClimberSimAPI {
       L.busyDraw = null;
       L.busyKind = null;
       L.shakeOut = false;
+      L.flag = false;
+      L.mode = null;
       L.prevHold = h;
       L.prevSmear = false;
       L.slipT = 0;
@@ -1267,6 +1414,11 @@ export class ClimberSim implements ClimberSimAPI {
     this.posture.py = best.py;
     this.postureOn = true;
     if (resetPose) this.depth = 0.25;
+    // foot techniques from the settled pose (attach() saw the old one)
+    for (let i = 2; i < 4; i++) {
+      const L = this.limbs[i];
+      if (L.hold) L.mode = this.inferFootMode(i, L.hold, L.cx, L.cy, null);
+    }
     // limb endpoints at their contacts
     this.syncPose();
     computeAnchors(this.pose, this.ax, this.ay);
@@ -1361,6 +1513,7 @@ export class ClimberSim implements ClimberSimAPI {
         c.matched = !!L.hold && this.wouldMatch(i, L.hold);
         c.hx = L.hx;
         c.hy = L.hy;
+        c.mode = i < 2 || !L.hold ? FOOT_PUSH : L.mode === 'heel' ? FOOT_HEEL : L.mode === 'toe' ? FOOT_TOE : L.mode === 'drop' ? FOOT_DROP : FOOT_PUSH;
         this.contacts[i] = c;
       } else this.contacts[i] = null;
     }
@@ -1510,6 +1663,11 @@ export class ClimberSim implements ClimberSimAPI {
     this.syncPose();
     computeAnchors(this.pose, this.ax, this.ay);
     this.updateEndpoints(h);
+    if (this.footTick-- <= 0) {
+      this.footTick = 30;
+      this.updateFootModes();
+    }
+    this.syncFlags();
     this.buildContacts();
 
     // statics
@@ -2035,6 +2193,14 @@ export class ClimberSim implements ClimberSimAPI {
         L.px = damp(L.px, L.cx, 30, h);
         L.py = damp(L.py, L.cy, 30, h);
         L.depth = damp(L.depth, L.smear ? 0.015 : i < 2 ? 0.03 : 0.02, 14, h);
+      } else if (L.flag) {
+        // flagging: the leg is held out where it was put (relative to the hip), the foot on / near the wall
+        const tx = ax[i] + sx * L.flagU + rx * side * L.flagO;
+        const ty = ay[i] + sy * L.flagU + ry * side * L.flagO;
+        const c = envClamp(i, ax[i], ay[i], sx, sy, tx, ty, 0);
+        L.px = damp(L.px, c.x, 16, h);
+        L.py = damp(L.py, c.y, 16, h);
+        L.depth = damp(L.depth, 0.03 + Math.max(0, this.sth) * 0.05, 10, h);
       } else {
         // dangling: arms hang by the side (elbow soft, inside the arm envelope), legs hang down
         const down = i < 2 ? 0.4 : 0.82;
@@ -2184,6 +2350,7 @@ export class ClimberSim implements ClimberSimAPI {
     else this.events.push({ type: 'slip', limb: LIMB_IDS[i], holdId: '' });
     L.hold = null;
     L.smear = false;
+    L.mode = null;
     L.prevHold = null;
     L.prevSmear = false;
     L.slipT = 0;
@@ -2274,6 +2441,8 @@ export class ClimberSim implements ClimberSimAPI {
       L.busyDraw = null;
       L.busyKind = null;
       L.shakeOut = false;
+      L.flag = false;
+      L.mode = null;
       L.load = 0;
       L.stress = 0;
       L.cap = 0;
@@ -2535,6 +2704,7 @@ export class ClimberSim implements ClimberSimAPI {
       o.smearing = L.smear;
       o.shake = L.shake;
       o.busy = L.busy;
+      if (i >= 2) o.footMode = L.flag ? 'flag' : (L.hold || L.smear) && !L.dragging ? L.mode ?? 'edge' : undefined;
       if (i < 2) {
         o.pump = this.handPump[i];
         o.friction = this.handFric[i];

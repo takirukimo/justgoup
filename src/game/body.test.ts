@@ -8,6 +8,7 @@ import { SIM } from '../config/tuning';
 import { ClimberSim, type ClimberSimOptions } from './climber-sim';
 import { Forearm } from './forearm';
 import { edgeDepthFactor, frictionCapFactor, handGripBase, pumpCapFactor } from './holds';
+import { evaluateStance, FOOT_HEEL, FOOT_PUSH, makeParams, newContact, setContact, StanceEval, type Contacts, type Pose } from './statics';
 import { hold, makeBoulder, moveLimb, run } from './test-helpers';
 
 const grip = (h: HoldDef, wallAngle = 0): number => handGripBase(h, wallAngle, Math.max(0, Math.sin((wallAngle * Math.PI) / 180)));
@@ -484,5 +485,154 @@ describe('chalk & sweat (research §2.7, §6.5)', () => {
     const ev = run(sim, SIM.chalkTime + 0.2).filter((e) => e.type !== 'shake-start' && e.type !== 'shake-end');
     expect(ev.map((e) => e.type)).toEqual(['chalk-done', 'return']);
     expect(sim.getState().limbs.RH.holdId).toBe('s2');
+  });
+});
+
+// ═══════════════════════════════ foot techniques ═══════════════════════════════
+
+const handLoad = (sim: ClimberSim): number => sim.getState().limbs.LH.load + sim.getState().limbs.RH.load;
+
+describe('foot techniques (research §2.2, §2.3)', () => {
+  const steepWithHook = (wallAngle: number, k: HoldDef): BoulderDef =>
+    makeBoulder(
+      [hold('s1', -0.2, 2.1, 'jug', 0.11, 'start'), hold('s2', 0.2, 2.1, 'jug', 0.11, 'start'), hold('f1', -0.2, 0.95, 'jug', 0.08, 'foot'), hold('f2', 0.2, 0.95, 'jug', 0.08, 'foot'), k, hold('t', 0, 4.1, 'jug', 0.12, 'top')],
+      { wallAngle },
+    );
+  /** Hands' load with the right foot off, then with it put on hold k (and the events of that move). */
+  const hookTrial = (b: BoulderDef): { off: number; on: number; sim: ClimberSim; ev: SimEvent[] } => {
+    const sim = new ClimberSim(b, { sweat: 0 });
+    sim.start();
+    run(sim, 1.5);
+    sim.beginDrag('RF');
+    run(sim, 1.5);
+    const off = handLoad(sim);
+    sim.endDrag('RF');
+    run(sim, 0.5);
+    const ev = moveLimb(sim, 'RF', 'k');
+    run(sim, 1.5, ev);
+    return { off, on: handLoad(sim), sim, ev };
+  };
+
+  it('a foot at / above hip height out to the side on an overhang heel-hooks and takes load off the hands', () => {
+    for (const angle of [35, 50]) {
+      const r = hookTrial(steepWithHook(angle, hold('k', 0.55, 1.35, 'jug', 0.1, 'hand')));
+      const s = r.sim.getState();
+      expect(s.limbs.RF.holdId).toBe('k');
+      expect(s.limbs.RF.footMode, `${angle}°`).toBe('heel');
+      expect(r.ev.some((e) => e.type === 'technique' && e.limb === 'RF' && e.technique === 'heel')).toBe(true);
+      expect(r.on, `${angle}°`).toBeLessThan(r.off - 0.1);
+      expect(r.ev.some((e) => e.type === 'slip' || e.type === 'fall')).toBe(false);
+    }
+    // on a vertical wall the same placement is just a foot on a hold
+    const flat = hookTrial(steepWithHook(0, hold('k', 0.55, 1.35, 'jug', 0.1, 'hand')));
+    expect(flat.sim.getState().limbs.RF.footMode).not.toBe('heel');
+  });
+
+  it('a toe hook pulls on a hold the foot cannot stand on (under a lip), also unloading the hands', () => {
+    // the hold faces back toward the climber: the toe pulls on its far side
+    const r = hookTrial(steepWithHook(45, hold('k', 0.75, 1.0, 'jug', 0.1, 'hand', 180)));
+    expect(r.sim.getState().limbs.RF.footMode).toBe('toe');
+    expect(r.ev.some((e) => e.type === 'technique' && e.technique === 'toe')).toBe(true);
+    expect(r.on).toBeLessThan(r.off - 0.08);
+  });
+
+  it('statics: a hook pulls the hip toward the hold and pulls the body in (less keep-in for the hands)', () => {
+    const h = [hold('s1', -0.2, 2.1, 'jug', 0.11, 'start'), hold('s2', 0.2, 2.1, 'jug', 0.11, 'start'), hold('f1', -0.2, 0.95, 'jug', 0.08, 'foot'), hold('k', 0.55, 1.4, 'jug', 0.1, 'hand')];
+    const prm = makeParams(45);
+    const pose: Pose = { px: 0.05, py: 1.35, cx: 0.05, cy: 1.85 };
+    const solve = (mode: number) => {
+      const contacts: Contacts = h.map((x, i) => setContact(newContact(), x, i, false));
+      contacts[3]!.mode = mode;
+      const ev = evaluateStance(pose, contacts, prm, new StanceEval());
+      return { hands: ev.load[0] + ev.load[1], keepIn: ev.normalHands, hooks: ev.normalHooks, fx: ev.fx[3], fy: ev.fy[3], ev };
+    };
+    const push = solve(FOOT_PUSH);
+    const heel = solve(FOOT_HEEL);
+    expect(push.hooks).toBe(0);
+    expect(heel.hooks).toBeGreaterThan(0.05);
+    expect(heel.keepIn).toBeLessThan(push.keepIn - 0.05);
+    expect(heel.hands).toBeLessThan(push.hands - 0.05);
+    // the heel's force on the body points from the hip toward the hold (up and out to the right)
+    expect(heel.fx).toBeGreaterThan(0);
+    expect(heel.fy).toBeGreaterThanOrEqual(0);
+  });
+
+  it('a flag counterbalances a barn-door: less swing, less tension, less pump', () => {
+    const b = makeBoulder(
+      [hold('s1', -0.35, 2.0, 'jug', 0.1, 'start'), hold('s2', -0.3, 1.7, 'jug', 0.1, 'start'), hold('f1', -0.3, 0.75, 'foot', 0.03, 'foot'), hold('t', 0, 4.1, 'jug', 0.12, 'top')],
+      { wallAngle: 15 },
+    );
+    const trial = (flagDx: number | null) => {
+      const sim = new ClimberSim(b, { sweat: 0 });
+      sim.start();
+      run(sim, 1);
+      const hip = sim.getState().limbs.RF.anchor;
+      const ev: SimEvent[] = [];
+      if (flagDx !== null) {
+        sim.beginDrag('RF');
+        for (let k = 0; k < 20; k++) {
+          sim.dragTo('RF', { x: hip.x + flagDx, y: hip.y + (flagDx < 0 ? -0.4 : 0.05) });
+          run(sim, 1 / 60, ev);
+        }
+        for (const e of sim.endDrag('RF')) ev.push(e);
+      }
+      // the body hangs off to the right of a column of contacts on the left: the door opens
+      sim.setHipTarget({ x: 0.1, y: sim.getState().pelvis.y });
+      run(sim, 2, ev);
+      const s = sim.getState();
+      const yaw = Math.abs(s.bodyYaw);
+      const tension = s.tension;
+      const p0 = s.pump;
+      run(sim, 15, ev);
+      return { yaw, tension, pump: sim.getState().pump - p0, mode: s.limbs.RF.footMode, ev };
+    };
+    const none = trial(null);
+    const outside = trial(0.65);
+    const back = trial(-0.45);
+    expect(none.mode).toBeUndefined();
+    expect(outside.mode).toBe('flag');
+    expect(back.mode).toBe('flag');
+    expect(outside.ev.some((e) => e.type === 'technique' && e.technique === 'flag')).toBe(true);
+    for (const f of [outside, back]) {
+      expect(f.yaw).toBeLessThan(none.yaw * 0.6);
+      expect(f.tension).toBeLessThan(none.tension - 0.3);
+      expect(f.pump).toBeLessThan(none.pump - 0.03);
+    }
+  });
+
+  it('a drop knee on a sidepull foothold brings the hips to the wall and unloads the hands', () => {
+    const trial = (angleDeg: number) => {
+      const b = makeBoulder(
+        [hold('s1', -0.2, 2.0, 'jug', 0.11, 'start'), hold('s2', 0.2, 2.0, 'jug', 0.11, 'start'), hold('f1', -0.2, 0.9, 'edge', 0.06, 'foot'), hold('f2', 0.2, 0.9, 'edge', 0.06, 'foot'), hold('k', 0.42, 1.05, 'edge', 0.07, 'foot', angleDeg), hold('t', 0, 4.1, 'jug', 0.12, 'top')],
+        { wallAngle: 20 },
+      );
+      const sim = new ClimberSim(b, { sweat: 0 });
+      sim.start();
+      run(sim, 1);
+      const ev = moveLimb(sim, 'RF', 'k');
+      run(sim, 2, ev);
+      const s = sim.getState();
+      return { mode: s.limbs.RF.footMode, depth: s.pelvisDepth, hands: handLoad(sim), ev };
+    };
+    const drop = trial(0); // faces away from the body: the foot presses out against it
+    const plain = trial(-90); // the same spot, a plain foothold
+    expect(drop.mode).toBe('drop');
+    expect(plain.mode).toBe('edge');
+    expect(drop.ev.some((e) => e.type === 'technique' && e.technique === 'drop')).toBe(true);
+    expect(drop.depth).toBeLessThan(plain.depth - 0.03);
+    expect(drop.hands).toBeLessThan(plain.hands - 0.02);
+  });
+
+  it('feet on holds report edge / smear; a dragged foot reports no mode', () => {
+    const sim = new ClimberSim(makeBoulder([hold('s1', -0.2, 1.6, 'jug', 0.1, 'start'), hold('s2', 0.2, 1.6, 'jug', 0.1, 'start'), hold('f1', -0.22, 0.45, 'edge', 0.07, 'foot'), hold('t', 0, 4.1, 'jug', 0.12, 'top')]));
+    sim.start();
+    run(sim, 0.5);
+    const s = sim.getState();
+    expect(s.limbs.LF.footMode).toBe('edge');
+    expect(s.limbs.RF.footMode).toBe(s.limbs.RF.smearing ? 'smear' : 'edge');
+    sim.beginDrag('LF');
+    run(sim, 0.1);
+    expect(sim.getState().limbs.LF.footMode).toBeUndefined();
+    expect(sim.getState().limbs.LH.footMode).toBeUndefined();
   });
 });

@@ -10,6 +10,11 @@
 // The out-of-plane balance (side view) adds the "keep-in" pull the hands need to stop the body
 // from toppling off the wall: Nₕ = (d·cos θ + sin θ·(y_com − y_feet)) / (y_hands − y_feet).
 // On overhangs the feet must toe-pull (Nf < 0), which lowers their capacity.
+// Foot techniques (Phase B): a foot contact has a mode. Pushing feet (edge, smear, drop knee) push the
+// hip away from the toe; a HOOK (heel or toe) pulls the hip toward the hold like an arm and also pulls the
+// body in (it takes over part of the hands' keep-in pull, all of the legs' share on a roof). A drop knee
+// turns the hip into the wall (smaller d → less keep-in pull). A FLAG is not a contact: the leg out to the
+// side shifts the CoM (its mass) and widens the column the barn-door turns about (StaticsParams.flags).
 // Anatomy (anatomy.ts): each contact is measured against its limb's reach envelope in the pose's
 // body frame — ratio[] / excess[] — and gets an anatomical strain on top of its stress (awkward
 // edge → harder work, past the edge → pops off). poseViolation() keeps every limb (and a dragged
@@ -18,7 +23,15 @@
 import type { HoldDef } from '../core/types';
 import { BODY as BODY_, GAME, SIM as SIM_ } from '../config/tuning';
 import { clamp as clamp_, DEG, smoothstep as smoothstep_ } from '../core/math';
-import { contactPoint, footCapacity as footCapacity_, handCapacity as handCapacity_, isHandIdx as isHandIdx_, type GripContext } from './holds';
+import {
+  contactPoint,
+  footCapacity as footCapacity_,
+  handCapacity as handCapacity_,
+  hookCapacity as hookCapacity_,
+  hookPullIn as hookPullIn_,
+  isHandIdx as isHandIdx_,
+  type GripContext,
+} from './holds';
 import { dcos, dsin, dcosSmall, dsinSmall } from './dmath';
 import { envEval as envEval_ } from './anatomy';
 
@@ -31,6 +44,8 @@ const clamp = clamp_;
 const smoothstep = smoothstep_;
 const footCapacity = footCapacity_;
 const handCapacity = handCapacity_;
+const hookCapacity = hookCapacity_;
+const hookPullIn = hookPullIn_;
 const isHandIdx = isHandIdx_;
 const envEval = envEval_;
 
@@ -51,7 +66,16 @@ export interface Contact {
   /** Hold's good direction (cos, sin of hold.angle); (0, −1) for smears. */
   hx: number;
   hy: number;
+  /** Feet: FOOT_PUSH (edge / smear), FOOT_HEEL, FOOT_TOE (hooks: the leg pulls) or FOOT_DROP. Hands: 0. */
+  mode: number;
 }
+
+/** Contact.mode values (feet). */
+export const FOOT_PUSH = 0;
+export const FOOT_HEEL = 2;
+export const FOOT_TOE = 3;
+export const FOOT_DROP = 4;
+const isHook = (m: number): boolean => m === FOOT_HEEL || m === FOOT_TOE;
 
 /** Fill a contact for limb `li` on hold `h` (grip point + direction). */
 export function setContact(c: Contact, h: HoldDef, li: number, matched: boolean): Contact {
@@ -60,6 +84,7 @@ export function setContact(c: Contact, h: HoldDef, li: number, matched: boolean)
   c.matched = matched;
   c.hx = dcos(h.angle);
   c.hy = dsin(h.angle);
+  c.mode = FOOT_PUSH;
   return c;
 }
 
@@ -70,10 +95,11 @@ export function setSmear(c: Contact, x: number, y: number): Contact {
   c.matched = false;
   c.hx = 0;
   c.hy = -1;
+  c.mode = FOOT_PUSH;
   return c;
 }
 
-export const newContact = (): Contact => ({ hold: null, x: 0, y: 0, matched: false, hx: 0, hy: -1 });
+export const newContact = (): Contact => ({ hold: null, x: 0, y: 0, matched: false, hx: 0, hy: -1, mode: FOOT_PUSH });
 
 /** Indexed by limb: 0 LH, 1 RH, 2 LF, 3 RF. */
 export type Contacts = (Contact | null)[];
@@ -109,6 +135,11 @@ export interface StaticsParams {
   handPump: Float64Array | null;
   /** Per-hand chalk friction 0..1 (1 = fresh); null = fresh chalk on both hands (the planner). */
   handFric: Float64Array | null;
+  /**
+   * Flagging legs (no contact; counterweight): [onLF, xLF, yLF, onRF, xRF, yRF] with on = 1 and the
+   * foot's wall-local position; null = no flags (the planner).
+   */
+  flags: Float64Array | null;
   /** Cached trig of wallAngle (refreshed automatically when wallAngle changes). */
   trigAngle: number;
   cth: number;
@@ -129,6 +160,7 @@ export function makeParams(wallAngle: number, assist = 0, pump = 0): StaticsPara
     strength: 1,
     handPump: null,
     handFric: null,
+    flags: null,
     trigAngle: wallAngle,
     cth: dcos(wallAngle * DEG),
     sth: dsin(wallAngle * DEG),
@@ -179,6 +211,10 @@ export class StanceEval {
   normalHands = 0;
   /** Total foot normal force (negative = toe pull). */
   normalFeet = 0;
+  /** Total pull-in of the hooking feet (heel / toe hooks, body weights). */
+  normalHooks = 0;
+  /** Per contact: out-of-plane pull-in of a hook (body weights; 0 for the others). */
+  readonly hookN = new Float64Array(4);
   feasible = true;
 }
 
@@ -224,15 +260,28 @@ const sq = (x: number, y: number): number => Math.sqrt(x * x + y * y);
 export function estimateDepth(p: Pose, contacts: Contacts, ax: Float64Array, ay: Float64Array, wallAngle: number): number {
   let n = 0;
   let sum = 0;
+  let hooks = 0;
   const L3 = SIM.legDepthLen;
   for (let i = 2; i < 4; i++) {
     const c = contacts[i];
     if (!c) continue;
+    if (isHook(c.mode)) {
+      hooks++;
+      continue;
+    }
     const l = sq(ax[i] - c.x, ay[i] - c.y);
-    sum += clamp(Math.sqrt(Math.max(0, L3 * L3 - l * l)), 0.14, 0.62);
+    let d = clamp(Math.sqrt(Math.max(0, L3 * L3 - l * l)), 0.14, 0.62);
+    // drop knee: the hip turns in toward the wall
+    if (c.mode === FOOT_DROP) d = Math.max(SIM.dropKneeMinDepth, d * SIM.dropKneeDepth);
+    sum += d;
     n++;
   }
-  if (n) return sum / n;
+  if (n) {
+    const d = sum / n;
+    // a hooking leg pulls the hips in as well
+    return hooks ? Math.max(0.14, d - SIM.hookDepthPull * hooks) : d;
+  }
+  if (hooks) return SIM.hookOnlyDepth;
   let hy = 0;
   let nh = 0;
   for (let i = 0; i < 2; i++) {
@@ -260,8 +309,14 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
   const ax = out.ax;
   const ay = out.ay;
   computeAnchors(pose, ax, ay);
-  const comX = pose.px + BODY.comT * (pose.cx - pose.px);
+  let comX = pose.px + BODY.comT * (pose.cx - pose.px);
   const comY = pose.py + BODY.comT * (pose.cy - pose.py);
+  // a flagging leg is a counterweight: its mass moves out with the foot (leg CoM ≈ halfway to the foot)
+  const fl = prm.flags;
+  if (fl !== null) {
+    if (fl[0] > 0) comX += SIM.legMass * 0.5 * (fl[1] - ax[2]);
+    if (fl[3] > 0) comX += SIM.legMass * 0.5 * (fl[4] - ax[3]);
+  }
   out.comX = comX;
   out.comY = comY;
   let ux = pose.cx - pose.px;
@@ -281,9 +336,11 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
 
   let nh = 0;
   let nf = 0;
+  let nk = 0;
   let hys = 0;
   let hxs = 0;
   let fys = 0;
+  let kys = 0;
   let fMin = Infinity;
   let fMax = -Infinity;
   let cMin = Infinity;
@@ -322,35 +379,67 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
       hxs += c.x;
       if (r > maxArm) maxArm = r;
     } else {
-      nf++;
-      fys += c.y;
       if (c.x < fMin) fMin = c.x;
       if (c.x > fMax) fMax = c.x;
+      if (isHook(c.mode)) {
+        nk++;
+        kys += c.y;
+        continue;
+      }
+      nf++;
+      fys += c.y;
       if (r > maxLeg) maxLeg = r;
       crouch += smoothstep(1.35, 1.0, d / BODY.legMin);
     }
   }
   out.handsOn = nh;
-  out.feetOn = nf;
+  out.feetOn = nf + nk;
   const depth = estimateDepth(pose, contacts, ax, ay, prm.wallAngle);
   out.depth = depth;
 
   // ── out-of-plane balance ──
   let Nh = 0;
   let Nf = 0;
+  let Nk = 0;
   const hyMean = nh ? hys / nh : 0;
   const fyMean = nf ? fys / nf : 0;
   if (nh > 0 && nf > 0) {
     const lever = Math.max(SIM.minLever, hyMean - fyMean);
     Nh = Math.max(0, (depth * cth + sth * (comY - fyMean)) / lever);
-    Nf = Nh - sth;
   } else if (nh > 0) {
     Nh = Math.max(0, sth);
-  } else {
-    Nf = -sth;
   }
+  out.hookN[0] = out.hookN[1] = out.hookN[2] = out.hookN[3] = 0;
+  if (nk > 0 && nh > 0 && Nh > 0) {
+    // hooks pull the body in and take over part of the hands' keep-in pull: a hook near the hands'
+    // height substitutes ≈1:1, a low one less; with no pushing foot (a roof) they carry the legs' share
+    let capSum = 0;
+    let effSum = 0;
+    for (let i = 2; i < 4; i++) {
+      const c = contacts[i];
+      if (!c || !isHook(c.mode)) continue;
+      const nMax = hookPullIn(c.hold, c.mode === FOOT_HEEL, prm.assist);
+      let arm: number;
+      if (nf > 0) arm = clamp((c.y - fyMean) / Math.max(SIM.minLever, hyMean - fyMean), 0.25, 1);
+      else arm = clamp((hyMean - comY) / Math.max(0.2, hyMean - c.y), 0.2, 1);
+      out.hookN[i] = nMax;
+      capSum += nMax;
+      effSum += nMax * arm;
+    }
+    const sub = Math.min(Nh * SIM.hookMaxShare, effSum);
+    if (capSum > 0 && sub > 0) {
+      for (let i = 2; i < 4; i++) {
+        out.hookN[i] = (out.hookN[i] / capSum) * (sub / Math.max(effSum / capSum, 1e-6));
+        Nk += out.hookN[i];
+      }
+      Nh -= sub;
+    } else for (let i = 2; i < 4; i++) out.hookN[i] = 0;
+  }
+  if (nh > 0 && nf > 0) Nf = Nh + Nk - sth;
+  else if (nh === 0) Nf = -sth;
   out.normalHands = Nh;
   out.normalFeet = Nf;
+  out.normalHooks = Nk;
   const nPerFoot = nf ? Nf / nf : 0;
 
   // ── capacities ──
@@ -382,6 +471,8 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
       GRIP.friction = hf ? hf[i] : 1;
       cap = c.hold ? handCapacity(c.hold, c.hx, c.hy, dx, dy, c.matched, GRIP) : 0.02;
       handCapSum += cap;
+    } else if (isHook(c.mode)) {
+      cap = c.hold ? hookCapacity(c.hold, c.mode === FOOT_HEEL, c.hx, c.hy, dx, dy, GRIP) : 0.02;
     } else {
       cap = footCapacity(c.hold, c.hx, c.hy, dx, dy, nPerFoot, GRIP);
     }
@@ -403,7 +494,8 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
       const c = contacts[i]!;
       let ux: number;
       let uy: number;
-      if (isHandIdx(i)) {
+      if (isHandIdx(i) || isHook(c.mode)) {
+        // hands and hooking feet pull the body toward the contact
         ux = c.x - ax[i];
         uy = c.y - ay[i];
       } else {
@@ -508,7 +600,7 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
   // ── loads + stress ──
   let worstStress = 0;
   let worstLimb = -1;
-  const nAttached = nh + nf;
+  const nAttached = nh + nf + nk;
   for (let i = 0; i < 4; i++) {
     const c = contacts[i];
     if (!c) continue;
@@ -528,7 +620,7 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
     if (isHandIdx(i) && Nh > 0) {
       const share = handCapSum > 0 ? out.cap[i] / handCapSum : 1 / nh;
       load = sq(load, Nh * share);
-    }
+    } else if (out.hookN[i] > 0) load = sq(load, out.hookN[i]);
     out.load[i] = load;
     const s = load / out.cap[i] + out.edge[i];
     out.stress[i] = s;
@@ -542,7 +634,7 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
   out.worstLimb = worstLimb;
 
   // ── balance (CoM vs feet base) ──
-  if (nf > 0) {
+  if (nf + nk > 0) {
     const mid = (fMin + fMax) / 2;
     const halfW = (fMax - fMin) / 2;
     out.balance = clamp((comX - mid) / Math.max(halfW + 0.1, 0.12), -1, 1);
@@ -554,7 +646,16 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
   }
 
   // ── barn door (contacts in a narrow column, CoM off to one side) ──
-  if (nh > 0 && nf > 0) {
+  if (fl !== null) {
+    // a flagging foot presses on the wall out to the side: the door turns about a wider column
+    for (let j = 0; j < 2; j++) {
+      if (fl[j * 3] <= 0) continue;
+      const x = fl[j * 3 + 1];
+      if (x < cMin) cMin += (x - cMin) * SIM.flagSpread;
+      else if (x > cMax) cMax += (x - cMax) * SIM.flagSpread;
+    }
+  }
+  if (nh > 0 && nf + nk > 0) {
     const spread = cMax - cMin;
     const meanX = cSum / nAttached;
     const off = comX < cMin ? cMin - comX : comX > cMax ? comX - cMax : 0;
@@ -564,7 +665,7 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
     amt = clamp(amt, 0, 1) * (nAttached >= 4 ? 0.5 : 1);
     out.barn = (lateral >= 0 ? 1 : -1) * amt;
     out.barnPen = SIM.barnPenalty * amt;
-  } else if (nh === 1 && nf === 0) {
+  } else if (nh === 1 && nf + nk === 0) {
     // hanging off one hand with no feet: the body swings open about the hand (more on overhangs);
     // with the left hand on, the right side swings away (+), and vice versa
     const lh = contacts[0] !== null;

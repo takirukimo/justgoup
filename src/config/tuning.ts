@@ -226,6 +226,30 @@ export const SIM = {
   /** How much toe-pull (out-of-plane, body weights per foot) a foothold tolerates on overhangs. */
   toeScale: { jug: 0.36, edge: 0.32, volume: 0.34, pocket: 0.28, pinch: 0.28, crimp: 0.22, sloper: 0.2, foot: 0.22 },
   toeMin: 0.12,
+  // ── Foot techniques (research §2.2, §2.3; inferred from where the foot is put, ClimberSim) ──
+  /** Heel / toe hook capacity (BW, best hold and direction) and the most pull-in they give (BW). */
+  heelHookCap: 0.45,
+  toeHookCap: 0.25,
+  heelHookPull: 0.4,
+  toeHookPull: 0.22,
+  /** How well a hold type takes a hook (× the caps above). */
+  hookHoldFactor: { jug: 1, edge: 0.85, crimp: 0.55, sloper: 0.6, pinch: 0.9, pocket: 0.55, volume: 0.95, foot: 0.35 },
+  /** Hooks take over at most this share of the hands' keep-in pull. */
+  hookMaxShare: 0.85,
+  /** A hook pulls the hips in by this much (m) per hooking leg; hooks alone keep the hips this far out. */
+  hookDepthPull: 0.06,
+  hookOnlyDepth: 0.22,
+  /** Wall angles (°) from which a pull-able foothold at / above the hip is a heel hook, and a far one a toe hook. */
+  heelMinAngle: 8,
+  toeMinAngle: 15,
+  /** Drop knee: the hip turns in — its leg's hip depth × this (not below dropKneeMinDepth, m). */
+  dropKneeDepth: 0.62,
+  dropKneeMinDepth: 0.12,
+  /** One leg's share of the body mass (counterweight of a flag) and how far a flag widens the barn-door column. */
+  legMass: 0.16,
+  flagSpread: 0.6,
+  /** A foot dropped over blank wall at least this far (m) out to the side of its hip flags. */
+  flagReach: 0.5,
   /** Matching two hands on one hold shares its surface. */
   matchFactor: 0.88,
   /** Smearing (foot on blank wall). */

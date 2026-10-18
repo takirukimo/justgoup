@@ -323,6 +323,35 @@ export function footCapacity(h: HoldDef | null, hx: number, hy: number, dx: numb
   return cap;
 }
 
+/**
+ * Capacity of a HOOKING foot (heel hook when `heel`, else toe hook) on `h`: the leg pulls the hip toward
+ * the hold, so the hold's good direction should point toward the hip, like a hand's. (dx, dy) is the
+ * unit direction from the contact to the hip. Research §2.3: a heel hook carries up to ≈0.45 BW.
+ */
+export function hookCapacity(h: HoldDef, heel: boolean, hx: number, hy: number, dx: number, dy: number, ctx: GripContext): number {
+  const t = h.type;
+  let cap = (heel ? SIM.heelHookCap : SIM.toeHookCap) * SIM.hookHoldFactor[t];
+  cap *= coneQ(dx * hx + dy * hy, HAND_CONES[t]);
+  cap *= 1 + SIM.assistCap * ctx.assist;
+  return cap;
+}
+
+/** Most out-of-plane pull-in (body weights) a hook on `h` can provide (it pulls the hips to the wall). */
+export function hookPullIn(h: HoldDef | null, heel: boolean, assist: number): number {
+  if (!h) return 0;
+  return (heel ? SIM.heelHookPull : SIM.toeHookPull) * SIM.hookHoldFactor[h.type] * (1 + SIM.assistCap * assist);
+}
+
+/** Pull-direction quality 0..1 of a hand-style grip (also a hook) for the unit pull direction (dx, dy). */
+export function pullQuality(h: HoldDef, dx: number, dy: number): number {
+  return coneQ(dx * dcos(h.angle) + dy * dsin(h.angle), HAND_CONES[h.type]);
+}
+
+/** Push-direction quality 0..1 of a foothold for the unit direction toe → hip (dx, dy). */
+export function pushQuality(h: HoldDef, dx: number, dy: number): number {
+  return coneQ(-(dx * dcos(h.angle) + dy * dsin(h.angle)), FOOT_CONES[h.type]);
+}
+
 /** Ideal (best-direction) capacity of a hold for a limb kind, ignoring body position. */
 export function nominalCapacity(h: HoldDef, hand: boolean, wallAngle: number): number {
   const t = h.type;
