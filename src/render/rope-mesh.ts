@@ -18,10 +18,10 @@ import { createRopeTexture } from './materials';
 const MAX_ANCHORS = 40;
 const MAX_PARTICLES = 260;
 const LINK = 0.11; // target link length (m)
-const SUB = 3; // render samples per link
+const SUB = 2; // render samples per link (Catmull-Rom between particles 11 cm apart)
 const TAIL_SAMPLES = 120;
 const MAX_SAMPLES = MAX_PARTICLES * SUB + TAIL_SAMPLES + 4;
-const RADIAL = 8;
+const RADIAL = 6;
 const RADIUS = 0.005;
 const ITER = 12;
 const GRAVITY = -9.81;

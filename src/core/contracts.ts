@@ -15,6 +15,7 @@ import type {
   Profile,
   QualityLevel,
   QuickdrawDef,
+  RouteStyle,
   RunInfo,
   ScoreEntry,
   Vec2,
@@ -138,6 +139,11 @@ export interface ClimberSimAPI {
 export interface BetaMove {
   limb: LimbId;
   holdId: string;
+  /**
+   * Optional (Phase B): the move is thrown — 'LH' / 'RH' a deadpoint with that hand, 'both' a double-hand
+   * dyno (both hands go to `holdId`; `limb` is the left hand). Execute it with ClimberSimAPI.dyno.
+   */
+  dyno?: 'LH' | 'RH' | 'both';
 }
 
 // Function signatures exported by src/game/*.ts (documented here for implementers):
@@ -161,6 +167,16 @@ export interface GenerateOptions {
   wallAngle?: number; // override
   colorIndex?: number; // into ROUTE_COLORS
   name?: string;
+  // ── Phase B (all optional) ──
+  /** Route archetype to set (boulders). Default: picked from the seed and the grade (or from `run`). */
+  style?: RouteStyle;
+  /**
+   * A run of problems (Send Train): problem `index` of the run seeded `seed`. The generator picks the
+   * archetype so consecutive problems of a run always differ (game/generator.ts runStyle).
+   */
+  run?: { seed: number; index: number };
+  /** Multi-angle wall profiles for this problem (default: tuning GEN.profiles). */
+  profiles?: boolean;
 }
 
 export interface SendScoreInput {

@@ -1,10 +1,11 @@
 // Hold rules + grip capacity. Shared by ClimberSim, the static solver, the planner and the generator.
 
-import type { BoulderDef, HoldDef, HoldType, LimbId, QuickdrawDef, Vec2 } from '../core/types';
+import type { BoulderDef, FootMode, HoldDef, HoldShape, HoldType, LimbId, QuickdrawDef, Vec2 } from '../core/types';
 import { BODY as BODY_, GAME, SIM as SIM_ } from '../config/tuning';
 import { clamp as clamp_, DEG } from '../core/math';
 import { dcos, dsin } from './dmath';
-import { envEval, pointSegDist } from './anatomy';
+import { envEvalOn, pointSegDist } from './anatomy';
+import { angleAt, profileOf } from './wall-profile';
 
 // Hot path (capacities are evaluated thousands of times per plan): plain module-local bindings
 // (some module runners read imported bindings through a getter on every use).
@@ -174,6 +175,11 @@ const tableOf = (t: Record<HoldType, { inner: number; outer: number; floor: numb
 const HAND_CONES = tableOf(SIM.handCone);
 const FOOT_CONES = tableOf(SIM.footCone);
 const SMEAR_CONE = coneCos(SIM.smearCone);
+/** Hand cones of shapes that grip differently from their type (HoldDef.shape). */
+const SHAPE_CONES: Partial<Record<HoldShape, ConeCos>> = {};
+for (const k of Object.keys(SIM.shapeCone) as (keyof typeof SIM.shapeCone)[]) SHAPE_CONES[k] = coneCos(SIM.shapeCone[k]);
+/** Hand pull cone of a hold (its shape's when that grips differently, else its type's). */
+const handCone = (h: HoldDef): ConeCos => (h.shape !== undefined && SHAPE_CONES[h.shape]) || HAND_CONES[h.type];
 
 /** Grip quality from the cosine between the pull direction and the hold's good direction. */
 function coneQ(cosD: number, c: ConeCos): number {
@@ -279,7 +285,7 @@ export function frictionCapFactor(t: HoldType, friction: number): number {
  */
 export function handGripBase(h: HoldDef, wallAngle: number, overhang: number): number {
   const t = h.type;
-  if (t === 'sloper') return SIM.sloperBase * sizeFactor(t, h.size) * sloperSlopeFactor(wallAngle - lipAngleOf(h));
+  if (t === 'sloper') return SIM.sloperBase * sizeFactor(t, h.size) * sloperSlopeFactor(wallAngle - lipAngleOf(h)) * (h.shape !== undefined ? SIM.shapeGrip[h.shape] ?? 1 : 1);
   let cap: number;
   if (t === 'edge' || t === 'crimp') {
     const lip = clamp(lipAngleOf(h), -30, 30);
@@ -289,6 +295,7 @@ export function handGripBase(h: HoldDef, wallAngle: number, overhang: number): n
     cap = SIM.edge20 * SIM.pocketFingers[f - 1] * sizeFactor(t, h.size);
   } else cap = SIM.handCap[t] * sizeFactor(t, h.size);
   if (overhang > 0) cap *= 1 - SIM.overhangLoss[t] * overhang;
+  if (h.shape !== undefined) cap *= SIM.shapeGrip[h.shape] ?? 1;
   return cap;
 }
 
@@ -314,7 +321,7 @@ export interface GripContext {
 export function handCapacity(h: HoldDef, hx: number, hy: number, dx: number, dy: number, matched: boolean, ctx: GripContext): number {
   const t = h.type;
   let cap = handGripBase(h, ctx.wallAngle, ctx.overhang);
-  cap *= coneQ(dx * hx + dy * hy, HAND_CONES[t]);
+  cap *= coneQ(dx * hx + dy * hy, h.shape === undefined ? HAND_CONES[t] : handCone(h));
   if (matched) cap *= SIM.matchFactor;
   cap *= pumpCapFactor(ctx.pump);
   if (ctx.friction !== undefined && ctx.friction < 1) cap *= frictionCapFactor(t, ctx.friction);
@@ -334,6 +341,7 @@ export function footCapacity(h: HoldDef | null, hx: number, hy: number, dx: numb
   if (h) {
     const t = h.type;
     cap = SIM.footCap[t] * sizeFactor(t, h.size);
+    if (h.shape !== undefined) cap *= SIM.shapeFoot[h.shape] ?? 1;
     cap *= coneQ(-(dx * hx + dy * hy), FOOT_CONES[t]);
     if (normalPerFoot < 0) cap *= Math.max(SIM.toeMin, 1 + normalPerFoot / SIM.toeScale[t]);
     if (ctx.overhang > 0) cap *= 1 - SIM.steepFootLoss * ctx.overhang;
@@ -354,7 +362,7 @@ export function footCapacity(h: HoldDef | null, hx: number, hy: number, dx: numb
 export function hookCapacity(h: HoldDef, heel: boolean, hx: number, hy: number, dx: number, dy: number, ctx: GripContext): number {
   const t = h.type;
   let cap = (heel ? SIM.heelHookCap : SIM.toeHookCap) * SIM.hookHoldFactor[t];
-  cap *= coneQ(dx * hx + dy * hy, HAND_CONES[t]);
+  cap *= coneQ(dx * hx + dy * hy, h.shape === undefined ? HAND_CONES[t] : handCone(h));
   cap *= 1 + SIM.assistCap * ctx.assist;
   return cap;
 }
@@ -367,7 +375,7 @@ export function hookPullIn(h: HoldDef | null, heel: boolean, assist: number): nu
 
 /** Pull-direction quality 0..1 of a hand-style grip (also a hook) for the unit pull direction (dx, dy). */
 export function pullQuality(h: HoldDef, dx: number, dy: number): number {
-  return coneQ(dx * dcos(h.angle) + dy * dsin(h.angle), HAND_CONES[h.type]);
+  return coneQ(dx * dcos(h.angle) + dy * dsin(h.angle), h.shape === undefined ? HAND_CONES[h.type] : handCone(h));
 }
 
 /** Push-direction quality 0..1 of a foothold for the unit direction toe → hip (dx, dy). */
@@ -379,7 +387,56 @@ export function pushQuality(h: HoldDef, dx: number, dy: number): number {
 export function nominalCapacity(h: HoldDef, hand: boolean, wallAngle: number): number {
   const t = h.type;
   if (hand) return handGripBase(h, wallAngle, Math.max(0, dsin(wallAngle * DEG)));
-  return SIM.footCap[t] * sizeFactor(t, h.size);
+  return SIM.footCap[t] * sizeFactor(t, h.size) * (h.shape !== undefined ? SIM.shapeFoot[h.shape] ?? 1 : 1);
+}
+
+/**
+ * How a foot on hold h at contact (cx, cy) is used, from where it is relative to its hip joint
+ * (hipX, hipY) — research §2.2/§2.3 — with hysteresis against `current` (null = a fresh placement).
+ * `wall` is the wall angle (degrees) the technique sees, `pelvisX` the pelvis x. Shared by ClimberSim
+ * (every placement, re-checked for rock-overs) and the planner (on folded walls):
+ *  • heel — a pull-able hold the foot can't stand on (its good direction points toward the hip) at /
+ *    above hip height and out to the side, on a wall of SIM.heelMinAngle or steeper,
+ *  • toe — the same kind of hold further away / lower (a toe pulling under a lip, the far side of a
+ *    feature), from SIM.toeMinAngle; on a roof (≥ 60°) any pull-able foothold,
+ *  • drop — a sidepull-like foothold out to the side below the hip, facing away from the body (the
+ *    knee turns in, the hip goes to the wall),
+ *  • edge — everything else (standing on it).
+ */
+export function footModeFor(
+  h: HoldDef,
+  cx: number,
+  cy: number,
+  hipX: number,
+  hipY: number,
+  pelvisX: number,
+  wall: number,
+  current: FootMode | null,
+): FootMode {
+  const vx = cx - hipX;
+  const vy = cy - hipY;
+  const dist = Math.sqrt(vx * vx + vy * vy);
+  if (dist < 1e-6) return 'edge';
+  // wall frame (what the player sees): height above the hip joint, distance out to the side
+  const up = vy;
+  const out = vx < 0 ? -vx : vx;
+  const dx = -vx / dist;
+  const dy = -vy / dist;
+  const push = pushQuality(h, dx, dy);
+  const pull = pullQuality(h, dx, dy);
+  const hooked = current === 'heel' || current === 'toe';
+  // heel hook: at / above hip height out to the side on a steep wall, on a hold the heel can pull on
+  // (hysteresis: it stays a heel hook until the hips rise over it — a rock-over)
+  if (wall >= SIM.heelMinAngle && pull >= (hooked ? 0.3 : 0.4) && up >= (current === 'heel' ? -0.22 : -0.1) && out >= (current === 'heel' ? 0.1 : 0.15) && dist <= 0.85) return 'heel';
+  // toe hook: a hold the foot can pull on but not stand on (the far side of a feature, under a lip),
+  // or any pull-able foothold on a roof
+  if (wall >= SIM.toeMinAngle && ((pull >= (hooked ? 0.45 : 0.6) && push < (hooked ? 0.6 : 0.5)) || (wall >= 60 && pull >= 0.5))) return 'toe';
+  // drop knee: a sidepull-like foothold out to the side below the hip, facing away from the body
+  const hx = dcos(h.angle);
+  const ahx = hx < 0 ? -hx : hx;
+  const dropOk = current === 'drop' ? ahx >= 0.5 && push >= 0.4 : ahx >= 0.6 && push >= 0.5;
+  if (dropOk && wall >= -2 && hx * (cx - pelvisX) > 0 && out >= 0.1 && up <= 0.05 && up >= -0.62) return 'drop';
+  return 'edge';
 }
 
 export function topHolds(b: BoulderDef): HoldDef[] {
@@ -416,6 +473,7 @@ export function startPlacement(b: BoulderDef): (string | null)[] {
     out[1] = s[1].id;
   }
   const byId = new Map(b.holds.map((h) => [h.id, h] as const));
+  const prof = profileOf(b);
   const lh = byId.get(out[0]!)!;
   const rh = byId.get(out[1]!)!;
   const hx = (lh.x + rh.x) / 2;
@@ -432,7 +490,7 @@ export function startPlacement(b: BoulderDef): (string | null)[] {
   const inLegReach = (h: HoldDef, li: number): boolean => {
     const hipX = hx + (li === 2 ? -BODY.hipHalf : BODY.hipHalf);
     const py = Math.max(GAME.padHeight + 0.42, clamp(h.y + 0.62, hy - 1.15, hy - 0.35));
-    return envEval(li, hipX, py, 0, 1, h.x, h.y).excess <= 0.12;
+    return envEvalOn(prof, li, hipX, py, 0, 1, h.x, h.y).excess <= 0.12;
   };
   const cand = b.holds.filter(
     (h) => usableByFoot(h) && h.y > 0.08 && h.y < hy - 0.55 && h.y > hy - 2.0 && Math.abs(h.x - hx) < 1.0 && h.id !== out[0] && h.id !== out[1],
@@ -440,7 +498,7 @@ export function startPlacement(b: BoulderDef): (string | null)[] {
   const score = (h: HoldDef, side: number): number => {
     const idealY = hy - 1.15;
     const idealX = hx + side * 0.24;
-    return nominalCapacity(h, false, b.wallAngle) * 0.6 - Math.abs(h.y - idealY) * 0.9 - Math.abs(h.x - idealX) * 1.1 - (side * (h.x - hx) < -0.15 ? 0.6 : 0);
+    return nominalCapacity(h, false, prof ? angleAt(prof, h.y) : b.wallAngle) * 0.6 - Math.abs(h.y - idealY) * 0.9 - Math.abs(h.x - idealX) * 1.1 - (side * (h.x - hx) < -0.15 ? 0.6 : 0);
   };
   const pick = (side: number, exclude: string | null): string | null => {
     let best: HoldDef | null = null;

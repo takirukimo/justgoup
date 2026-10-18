@@ -122,9 +122,87 @@ async function startBot() {
       }
       bot.update(dt, evs.splice(0));
       if (!bot.done && !bot.failed) requestAnimationFrame(f);
+      else if (bot.failed) greedy(sim, ts);
     };
     requestAnimationFrame(f);
     window.__bot = bot;
+    /**
+     * Fallback when the planner gives up: a greedy climber through the public limb API. The lowest
+     * limb (relative to its root) moves to the best reachable hold above it; hands and feet take turns.
+     */
+    function greedy(sim, ts) {
+      window.__greedy = { moves: 0 };
+      const holds = new Map(sim.boulder.holds.map((h) => [h.id, h]));
+      let state = 'pick';
+      let limb = null;
+      let from = null;
+      let to = null;
+      let t = 0;
+      let wait = 0.4;
+      let turn = 0;
+      let last = performance.now();
+      const order = ['RF', 'RH', 'LF', 'LH'];
+      const g = () => {
+        if (sim !== window.__jgu.sim) return;
+        const now = performance.now();
+        const dt = Math.min(0.1, (now - last) / 1000) * ts;
+        last = now;
+        const st = sim.getState();
+        if (st.phase !== 'climbing') {
+          if (st.phase === 'topped' || st.phase === 'landed') return;
+          requestAnimationFrame(g);
+          return;
+        }
+        if (state === 'pick') {
+          wait -= dt;
+          if (wait <= 0) {
+            const used = new Set(Object.values(st.limbs).map((l) => l.holdId));
+            for (let k = 0; k < 4 && state === 'pick'; k++) {
+              const id = order[(turn + k) % 4];
+              const L = st.limbs[id];
+              const cur = L.holdId ? holds.get(L.holdId) : null;
+              const cy = cur ? cur.y : L.pos.y;
+              let best = null;
+              let bestS = -1e9;
+              for (const hid of sim.reachableHolds(id)) {
+                if (used.has(hid)) continue;
+                const h = holds.get(hid);
+                if (!h || h.y < cy + 0.08) continue;
+                const q = sim.predictGrip(id, hid);
+                if (q < 0.3) continue;
+                const s = h.y + q * 0.6 - 0.35 * Math.abs(h.x - st.pelvis.x);
+                if (s > bestS) {
+                  bestS = s;
+                  best = h;
+                }
+              }
+              if (best && sim.beginDrag(id)) {
+                limb = id;
+                from = { x: L.pos.x, y: L.pos.y };
+                to = { x: best.x, y: best.y };
+                t = 0;
+                state = 'drag';
+              }
+            }
+            turn = (turn + 1) % 4;
+            if (state === 'pick') wait = 0.5;
+          }
+        } else if (state === 'drag') {
+          t += dt / 0.45;
+          const k = Math.min(1, t);
+          const e = k * k * (3 - 2 * k);
+          sim.dragTo(limb, { x: from.x + (to.x - from.x) * e, y: from.y + (to.y - from.y) * e });
+          if (k >= 1) {
+            sim.endDrag(limb);
+            window.__greedy.moves++;
+            state = 'pick';
+            wait = 0.35;
+          }
+        }
+        requestAnimationFrame(g);
+      };
+      requestAnimationFrame(g);
+    }
   }, ts);
 }
 const phase = () => page.evaluate(() => window.__jgu.sim?.getState().phase ?? 'none');
@@ -138,6 +216,8 @@ async function climbFor(label, maxSecs, stopOn) {
     if (el - lastShot >= every) {
       lastShot = el;
       await shot(`${label}-${ph}-${el.toFixed(0)}s`);
+      const rs = await page.evaluate(() => window.__jgu.renderer.stats?.()).catch(() => null);
+      if (rs) log(`  renderer: calls ${rs.calls} tris ${(rs.triangles / 1000).toFixed(0)}k`);
     }
     if (stopOn.includes(ph) || el > maxSecs) return ph;
     await page.waitForTimeout(500);
@@ -213,7 +293,7 @@ try {
   await shot('error').catch(() => undefined);
 }
 const stats = await page.evaluate(() => JSON.parse(JSON.stringify(window.__probe?.stats ?? {})));
-const botInfo = await page.evaluate(() => (window.__bot ? { moves: window.__bot.moves, done: window.__bot.done, failed: window.__bot.failed } : null));
+const botInfo = await page.evaluate(() => (window.__bot ? { moves: window.__bot.moves, done: window.__bot.done, failed: window.__bot.failed, log: window.__bot.log.slice(-6), greedyMoves: window.__greedy?.moves ?? 0 } : null));
 writeFileSync(`${out}/probe.json`, JSON.stringify({ mode, stats, botInfo, errors }, null, 2));
 console.log(JSON.stringify({ mode, stats, botInfo, errors: errors.slice(0, 8) }, null, 2));
 await browser.close();

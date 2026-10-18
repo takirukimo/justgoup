@@ -1,10 +1,19 @@
 // Camera rig: one PerspectiveCamera driven by per-mode target poses and critically damped
-// springs (smooth, overshoot-free transitions between modes), plus layered shake.
+// springs, plus layered shake.
 //
-//  title     slow cinematic orbit composing the climber AND Steini (when he is on the mats) in the
-//            band the title UI leaves free (logo ≈ top 30%, buttons ≈ bottom 30%); with a negative
-//            titleFraming.lift (locker close-up) it keeps the classic lifted orbit
-//  intro     scripted fly-in from the gym entrance (playIntro() → Promise) handing over to title
+// Every change of shot blends: a mode change (or a title ↔ locker framing change) eases the
+// target from the pose the camera had to the new mode's live target with a smootherstep over
+// BLEND_S[mode] seconds, and the springs (velocity kept across the change) smooth what is left,
+// so nothing snaps or whips. Only an explicit `instant` request cuts (the app does that under its
+// transition veil); a cut to 'preview' / 'title' then settles in with a slow push.
+//
+//  title     slow cinematic drift composing the climber on the wall AND Steini on the mats (from
+//            the live climber state + guide position) in the band the title UI leaves free (logo
+//            ≈ top 30%, buttons ≈ bottom 32%), seen from the climber's side so Steini is in 3/4
+//            looking up at him; with a negative titleFraming.lift (locker close-up) it keeps the
+//            classic lifted orbit
+//  intro     scripted fly-in from the gym entrance (playIntro() → Promise): a slow establishing
+//            glide while the intro card is read, then the flight to the wall, landing on title
 //  preview   pulled back to frame the whole problem (portrait fit with margins)
 //  follow    decision framing: both feet + the next ~1.1–1.5 m of route above the higher hand
 //            (look-ahead toward the next route hold / the dragged limb's target), fitted exactly
@@ -41,6 +50,9 @@ const LOOK_AHEAD = 1.1;
 const LOOK_AHEAD_MAX = 1.55;
 /** Lowest camera height (world y): above the crash pads. */
 const CAM_MIN_Y = 0.75;
+/** Default fly-in length, and the shortest flight after the establishing glide (s). */
+const DEFAULT_INTRO_S = 8.5;
+const INTRO_FLY_MIN = 4.6;
 
 interface ModeTuning {
   pos: number; // smooth time (s)
@@ -49,7 +61,7 @@ interface ModeTuning {
 }
 
 const TUNING: Record<CameraMode, ModeTuning> = {
-  title: { pos: 1.4, look: 1.1, fov: 1.2 },
+  title: { pos: 1.2, look: 1.0, fov: 1.2 },
   intro: { pos: 0.05, look: 0.05, fov: 0.3 },
   preview: { pos: 0.75, look: 0.6, fov: 0.7 },
   follow: { pos: 0.34, look: 0.24, fov: 0.6 },
@@ -57,6 +69,45 @@ const TUNING: Record<CameraMode, ModeTuning> = {
   celebrate: { pos: 0.8, look: 0.4, fov: 0.8 },
   fall: { pos: 0.55, look: 0.22, fov: 0.5 },
 };
+
+/** Seconds a change INTO each mode takes to ease from the previous shot onto the new target. */
+const BLEND_S: Record<CameraMode, number> = {
+  title: 1.9,
+  intro: 0,
+  preview: 1.35,
+  follow: 1.15,
+  editor: 0.5,
+  celebrate: 1.5,
+  fall: 0.55,
+};
+/** Title ↔ locker framing changes (same mode, different shot). */
+const FRAMING_BLEND_S = 1.5;
+/** While a blend runs the eased target does the work; the springs only round it off. */
+const BLEND_SPRING = 0.28;
+
+/** Title band: the logo lockup ends ≈ 30%, the buttons start ≈ 68% (fractions of the height). */
+const TITLE_BAND = { top: 0.325, bottom: 0.66 };
+/** Steini standing on the mats: shoulders half-width and horn-tip height above the pad (m). */
+const GUIDE_HALF_W = 0.3;
+const GUIDE_TOP = 2.05;
+const PAD_Y = 0.3;
+
+function smootherstep01(k: number): number {
+  const t = clamp(k, 0, 1);
+  return t * t * t * (t * (t * 6 - 15) + 10);
+}
+
+/**
+ * Path progress of the intro fly-in at time t: a slow establishing glide while the intro card is
+ * up (`hold` s, ≈ 10% of the path), then the flight to the wall, landing with zero velocity at
+ * `dur`. Monotonic with a continuous velocity (the glide hands straight into the flight).
+ */
+export function introProgress(t: number, dur: number, hold: number): number {
+  const k = clamp(t / Math.max(0.01, dur), 0, 1);
+  const h = clamp(hold / Math.max(0.01, dur), 0, 0.75);
+  const glide = 0.1;
+  return glide * smoothstep(0, h + (1 - h) * 0.3, k) + (1 - glide) * smootherstep01((k - h * 0.7) / Math.max(0.05, 1 - h * 0.7));
+}
 
 /** Critically damped spring toward a target (Unity-style SmoothDamp), per scalar. */
 function smoothDamp(cur: number, target: number, vel: { v: number }, smoothTime: number, dt: number): number {
@@ -83,6 +134,12 @@ class SpringVec3 {
   snap(v: THREE.Vector3): void {
     this.value.copy(v);
     this.vx.v = this.vy.v = this.vz.v = 0;
+  }
+  /** Carry a velocity (m/s) into the spring, e.g. when a scripted move hands over mid-flight. */
+  setVelocity(v: THREE.Vector3): void {
+    this.vx.v = v.x;
+    this.vy.v = v.y;
+    this.vz.v = v.z;
   }
 }
 
@@ -132,7 +189,10 @@ export class CameraRig {
 
   private modeTime = 0;
   private time = 0;
-  private transition = 0;
+  /** Shot blend: the pose the camera had when the shot changed, eased toward the live target. */
+  private blend = { t: 0, dur: 0, pos: new THREE.Vector3(), look: new THREE.Vector3(), fov: 42 };
+  /** After an instant cut to an overview shot, start a hair wide and push in. */
+  private settle = false;
   private focusHint: Vec2 | null = null;
   private focusOverride: Vec2 | null = null;
   private editorCenter: Vec2 = { x: 0, y: 2.25 };
@@ -140,12 +200,14 @@ export class CameraRig {
   private trauma = 0;
   private continuousShake = 0;
   private celebrateSign = 1;
-  private intro: { t: number; dur: number; resolve: (() => void) | null; from: THREE.Vector3[]; look0: THREE.Vector3 } | null = null;
+  private intro: { t: number; dur: number; hold: number; resolve: (() => void) | null; from: THREE.Vector3[]; look0: THREE.Vector3 } | null = null;
+  /** Fly-in velocity (m/s) of the camera position / look point, handed to the springs on a skip. */
+  private introVel = new THREE.Vector3();
+  private introLookVel = new THREE.Vector3();
   private initialized = false;
   /** Optional (app): fractions of the viewport height covered by UI at the top / bottom; 'preview' fits the route between them. */
   viewInsets: { top: number; bottom: number } = { top: 0, bottom: 0 };
-  /** Optional (app menus): title-mode framing — look-point lift above the subject and orbit distance (m). */
-  titleFraming: { lift: number; distance: number } | null = null;
+  private framing: { lift: number; distance: number } | null = null;
   /** Dev/QA override: fixed world pose. */
   debugView: { pos: THREE.Vector3; look: THREE.Vector3; fov: number } | null = null;
 
@@ -178,12 +240,32 @@ export class CameraRig {
     return this.intro ? clamp(this.intro.t / this.intro.dur, 0, 1) : 1;
   }
 
+  /** Optional (app menus): title-mode framing — look-point lift above the subject and orbit distance (m). */
+  get titleFraming(): { lift: number; distance: number } | null {
+    return this.framing;
+  }
+
+  set titleFraming(f: { lift: number; distance: number } | null) {
+    const prev = this.framing;
+    const same = prev === f || (!!prev && !!f && prev.lift === f.lift && prev.distance === f.distance);
+    this.framing = f ? { lift: f.lift, distance: f.distance } : null;
+    // title ↔ locker is a change of shot inside 'title': ease it like a mode change
+    if (!same && this.mode === 'title' && !this.intro) this.startBlend(FRAMING_BLEND_S);
+  }
+
   setMode(mode: CameraMode, opts?: { instant?: boolean; focus?: Vec2 }): void {
     // A skipped intro must not keep flying over the next scene: any other mode (or an instant
-    // 'title' snap) lands the fly-in right away.
+    // 'title' snap) lands the fly-in right away — carrying its velocity into the springs and
+    // easing onto the new shot, so a skip never stops the camera dead.
+    let aborted = false;
     if (this.intro && mode !== 'intro' && (mode !== 'title' || opts?.instant)) {
       const r = this.intro.resolve;
       this.intro = null;
+      aborted = true;
+      if (!opts?.instant) {
+        this.pos.setVelocity(this.introVel);
+        this.look.setVelocity(this.introLookVel);
+      }
       r?.();
     }
     const changed = mode !== this.mode;
@@ -192,33 +274,61 @@ export class CameraRig {
     if (changed) {
       this.modeTime = 0;
       if (mode === 'follow') this.followFresh = true;
-      this.transition = mode === 'editor' ? 0.35 : 1.25;
       if (mode === 'celebrate') this.celebrateSign = this.camera.position.x >= 0 ? 1 : -1;
     }
-    if (mode === 'intro' && !this.intro) this.startIntro(7.5);
-    if (opts?.instant) this.pendingSnap = true;
+    if (opts?.instant) {
+      this.pendingSnap = true;
+      this.settle = mode === 'preview' || mode === 'title';
+      this.blend.dur = 0;
+    } else if (changed || aborted) {
+      this.startBlend(BLEND_S[mode]);
+    }
+    if (mode === 'intro' && !this.intro) this.startIntro(DEFAULT_INTRO_S);
   }
 
   private pendingSnap = false;
 
-  /** Starts the scripted fly-in; resolves when it lands. */
-  playIntro(duration = 7.5): Promise<void> {
+  /** Start easing from the camera's current pose onto whatever the target becomes. */
+  private startBlend(dur: number): void {
+    if (!this.initialized || dur <= 0) {
+      this.blend.dur = 0;
+      return;
+    }
+    this.blend.t = 0;
+    this.blend.dur = dur;
+    this.blend.pos.copy(this.pos.value);
+    this.blend.look.copy(this.look.value);
+    this.blend.fov = this.fov.value;
+  }
+
+  /**
+   * Starts the scripted fly-in; resolves when it lands. `duration` is the whole flight; the first
+   * `opts.hold` seconds (default ≈ half) are a slow establishing glide so an intro card over the
+   * shot can be read. The flight after the hold never takes less than INTRO_FLY_MIN seconds (the
+   * landing moves later rather than rushing the hall).
+   */
+  playIntro(duration = DEFAULT_INTRO_S, opts?: { hold?: number }): Promise<void> {
     this.mode = 'intro';
     this.modeTime = 0;
     return new Promise((resolve) => {
-      this.startIntro(duration, resolve);
+      this.startIntro(duration, resolve, opts?.hold);
     });
   }
 
-  private startIntro(dur: number, resolve: (() => void) | null = null): void {
+  private startIntro(duration: number, resolve: (() => void) | null = null, holdS?: number): void {
     this.intro?.resolve?.();
+    const hold = clamp(holdS ?? duration * 0.48, 0, 12);
     this.intro = {
       t: 0,
-      dur,
+      dur: Math.max(duration, hold + INTRO_FLY_MIN),
+      hold,
       resolve,
-      from: [new THREE.Vector3(-3.6, 2.3, 22), new THREE.Vector3(-2.8, 2.9, 15), new THREE.Vector3(1.8, 2.5, 9.5)],
-      look0: new THREE.Vector3(0, 3.2, 0),
+      from: [new THREE.Vector3(-3.4, 2.2, 22), new THREE.Vector3(-2.6, 2.75, 15), new THREE.Vector3(1.6, 2.45, 9.5)],
+      look0: new THREE.Vector3(0, 3.6, 0),
     };
+    this.introVel.set(0, 0, 0);
+    this.introLookVel.set(0, 0, 0);
+    this.blend.dur = 0;
     this.pendingSnap = true;
   }
 
@@ -567,63 +677,69 @@ export class CameraRig {
 
   private titleTarget(ctx: CameraContext, t: number): void {
     const { frame, state, boulder } = ctx;
-    const lift = this.titleFraming ? this.titleFraming.lift : 0.3;
+    const lift = this.framing ? this.framing.lift : 0.3;
     if (lift < 0) {
       this.classicTitle(ctx, t);
       return;
     }
-    // Composition: the climber (and Steini when he is on the mats) fill the band between the
-    // logo lockup (top ≈ 30%) and the button stack (bottom ≈ 30%), centred, with a slow orbit.
+    // Composition: the climber on the wall and Steini on the mats fill the band between the logo
+    // lockup and the button stack. The camera sits on the climber's side of Steini (so Steini is
+    // seen in 3/4, looking up at him), a little low (looking up the wall), and drifts slowly:
+    // a yaw sway, a breath of pitch and a dolly, on long incommensurate periods.
     const aspect = this.camera.aspect || 0.46;
-    this.tFov = 40;
-    const yaw = 9 + 8 * Math.sin(t * 0.07);
-    const pitch = -3 + 2 * Math.sin(t * 0.05 + 1);
-    this.viewDir(frame, 0.3, yaw, pitch, this.dir);
-    this.basis(this.dir);
+    // a long lens: the brand wall fills the frame behind the two of them, perspective stays calm
+    this.tFov = 32;
     const pts = this.pts;
     let n = 0;
-    const pad = 0.3; // crash-pad height (world y)
+    let cx = 0;
     if (state) {
       const d = state.pelvisDepth;
-      frame.toWorldXYZ(state.chest.x, state.chest.y + 0.36, d, pts[n++]);
+      cx = state.com.x;
+      frame.toWorldXYZ(state.chest.x, state.chest.y + 0.36, d, pts[n++]); // head
       frame.toWorldXYZ(state.pelvis.x, state.pelvis.y, d, pts[n++]);
       for (const id of ['LH', 'RH', 'LF', 'RF'] as const) {
         const L = state.limbs[id];
         frame.toWorldXYZ(L.pos.x, L.pos.y, Math.max(0.05, L.depth), pts[n++]);
       }
     } else {
-      let sx = 0;
       if (boulder) {
         const st = boulder.holds.filter((h) => h.role === 'start');
-        if (st.length) sx = st.reduce((a, h) => a + h.x, 0) / st.length;
+        if (st.length) cx = st.reduce((a, h) => a + h.x, 0) / st.length;
       }
-      frame.toWorldXYZ(sx, 0.4, 0.3, pts[n++]);
-      frame.toWorldXYZ(sx, 2.2, 0.3, pts[n++]);
+      frame.toWorldXYZ(cx, 1.2, 0.3, pts[n++]);
+      frame.toWorldXYZ(cx, 3.2, 0.3, pts[n++]);
     }
+    let side = 1;
     if (ctx.guide) {
-      frame.toWorldXYZ(ctx.guide.x, 0, ctx.guide.depth, pts[n]).setY(pad);
-      pts[n + 1].copy(pts[n]).setY(pad + 2.0); // horn tips
-      pts[n].addScaledVector(frame.right, -0.3);
-      pts[n + 1].addScaledVector(frame.right, 0.3);
+      const g = ctx.guide;
+      side = g.x <= cx ? 1 : -1;
+      frame.toWorldXYZ(g.x, 0, g.depth, pts[n]).setY(PAD_Y);
+      pts[n + 1].copy(pts[n]).setY(PAD_Y + GUIDE_TOP);
+      pts[n].addScaledVector(frame.right, -GUIDE_HALF_W);
+      pts[n + 1].addScaledVector(frame.right, GUIDE_HALF_W);
       n += 2;
     }
-    // extremes in camera space
+    const yaw = side * (11 + 6 * Math.sin(t * 0.061)) + 2.5 * Math.sin(t * 0.027 + 2);
+    const pitch = -2.5 + 1.2 * Math.sin(t * 0.043 + 1.1);
+    this.viewDir(frame, 0.3, yaw, pitch, this.dir);
+    this.basis(this.dir);
+
+    // extremes in world height (the camera is level-ish, so these are the top / bottom rows)
     let bi = 0;
     let ti = 0;
     for (let i = 1; i < n; i++) {
       if (pts[i].y < pts[bi].y) bi = i;
       if (pts[i].y > pts[ti].y) ti = i;
     }
-    this.pB.copy(pts[bi]).setY(Math.min(pts[bi].y, pad) - 0.05);
+    this.pB.copy(pts[bi]).setY(Math.min(pts[bi].y, PAD_Y) - 0.04);
     this.pT.copy(pts[ti]).addScaledVector(this.WORLD_UP, 0.12);
     const tanH = Math.tan((this.tFov * DEG) / 2);
-    // band: the logo lockup ends ≈ 31%, the buttons start ≈ 70% (a little air on both sides)
-    const nT = 1 - 2 * 0.335;
-    const nB = 1 - 2 * 0.665;
+    const nT = 1 - 2 * TITLE_BAND.top;
+    const nB = 1 - 2 * TITLE_BAND.bottom;
     const f = this.fitVertical(this.pB, this.pT, nB, nT, tanH);
     let dist = f.dist;
     let h = f.h;
-    // horizontal: every subject point inside ±0.8 NDC (relative to B), centred laterally
+    // horizontal: every subject point inside ±0.78 NDC (relative to B), centred laterally
     let xl = Infinity;
     let xr = -Infinity;
     let zl = 0;
@@ -641,7 +757,7 @@ export class CameraRig {
         zr = z;
       }
     }
-    const m = 0.8 * tanH * aspect;
+    const m = 0.78 * tanH * aspect;
     const dW = ((xr - xl) / m - (zl + zr)) / 2 + 0.4;
     if (dW > dist) {
       this.v1.subVectors(this.pT, this.pB);
@@ -651,9 +767,11 @@ export class CameraRig {
       h = (-nB * tanH * dist + yT - nT * tanH * (zT + dist)) / 2;
     }
     const k = (xl * (zr + dist) + xr * (zl + dist)) / (zl + zr + 2 * dist);
-    dist += 0.25 * Math.sin(t * 0.05);
-    this.tPos.copy(this.pB).addScaledVector(this.fwd, -dist).addScaledVector(this.camUp, h).addScaledVector(this.camRight, k);
-    this.tLook.copy(this.tPos).addScaledVector(this.fwd, dist);
+    // the dolly only ever backs off from the solved fit, so the subjects never leave the band
+    // (the band is centred on the screen, so backing off shrinks the shot about its own centre)
+    const dolly = 0.28 + 0.28 * Math.sin(t * 0.05);
+    this.tPos.copy(this.pB).addScaledVector(this.fwd, -(dist + dolly)).addScaledVector(this.camUp, h).addScaledVector(this.camRight, k);
+    this.tLook.copy(this.tPos).addScaledVector(this.fwd, dist + dolly);
     this.tUp.copy(this.WORLD_UP);
     this.tRoll = 0;
   }
@@ -705,7 +823,6 @@ export class CameraRig {
     this.lastDt = d;
     this.time += d;
     this.modeTime += d;
-    this.transition = Math.max(0, this.transition - d);
     this.computeTarget(ctx);
 
     if (!this.initialized || this.pendingSnap) {
@@ -714,6 +831,15 @@ export class CameraRig {
       this.up.snap(this.tUp);
       this.fov.snap(this.tFov);
       this.roll.snap(this.tRoll);
+      if (this.settle && this.initialized) {
+        // a cut to an overview starts a hair wide and higher, then pushes in on the springs
+        this.v1.subVectors(this.tPos, this.tLook);
+        this.v2.copy(this.tPos).addScaledVector(this.v1, 0.07).addScaledVector(this.WORLD_UP, 0.12);
+        this.pos.snap(this.v2);
+        this.v2.copy(this.tLook).addScaledVector(this.WORLD_UP, 0.05);
+        this.look.snap(this.v2);
+      }
+      this.settle = false;
       this.initialized = true;
       this.pendingSnap = false;
     }
@@ -722,7 +848,7 @@ export class CameraRig {
       const it = this.intro;
       it.t += d;
       const k = clamp(it.t / it.dur, 0, 1);
-      const e = k * k * k * (k * (k * 6 - 15) + 10); // smootherstep
+      const e = introProgress(it.t, it.dur, it.hold);
       // Catmull-Rom through the scripted points into the live title pose
       const pts = this.introPts;
       pts[0] = it.from[0];
@@ -735,7 +861,11 @@ export class CameraRig {
       const i = Math.min(2, Math.floor(seg));
       const f = seg - i;
       catmull(pts[i], pts[i + 1], pts[i + 2], pts[i + 3], f, this.v1);
-      this.v2.copy(it.look0).lerp(this.tLook, smoothstep(0.15, 1, e));
+      this.v2.copy(it.look0).lerp(this.tLook, smoothstep(0.12, 1, e));
+      if (d > 0) {
+        this.introVel.subVectors(this.v1, this.pos.value).divideScalar(d);
+        this.introLookVel.subVectors(this.v2, this.look.value).divideScalar(d);
+      }
       this.pos.snap(this.v1);
       this.look.snap(this.v2);
       this.fov.step(this.tFov + 14 * (1 - e), 0.3, d);
@@ -748,12 +878,27 @@ export class CameraRig {
       }
     } else {
       const tune = TUNING[this.mode];
-      let tr = this.transition > 0 ? 1 + smoothstep(0, 1.25, this.transition) * 0.9 : 1;
-      if (this.mode === 'follow' && this.followAir) tr *= 0.5;
-      this.pos.step(this.tPos, tune.pos * tr, d);
-      this.look.step(this.tLook, tune.look * tr, d);
+      const b = this.blend;
+      let blending = false;
+      if (b.dur > 0) {
+        b.t += d;
+        const w = smootherstep01(b.t / b.dur);
+        this.tPos.lerpVectors(b.pos, this.tPos, w);
+        this.tLook.lerpVectors(b.look, this.tLook, w);
+        this.tFov = b.fov + (this.tFov - b.fov) * w;
+        blending = b.t < b.dur;
+        if (!blending) b.dur = 0;
+      }
+      let sp = blending ? Math.min(tune.pos, BLEND_SPRING) : tune.pos;
+      let sl = blending ? Math.min(tune.pos, BLEND_SPRING) : tune.look;
+      if (this.mode === 'follow' && this.followAir) {
+        sp *= 0.5;
+        sl *= 0.5;
+      }
+      this.pos.step(this.tPos, sp, d);
+      this.look.step(this.tLook, sl, d);
       this.up.step(this.tUp, 0.4, d);
-      this.fov.step(this.tFov, tune.fov * tr, d);
+      this.fov.step(this.tFov, blending ? BLEND_SPRING : tune.fov, d);
       this.roll.step(this.tRoll, 0.6, d);
     }
 

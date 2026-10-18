@@ -69,7 +69,21 @@ export interface HoldDef {
   lipAngle?: number;
   /** Optional: fingers a pocket takes (1 = mono … 4 = deep pocket). Absent = 3. */
   fingers?: 1 | 2 | 3 | 4;
+  /**
+   * Optional (Phase B hold variety): the product shape refining `type` (research §3.3). `type` stays the
+   * base kind every layer already understands (geometry, glyphs); `shape` adds the variant:
+   *  bucket (jug, deep closed lip) · horn (pinch: a post you wrap) · rail (edge: long, shuffle along it) ·
+   *  micro (crimp: 4–10 mm) · chip (foot: a tiny screw-on chip) · macro (sloper / volume: a big dual-tex
+   *  feature) · dual-tex (a textured grip zone on a smooth hold) · wood (low friction).
+   * Absent = the plain type.
+   */
+  shape?: HoldShape;
+  /** Optional: id of the route volume this hold is bolted onto (it sits on the volume's face). */
+  onVolume?: string;
 }
+
+/** Product shape of a hold (HoldDef.shape). */
+export type HoldShape = 'bucket' | 'horn' | 'rail' | 'micro' | 'chip' | 'macro' | 'dual-tex' | 'wood';
 
 /**
  * How a foot is used (sim → renderer / IK), inferred by the sim from where the foot was put:
@@ -99,7 +113,11 @@ export interface BoulderDef {
   mode: ClimbMode;
   /** Degrees. 0 = vertical, + = overhang (top leans toward the climber), − = slab. Range −15..45. */
   wallAngle: number;
-  /** Climbable panel width/height in meters (boulder ≈ 4.6 × 4.5, rope ≈ 4.4 × 15). */
+  /**
+   * Climbable panel width/height in meters (boulder ≈ 4.6 × 4.5, rope ≈ 4.4 × 15). With a `profile`,
+   * `height` is the wall's SURFACE length (its y extent; the world height is shorter on a folded wall,
+   * see game/wall-profile.ts wallTopHeight).
+   */
   width: number;
   height: number;
   holds: HoldDef[];
@@ -139,7 +157,9 @@ export type RouteStyle =
   | 'traverse'
   | 'dyno'
   | 'compression' // volumes, squeezing
-  | 'mixed';
+  | 'mixed'
+  | 'zigzag' // the line switches direction (headings alternate ±35°)
+  | 'diagonal'; // a rising diagonal line across the wall
 
 // ───────────────────────────── Sim output ─────────────────────────────
 

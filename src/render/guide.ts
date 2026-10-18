@@ -30,7 +30,8 @@ const STAFF: ColorwayDef = {
 
 const SIGN = [-1, 1] as const;
 const UPV = new THREE.Vector3(0, 1, 0);
-const ANKLE = 0.078;
+/** Ankle height over the mats for the approach shoes (the sole clears the pad surface). */
+const ANKLE = 0.082;
 
 const dampK = (lambda: number, dt: number): number => (dt <= 0 ? 1 : 1 - Math.exp(-lambda * dt));
 const sstep01 = (e0: number, e1: number, x: number): number => {

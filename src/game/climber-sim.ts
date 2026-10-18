@@ -118,20 +118,20 @@ import {
   canMatch,
   clipPoint,
   contactPoint,
+  footModeFor,
   LIMB_IDS,
   LIMB_INDEX,
   maxReachIdx,
   placementBlocked,
-  pullQuality,
   pumpCapFactor,
-  pushQuality,
   startPlacement,
   type LimbContact,
   topHolds,
   usableByFoot,
   usableByHand,
 } from './holds';
-import { anatomicStrain, envClamp, envelopePolygon, envEval, envProject, PROJ_OUT, segmentsCross } from './anatomy';
+import { anatomicStrain, envClampOn, envelopePolygon, envEvalOn, envProjectOn, FOLD_K, PROJ_OUT, segmentsCross } from './anatomy';
+import { angleAt, local3DToSurface, profileOf, smoothAngleAt, surfaceToLocal3D, worldHeight, type Vec3, type WallProfile } from './wall-profile';
 import {
   computeAnchors,
   evaluateStance,
@@ -366,6 +366,14 @@ export class ClimberSim implements ClimberSimAPI {
   private readonly topIds: Set<string>;
   private readonly cth: number;
   private readonly sth: number;
+  /** Folded wall (wall-profile.ts), null for a flat one. */
+  private readonly prof: WallProfile | null;
+  /**
+   * cos / sin of the wall angle the body feels: the wall angle on a flat wall; on a folded wall the
+   * stance's effective plane (statics), smoothed — in-plane gravity is g·gc, the pull off the wall g·gs.
+   */
+  private gc: number;
+  private gs: number;
   private readonly isRope: boolean;
   private readonly draws: QuickdrawDef[];
   /** 0..1 strength of the autonomic posture (fades with grade, restored by assist). */
@@ -433,6 +441,11 @@ export class ClimberSim implements ClimberSimAPI {
   private fallStartY = 0;
   private decked = false;
   private landing: Pose = { px: 0, py: 1, cx: 0, cy: 1.5 };
+  /** Folded walls: pelvis depth and the feet's surface y on the pad after landing. */
+  private landDepth = 0.25;
+  private padY = 0;
+  private readonly v3: Vec3 = { x: 0, y: 0, z: 0 };
+  private readonly sp3 = { x: 0, y: 0, depth: 0 };
 
   private events: SimEvent[] = [];
   private readonly state: ClimberState;
@@ -481,13 +494,16 @@ export class ClimberSim implements ClimberSimAPI {
     this.topIds = new Set(topHolds(boulder).map((h) => h.id));
     this.cth = Math.cos(boulder.wallAngle * DEG);
     this.sth = Math.sin(boulder.wallAngle * DEG);
+    this.prof = profileOf(boulder);
+    this.gc = this.cth;
+    this.gs = this.sth;
     this.isRope = boulder.mode === 'rope';
     this.draws = boulder.quickdraws ?? [];
     const fade = clamp01((boulder.grade - 3) / 8);
     this.postureHelp = Math.min(1, 1 - (1 - SIM.postureHardFrac) * fade + this.assist);
-    this.prm = makeParams(boulder.wallAngle, this.assist, 0);
-    this.prmScratch = makeParams(boulder.wallAngle, this.assist, 0);
-    this.hipPrm = makeParams(boulder.wallAngle, this.assist, 0);
+    this.prm = makeParams(boulder.wallAngle, this.assist, 0, this.prof);
+    this.prmScratch = makeParams(boulder.wallAngle, this.assist, 0, this.prof);
+    this.hipPrm = makeParams(boulder.wallAngle, this.assist, 0, this.prof);
     for (const prm of [this.prm, this.prmScratch, this.hipPrm]) {
       prm.strength = this.strength;
       prm.handPump = this.handPump;
@@ -701,7 +717,7 @@ export class ClimberSim implements ClimberSimAPI {
     } else if (i >= 2 && this.flagZone(i, p.x, p.y)) {
       this.setFlag(i, p.x, p.y);
       out.push({ type: 'technique', limb, technique: 'flag' });
-    } else if (i >= 2 && this.boulder.wallAngle <= SIM.smearMaxAngle && this.smearSpot(i, p.x, p.y)) {
+    } else if (i >= 2 && this.smearableAt(p.y) && this.smearSpot(i, p.x, p.y) && this.smearableAt(this.smearTmp.y)) {
       const c = this.smearTmp;
       this.attachSmear(i, c.x, c.y);
       this.stats.moves++;
@@ -936,7 +952,7 @@ export class ClimberSim implements ClimberSimAPI {
       const d = Math.hypot(x - h.x, y - h.y) - h.size;
       if (d > GAME.snapRadius || d >= bestD) continue;
       contactPoint(h, i, this.wouldMatch(i, h), tmp);
-      const ex = envEval(i, this.ax[i], this.ay[i], u.x, u.y, tmp.x, tmp.y).excess;
+      const ex = envEvalOn(this.prof, i, this.ax[i], this.ay[i], u.x, u.y, tmp.x, tmp.y).excess;
       if (ex <= SIM.reachTolerance || ex > SIM.dynoMaxReach) continue;
       if (this.blocked(i, tmp.x, tmp.y, h)) continue;
       best = h;
@@ -978,7 +994,7 @@ export class ClimberSim implements ClimberSimAPI {
       ext += Math.max(0, BODY.legMax * 0.97 - Math.hypot(this.ax[i] - L.cx, this.ay[i] - L.cy));
       nf++;
     }
-    const legs = nf ? Math.sqrt(2 * SIM.dynoLegAccel * (ext / nf)) * (1 - SIM.dynoSteepLegLoss * Math.max(0, this.sth)) : 0;
+    const legs = nf ? Math.sqrt(2 * SIM.dynoLegAccel * (ext / nf)) * (1 - SIM.dynoSteepLegLoss * Math.max(0, this.gs)) : 0;
     let nh = 0;
     for (let i = 0; i < 2; i++) if (this.limbs[i].hold && !this.limbs[i].busy) nh++;
     const arms = Math.sqrt(2 * SIM.dynoArmAccel * SIM.dynoArmExt * this.strength * Math.max(nh, 1) * 0.5);
@@ -1003,7 +1019,7 @@ export class ClimberSim implements ClimberSimAPI {
       const c = contactPoint(h, i, both, this.releaseTmp);
       o.tx[k] = c.x;
       o.ty[k] = c.y;
-      const en = envEval(i, this.ax[i], this.ay[i], u.x, u.y, c.x, c.y);
+      const en = envEvalOn(this.prof, i, this.ax[i], this.ay[i], u.x, u.y, c.x, c.y);
       const vx = c.x - this.ax[i];
       const vy = c.y - this.ay[i];
       const l = Math.hypot(vx, vy) || 1;
@@ -1014,7 +1030,7 @@ export class ClimberSim implements ClimberSimAPI {
     Dx /= hands.length;
     Dy /= hands.length;
     o.rise = Math.hypot(Dx, Dy);
-    const gp = Math.max(0.5, SIM.gravity * this.cth);
+    const gp = Math.max(0.5, SIM.gravity * this.gc);
     const hop = Math.max(Dy + SIM.dynoAimPast, SIM.dynoMinHop, SIM.dynoLateralHop * Math.abs(Dx));
     let vy = Math.sqrt(2 * gp * hop);
     let vx = Dx / (vy / gp);
@@ -1044,7 +1060,7 @@ export class ClimberSim implements ClimberSimAPI {
     const both = hands.length === 2;
     const u = this.frameNow();
     // where the body will be at the apex (rigid shift), to see which contacts can stay on
-    const gp = Math.max(0.5, SIM.gravity * this.cth);
+    const gp = Math.max(0.5, SIM.gravity * this.gc);
     const sx = plan.vx * plan.tApex;
     const sy = plan.vy * plan.tApex - 0.5 * gp * plan.tApex * plan.tApex;
     let kind: 'deadpoint' | 'dyno' = both ? 'dyno' : 'deadpoint';
@@ -1075,7 +1091,7 @@ export class ClimberSim implements ClimberSimAPI {
     if (!both) {
       const j = 1 - hands[0];
       const O = this.limbs[j];
-      if (O.hold && envEval(j, this.ax[j] + sx, this.ay[j] + sy, u.x, u.y, O.cx, O.cy).excess > 0.06) {
+      if (O.hold && envEvalOn(this.prof, j, this.ax[j] + sx, this.ay[j] + sy, u.x, u.y, O.cx, O.cy).excess > 0.06) {
         out.push({ type: 'release', limb: LIMB_IDS[j], holdId: O.hold.id });
         O.prevHold = O.hold;
         O.hold = null;
@@ -1086,7 +1102,7 @@ export class ClimberSim implements ClimberSimAPI {
     for (let i = 2; i < 4; i++) {
       const L = this.limbs[i];
       if (!(L.hold || L.smear) || L.dragging) continue;
-      const stay = kind === 'deadpoint' && envEval(i, this.ax[i] + sx, this.ay[i] + sy, u.x, u.y, L.cx, L.cy).excess <= 0.03;
+      const stay = kind === 'deadpoint' && envEvalOn(this.prof, i, this.ax[i] + sx, this.ay[i] + sy, u.x, u.y, L.cx, L.cy).excess <= 0.03;
       if (stay) continue;
       out.push({ type: 'release', limb: LIMB_IDS[i], holdId: L.hold ? L.hold.id : null });
       L.prevHold = L.hold;
@@ -1152,7 +1168,7 @@ export class ClimberSim implements ClimberSimAPI {
     for (let k = 0; k < F.hands.length; k++) {
       if (F.done[k]) continue;
       const i = F.hands[k];
-      const ex = envEval(i, this.ax[i], this.ay[i], u.x, u.y, F.tx[k], F.ty[k]).excess;
+      const ex = envEvalOn(this.prof, i, this.ax[i], this.ay[i], u.x, u.y, F.tx[k], F.ty[k]).excess;
       const inReach = ex <= SIM.dynoCatchTol;
       const leaving = F.inReach[k] && ex > F.lastEx[k] + 1e-4;
       if (inReach && (vy <= SIM.dynoGrabVy || leaving || F.apexAt >= 0)) ready.push(k);
@@ -1343,7 +1359,7 @@ export class ClimberSim implements ClimberSimAPI {
       clipPoint(q, cp);
       const d = Math.hypot(p.x - cp.x, p.y - cp.y);
       if (d > GAME.clipRadius) continue;
-      if (envEval(i, a.x, a.y, u.x, u.y, cp.x, cp.y).excess > GAME.clipRadius) continue;
+      if (envEvalOn(this.prof, i, a.x, a.y, u.x, u.y, cp.x, cp.y).excess > GAME.clipRadius) continue;
       const score = q === next ? d - 0.5 : d;
       if (score < bestD) {
         bestD = score;
@@ -1512,7 +1528,7 @@ export class ClimberSim implements ClimberSimAPI {
 
   /** Is (x, y) inside limb i's envelope (grown by tol) in the frame last set by frameNow()? */
   private reachOk(i: number, x: number, y: number, tol: number): boolean {
-    return envEval(i, this.ax[i], this.ay[i], this.upTmp.x, this.upTmp.y, x, y).excess <= tol;
+    return envEvalOn(this.prof, i, this.ax[i], this.ay[i], this.upTmp.x, this.upTmp.y, x, y).excess <= tol;
   }
 
   /** Self-clipping: would limb i on (x, y) / hold h overlap another limb? (frame from frameNow()). */
@@ -1536,7 +1552,7 @@ export class ClimberSim implements ClimberSimAPI {
   private readonly smearTmp = { x: 0, y: 0 };
   private smearSpot(i: number, x: number, y: number): boolean {
     const u = this.frameNow();
-    const c = envClamp(i, this.ax[i], this.ay[i], u.x, u.y, x, y, 0);
+    const c = envClampOn(this.prof, i, this.ax[i], this.ay[i], u.x, u.y, x, y, 0);
     this.smearTmp.x = c.x;
     this.smearTmp.y = Math.max(c.y, 0.05);
     return !this.blocked(i, this.smearTmp.x, this.smearTmp.y, null);
@@ -1601,34 +1617,24 @@ export class ClimberSim implements ClimberSimAPI {
    */
   private inferFootMode(i: number, h: HoldDef, cx: number, cy: number, current: FootMode | null): FootMode {
     this.frameNow();
-    const ax = this.ax[i];
-    const ay = this.ay[i];
-    const vx = cx - ax;
-    const vy = cy - ay;
-    const dist = Math.hypot(vx, vy);
-    if (dist < 1e-6) return 'edge';
-    // wall frame (what the player sees): height above the hip joint, distance out to the side
-    const side = i === 2 ? -1 : 1;
-    const up = vy;
-    const out = Math.abs(vx);
-    const dx = -vx / dist;
-    const dy = -vy / dist;
-    const push = pushQuality(h, dx, dy);
-    const pull = pullQuality(h, dx, dy);
-    const wall = this.boulder.wallAngle;
-    const hooked = current === 'heel' || current === 'toe';
-    // heel hook: at / above hip height out to the side on a steep wall, on a hold the heel can pull on
-    // (hysteresis: it stays a heel hook until the hips rise over it — a rock-over)
-    if (wall >= SIM.heelMinAngle && pull >= (hooked ? 0.3 : 0.4) && up >= (current === 'heel' ? -0.22 : -0.1) && out >= (current === 'heel' ? 0.1 : 0.15) && dist <= 0.85) return 'heel';
-    // toe hook: a hold the foot can pull on but not stand on (the far side of a feature, under a lip),
-    // or any pull-able foothold on a roof
-    if (wall >= SIM.toeMinAngle && ((pull >= (hooked ? 0.45 : 0.6) && push < (hooked ? 0.6 : 0.5)) || (wall >= 60 && pull >= 0.5))) return 'toe';
-    void side;
-    // drop knee: a sidepull-like foothold out to the side below the hip, facing away from the body
-    const hx = Math.cos(h.angle);
-    const dropOk = current === 'drop' ? Math.abs(hx) >= 0.5 && push >= 0.4 : Math.abs(hx) >= 0.6 && push >= 0.5;
-    if (dropOk && wall >= -2 && hx * (cx - this.P.x) > 0 && out >= 0.1 && up <= 0.05 && up >= -0.62) return 'drop';
-    return 'edge';
+    return footModeFor(h, cx, cy, this.ax[i], this.ay[i], this.P.x, this.techAngle(cy), current);
+  }
+
+  /**
+   * Wall angle (degrees) a foot technique at surface height y sees: the wall angle on a flat wall; on a
+   * folded wall the steeper of the panel under the foot and the wall under the body (a heel hook on a
+   * lip panel above a roof is still a roof move).
+   */
+  private techAngle(y: number): number {
+    const prof = this.prof;
+    if (!prof) return this.boulder.wallAngle;
+    const comY = this.P.y + BODY.comT * (this.C.y - this.P.y);
+    return Math.max(angleAt(prof, y), smoothAngleAt(prof, comY));
+  }
+
+  /** Can a foot smear at surface height y (its panel ≤ SIM.smearMaxAngle)? */
+  private smearableAt(y: number): boolean {
+    return (this.prof ? angleAt(this.prof, y) : this.boulder.wallAngle) <= SIM.smearMaxAngle;
   }
 
   /** Re-check the attached feet's techniques (a rock-over turns a heel hook into a standing foot). */
@@ -1654,7 +1660,7 @@ export class ClimberSim implements ClimberSimAPI {
     const side = i === 2 ? -1 : 1;
     const out = side * (x - this.ax[i]);
     const up = y - this.ay[i];
-    const smearable = this.boulder.wallAngle <= SIM.smearMaxAngle;
+    const smearable = this.smearableAt(this.ay[i]);
     // where a smear works (vertical / slab) only a leg held out about level with the hip flags
     if (out >= SIM.flagReach && up <= 0.3 && up >= (smearable ? -0.05 : -0.55)) return true;
     if (smearable) return false;
@@ -1666,7 +1672,7 @@ export class ClimberSim implements ClimberSimAPI {
     const L = this.limbs[i];
     const u = this.frameNow();
     // the foot stays where the leg can be (inside its envelope), relative to the hip (it moves with the body)
-    const c = envClamp(i, this.ax[i], this.ay[i], u.x, u.y, x, y, 0);
+    const c = envClampOn(this.prof, i, this.ax[i], this.ay[i], u.x, u.y, x, y, 0);
     const vx = c.x - this.ax[i];
     const vy = c.y - this.ay[i];
     const side = i === 2 ? -1 : 1;
@@ -1719,7 +1725,7 @@ export class ClimberSim implements ClimberSimAPI {
   private measureGap(i: number): void {
     const L = this.limbs[i];
     const u = this.frameNow();
-    L.attachGap = Math.min(envProject(i, this.ax[i], this.ay[i], u.x, u.y, L.cx, L.cy), SIM.reachTolerance + 0.35);
+    L.attachGap = Math.min(envProjectOn(this.prof, i, this.ax[i], this.ay[i], u.x, u.y, L.cx, L.cy), SIM.reachTolerance + 0.35);
   }
 
   private softAllow(L: LimbRt): number {
@@ -1811,9 +1817,10 @@ export class ClimberSim implements ClimberSimAPI {
     initialPose(this.contacts, this.prm, init);
     for (let i = 2; i < 4; i++) {
       const L = this.limbs[i];
-      if (!L.hold && this.boulder.wallAngle <= SIM.smearMaxAngle && (this.limbs[0].hold || this.limbs[1].hold)) {
+      const smY = Math.max(GAME.padHeight + 0.15, init.py - 0.62);
+      if (!L.hold && this.smearableAt(smY) && (this.limbs[0].hold || this.limbs[1].hold)) {
         const side = i === 2 ? -1 : 1;
-        this.attachSmear(i, init.px + side * 0.2, Math.max(GAME.padHeight + 0.15, init.py - 0.62));
+        this.attachSmear(i, init.px + side * 0.2, smY);
         L.age = 10;
       }
     }
@@ -1837,7 +1844,7 @@ export class ClimberSim implements ClimberSimAPI {
       L.hold = null;
       L.smear = false;
       L.prevHold = null;
-      if (this.boulder.wallAngle <= SIM.smearMaxAngle) {
+      if (this.smearableAt(Math.max(GAME.padHeight + 0.15, best.py - 0.62))) {
         this.attachSmear(worst, best.px + (worst === 2 ? -0.2 : 0.2), Math.max(GAME.padHeight + 0.15, best.py - 0.62));
         L.age = 10;
       }
@@ -1849,6 +1856,12 @@ export class ClimberSim implements ClimberSimAPI {
     this.P.y = best.py;
     this.C.x = best.cx;
     this.C.y = best.cy;
+    if (this.prof) {
+      // the effective plane of the settled start stance (statics.evaluateStance of the best pose)
+      evaluateStance(best, this.contacts, this.prm, this.evScratch);
+      this.gc = this.evScratch.cth;
+      this.gs = this.evScratch.sth;
+    }
     {
       const l = Math.hypot(best.cx - best.px, best.cy - best.py) || 1;
       this.leanUx = (best.cx - best.px) / l;
@@ -2137,6 +2150,11 @@ export class ClimberSim implements ClimberSimAPI {
     const ev = evaluateStance(this.pose, this.contacts, this.prm, this.ev);
     const k = 1 - Math.exp(-SIM.loadSmoothing * h);
     const ks = 1 - Math.exp(-SIM.supportSmoothing * h);
+    if (this.prof && ev.handsOn + ev.feetOn > 0) {
+      // a folded wall: the body feels the stance's effective plane (it changes as limbs cross folds)
+      this.gc += (ev.cth - this.gc) * ks;
+      this.gs += (ev.sth - this.gs) * ks;
+    }
     for (let i = 0; i < 4; i++) {
       const L = this.limbs[i];
       L.ratio = ev.ratio[i];
@@ -2219,9 +2237,9 @@ export class ClimberSim implements ClimberSimAPI {
     const ax = this.ax;
     const ay = this.ay;
     let apx = 0;
-    let apy = -g * this.cth;
+    let apy = -g * this.gc;
     let acx = 0;
-    let acy = -g * this.cth;
+    let acy = -g * this.gc;
 
     // support: feet push with their full static force, hands only pull along the arm, so a
     // body that hangs off-plumb swings until the arms can hold it. Each force acts where it really
@@ -2308,8 +2326,9 @@ export class ClimberSim implements ClimberSimAPI {
         const L = this.limbs[i];
         if (!L.dragging || fly) continue;
         const ty = this.reachY(i);
-        const en = envEval(i, ax[i], ay[i], ux, uy, L.tx, ty);
-        const d = en.r;
+        const en = envEvalOn(this.prof, i, ax[i], ay[i], ux, uy, L.tx, ty);
+        // the pull acts along the surface vector to the target (en.r is the fold-aware distance)
+        const d = this.prof ? en.r / FOLD_K.k : en.r;
         if (d < 1e-6) continue;
         const beyond = en.over > 0 ? en.excess + en.rMax * (1 - SIM.reachFollowFrac) : d - en.rMax * SIM.reachFollowFrac;
         if (beyond <= 0) continue;
@@ -2431,8 +2450,8 @@ export class ClimberSim implements ClimberSimAPI {
         if (!(L.hold || L.smear) || L.dragging || L.busy) continue;
         const allow = this.softAllow(L) + 0.004;
         // conservative excess first (cheap); the exact distance only near the edge
-        if (envEval(i, this.hipAx[i], this.hipAy[i], vx, vy, L.cx, L.cy).excess <= allow) continue;
-        if (envProject(i, this.hipAx[i], this.hipAy[i], vx, vy, L.cx, L.cy) > allow) fits = false;
+        if (envEvalOn(this.prof, i, this.hipAx[i], this.hipAy[i], vx, vy, L.cx, L.cy).excess <= allow) continue;
+        if (envProjectOn(this.prof, i, this.hipAx[i], this.hipAy[i], vx, vy, L.cx, L.cy) > allow) fits = false;
       }
       if (fits) return true;
     }
@@ -2523,7 +2542,7 @@ export class ClimberSim implements ClimberSimAPI {
         const dx = L.cx - shx;
         const dy = L.cy - shy;
         const d = Math.hypot(dx, dy);
-        const dist = envProject(i, shx, shy, ux, uy, L.cx, L.cy);
+        const dist = envProjectOn(this.prof, i, shx, shy, ux, uy, L.cx, L.cy);
         const allow = this.softAllow(L);
         if (dist > allow) {
           // move the shoulder so the grip point sits on the nearest allowed point (a fresh grab
@@ -2554,7 +2573,7 @@ export class ClimberSim implements ClimberSimAPI {
         const dx = L.cx - hx;
         const dy = L.cy - hy;
         const d = Math.hypot(dx, dy);
-        const dist = envProject(i, hx, hy, ux, uy, L.cx, L.cy);
+        const dist = envProjectOn(this.prof, i, hx, hy, ux, uy, L.cx, L.cy);
         const allow = this.softAllow(L);
         if (dist > allow) {
           const k = (dist - allow) / dist;
@@ -2592,7 +2611,7 @@ export class ClimberSim implements ClimberSimAPI {
       for (let i = 0; i < 4; i++) {
         const L = this.limbs[i];
         const on = (L.hold || L.smear) && !L.dragging && !L.busy;
-        res[i] = on ? Math.max(0, envProject(i, this.ax[i], this.ay[i], dx / l, dy / l, L.cx, L.cy) - this.softAllow(L)) : 0;
+        res[i] = on ? Math.max(0, envProjectOn(this.prof, i, this.ax[i], this.ay[i], dx / l, dy / l, L.cx, L.cy) - this.softAllow(L)) : 0;
       }
     }
   }
@@ -2614,12 +2633,12 @@ export class ClimberSim implements ClimberSimAPI {
       if (L.dragging) {
         // the limb follows the finger up to its anatomical limit (a hold up to SIM.reachTolerance
         // further out still snaps on release; the body is then eased into reach)
-        const c = envClamp(i, ax[i], ay[i], sx, sy, L.tx, L.ty, 0);
+        const c = envClampOn(this.prof, i, ax[i], ay[i], sx, sy, L.tx, L.ty, 0);
         const kk = 1 - Math.exp(-36 * h);
         L.px += (c.x - L.px) * kk;
         L.py += (c.y - L.py) * kk;
         // the body moves too: the endpoint itself never leaves the envelope
-        const e = envClamp(i, ax[i], ay[i], sx, sy, L.px, L.py, 0);
+        const e = envClampOn(this.prof, i, ax[i], ay[i], sx, sy, L.px, L.py, 0);
         L.px = e.x;
         L.py = e.y;
         L.depth = damp(L.depth, 0.12, 14, h);
@@ -2633,7 +2652,7 @@ export class ClimberSim implements ClimberSimAPI {
         // reaching for the target hold through the flight (the arm stays inside its envelope)
         const F = this.flight;
         const k = F.hands.indexOf(i);
-        const c = envClamp(i, ax[i], ay[i], sx, sy, F.tx[k], F.ty[k], 0);
+        const c = envClampOn(this.prof, i, ax[i], ay[i], sx, sy, F.tx[k], F.ty[k], 0);
         L.px = damp(L.px, c.x, 30, h);
         L.py = damp(L.py, c.y, 30, h);
         L.depth = damp(L.depth, 0.08, 14, h);
@@ -2660,10 +2679,10 @@ export class ClimberSim implements ClimberSimAPI {
         // flagging: the leg is held out where it was put (relative to the hip), the foot on / near the wall
         const tx = ax[i] + sx * L.flagU + rx * side * L.flagO;
         const ty = ay[i] + sy * L.flagU + ry * side * L.flagO;
-        const c = envClamp(i, ax[i], ay[i], sx, sy, tx, ty, 0);
+        const c = envClampOn(this.prof, i, ax[i], ay[i], sx, sy, tx, ty, 0);
         L.px = damp(L.px, c.x, 16, h);
         L.py = damp(L.py, c.y, 16, h);
-        L.depth = damp(L.depth, 0.03 + Math.max(0, this.sth) * 0.05, 10, h);
+        L.depth = damp(L.depth, 0.03 + Math.max(0, this.gs) * 0.05, 10, h);
       } else {
         // dangling: arms hang by the side (elbow soft, inside the arm envelope), legs hang down
         const down = i < 2 ? 0.4 : 0.82;
@@ -2929,10 +2948,12 @@ export class ClimberSim implements ClimberSimAPI {
     const g = SIM.gravity;
     const P = this.P;
     const C = this.C;
+    // a folded wall: gravity splits by the wall under the centre of mass (smooth across folds)
+    if (this.prof) this.airFrame();
     let apx = 0;
-    let apy = -g * this.cth;
+    let apy = -g * this.gc;
     let acx = 0;
-    let acy = -g * this.cth;
+    let acy = -g * this.gc;
     // weak self-righting (the climber tries to get the feet under the body)
     const k = rope ? 2.25 : 0.62;
     acx += k * (P.x - C.x);
@@ -2985,10 +3006,10 @@ export class ClimberSim implements ClimberSimAPI {
     this.Cv.x = (C.x - ocx) / h;
     this.Cv.y = (C.y - ocy) / h;
     // out of plane: plumb fall (overhang pushes away from the wall)
-    this.depthV += g * this.sth * h;
+    this.depthV += g * this.gs * h;
     this.depthV *= Math.exp(-(rope ? 2.5 : 0.3) * h);
     this.depth += this.depthV * h;
-    if (rope) this.depth = damp(this.depth, 0.3 + Math.max(0, this.sth) * 0.4, 1.5, h);
+    if (rope) this.depth = damp(this.depth, 0.3 + Math.max(0, this.gs) * 0.4, 1.5, h);
     if (this.depth < 0.15) {
       this.depth = 0.15;
       if (this.depthV < 0) this.depthV = 0;
@@ -3002,7 +3023,15 @@ export class ClimberSim implements ClimberSimAPI {
     computeAnchors(this.pose, this.ax, this.ay);
     const down = (this.P.y - this.C.y) / BODY.spine;
     const fy = Math.min(this.ay[2], this.ay[3]) + down * BODY.legMax * 0.92;
+    if (this.prof) return worldHeight(this.prof, fy, this.depth + 0.05);
     return fy * this.cth - (this.depth + 0.05) * this.sth;
+  }
+
+  /** Falling on a folded wall: gravity's split (gc, gs) follows the wall under the centre of mass. */
+  private airFrame(): void {
+    const a = smoothAngleAt(this.prof!, this.P.y + BODY.comT * (this.C.y - this.P.y)) * DEG;
+    this.gc = Math.cos(a);
+    this.gs = Math.sin(a);
   }
 
   private fallStep(h: number): void {
@@ -3051,14 +3080,23 @@ export class ClimberSim implements ClimberSimAPI {
   }
 
   private land(): void {
-    const vy = this.Pv.y * this.cth - this.depthV * this.sth;
+    const vy = this.Pv.y * this.gc - this.depthV * this.gs;
     const impact = Math.abs(vy);
     this.phase = 'landed';
     this.events.push({ type: 'land', impact: Math.round(impact * 100) / 100 });
     // crouch on the pad
     const worldPelvis = GAME.padHeight + 0.45;
     const d = this.depth;
-    const py = (worldPelvis + d * this.sth) / Math.max(0.3, this.cth);
+    let py = (worldPelvis + d * this.sth) / Math.max(0.3, this.cth);
+    if (this.prof) {
+      // straight down onto the pad: same distance out from the wall base, pelvis at crouch height
+      const p3 = surfaceToLocal3D(this.prof, this.P.x, this.P.y, d, this.v3);
+      const sp = local3DToSurface(this.prof, p3.x, worldPelvis, p3.z, this.sp3);
+      py = sp.y;
+      this.landDepth = Math.max(0.15, sp.depth);
+      const f3 = local3DToSurface(this.prof, p3.x, GAME.padHeight, p3.z + 0.05, this.sp3);
+      this.padY = f3.y;
+    }
     this.landing.px = this.P.x;
     this.landing.py = py;
     this.landing.cx = this.P.x + Math.sin(this.yaw * 0.2) * 0.05;
@@ -3069,6 +3107,7 @@ export class ClimberSim implements ClimberSimAPI {
 
   private landedStep(h: number): void {
     const t = this.landing;
+    if (this.prof) this.depth = damp(this.depth, this.landDepth, 10, h);
     this.P.x = damp(this.P.x, t.px, 10, h);
     this.P.y = damp(this.P.y, t.py, 10, h);
     this.C.x = damp(this.C.x, t.cx, 8, h);
@@ -3091,7 +3130,7 @@ export class ClimberSim implements ClimberSimAPI {
     sy /= sl;
     const rx = sy;
     const ry = -sx;
-    const padY = (GAME.padHeight + this.depth * this.sth) / Math.max(0.3, this.cth);
+    const padY = this.prof ? this.padY : (GAME.padHeight + this.depth * this.sth) / Math.max(0.3, this.cth);
     for (let i = 0; i < 4; i++) {
       const L = this.limbs[i];
       const side = i === 0 || i === 2 ? -1 : 1;
@@ -3177,7 +3216,7 @@ export class ClimberSim implements ClimberSimAPI {
       o.stress = L.stress;
       o.capacity = L.cap;
       // fraction of the anatomical reach in this direction (≥ 1 = at the envelope's edge)
-      o.reachRatio = envEval(i, this.ax[i], this.ay[i], u.x, u.y, L.px, L.py).ratio;
+      o.reachRatio = envEvalOn(this.prof, i, this.ax[i], this.ay[i], u.x, u.y, L.px, L.py).ratio;
       o.smearing = L.smear;
       o.shake = L.shake;
       o.busy = L.busy;

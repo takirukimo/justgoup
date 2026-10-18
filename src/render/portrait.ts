@@ -108,7 +108,7 @@ export function renderPortrait(renderer: THREE.WebGLRenderer, head: HeadId, size
   key1.position.set(1.6, 2.2, 2.4);
   const fill = new THREE.DirectionalLight('#a8c8dc', 0.55);
   fill.position.set(-2.2, 0.4, 1.4);
-  const rimA = new THREE.DirectionalLight('#ff5d78', 3.2);
+  const rimA = new THREE.DirectionalLight('#ff6f86', 2.2);
   rimA.position.set(-1.8, 1.2, -1.6);
   const rimB = new THREE.DirectionalLight('#b8e6f0', 3.0);
   rimB.position.set(1.9, 0.9, -1.7);

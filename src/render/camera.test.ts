@@ -3,9 +3,12 @@
 //           band, the climber fills ~45–55% of the screen height, and a drag never shrinks it.
 //  follow — a rope catch close to the floor keeps the whole body above the bottom HUD band.
 //  title  — the climber and Steini both fit between the logo lockup and the button stack.
+//  blends — every shot change eases (bounded speed + acceleration, continuous velocity); the intro
+//           fly-in glides slowly while its card is up, then flies and lands without a hitch.
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { CameraRig, type CameraContext } from './camera';
+import { CameraRig, introProgress, type CameraContext } from './camera';
+import type { CameraMode } from '../core/contracts';
 import { WallFrame } from './wall-frame';
 import type { ClimberPhase, ClimberState, LimbId, LimbSnapshot, Vec2 } from '../core/types';
 
@@ -143,5 +146,162 @@ describe('title composition', () => {
         expect(p.y).toBeLessThan(H * 0.7);
       }
     }
+  });
+});
+
+describe('title composition (home scene)', () => {
+  /** The home scene: the climber steady on holds ~2 m up the wall, Steini on the mats beside him. */
+  function homeScene(angle: number, guideX: number) {
+    const frame = new WallFrame(angle);
+    const rig = new CameraRig(W / H);
+    rig.titleFraming = { lift: 0.3, distance: 7.4 };
+    const st = climber(2.1, 'climbing');
+    const ctx: CameraContext = { frame, boulder: null, state: st, ceiling: 7.4, guide: { x: guideX, depth: 1.5 } };
+    return { frame, rig, st, ctx };
+  }
+  for (const [angle, gx] of [[20, 1.05], [0, -1.05], [35, 1.2]] as const) {
+    it(`keeps both inside the band through the drift (${angle}° wall, Steini at x=${gx})`, () => {
+      const { frame, rig, st, ctx } = homeScene(angle, gx);
+      rig.setMode('title', { instant: true });
+      settle(rig, ctx, 3);
+      for (let k = 0; k < 8; k++) {
+        settle(rig, ctx, 11);
+        const pts = [st.limbs.LH.pos, st.limbs.RH.pos, st.limbs.LF.pos, st.limbs.RF.pos, { x: st.chest.x, y: st.chest.y + 0.32 }].map((p) => project(rig, frame, p, 0.3));
+        const g = new THREE.Vector3();
+        for (const [dx, y] of [[-0.3, 0.3], [0.3, 0.3], [-0.3, 2.2], [0.3, 2.2]]) {
+          frame.toWorldXYZ(gx + dx, 0, 1.5, g).setY(y);
+          const v = g.project(rig.camera);
+          pts.push({ x: ((v.x + 1) / 2) * W, y: ((1 - v.y) / 2) * H });
+        }
+        for (const p of pts) {
+          expect(p.x).toBeGreaterThan(8);
+          expect(p.x).toBeLessThan(W - 8);
+          expect(p.y).toBeGreaterThan(H * 0.3);
+          expect(p.y).toBeLessThan(H * 0.68);
+        }
+      }
+    });
+  }
+});
+
+/** Steps the rig at 30 fps and returns the peak camera speed (m/s) and acceleration (m/s²). */
+function motion(rig: CameraRig, ctx: CameraContext, sec: number, dt = 1 / 30): { vMax: number; aMax: number; jump: number } {
+  let prev = rig.camera.position.clone();
+  let pv = new THREE.Vector3();
+  let vMax = 0;
+  let aMax = 0;
+  let jump = 0;
+  for (let t = 0; t < sec; t += dt) {
+    rig.update(dt, ctx);
+    const p = rig.camera.position;
+    const v = p.clone().sub(prev).divideScalar(dt);
+    vMax = Math.max(vMax, v.length());
+    aMax = Math.max(aMax, v.clone().sub(pv).length() / dt);
+    jump = Math.max(jump, p.distanceTo(prev));
+    prev = p.clone();
+    pv = v;
+  }
+  return { vMax, aMax, jump };
+}
+
+describe('shot blends', () => {
+  const chain: CameraMode[] = ['title', 'preview', 'follow', 'celebrate', 'follow', 'fall', 'preview', 'title'];
+  it('eases every mode change (no jumps, bounded acceleration)', () => {
+    const frame = new WallFrame(20);
+    const rig = new CameraRig(W / H);
+    rig.viewInsets = { top: 0.1, bottom: 0.13 };
+    const st = climber(1.6);
+    const ctx: CameraContext = { frame, boulder: null, state: st, ceiling: 7.4, guide: { x: 1.05, depth: 1.5 } };
+    rig.setMode('title', { instant: true });
+    settle(rig, ctx, 4);
+    for (const m of chain.slice(1)) {
+      rig.setMode(m);
+      const r = motion(rig, ctx, 3);
+      // a cut would move metres in one frame; an eased move stays well under 0.5 m per 1/30 s
+      expect(r.jump, `${m}: per-frame jump`).toBeLessThan(0.35);
+      expect(r.aMax, `${m}: acceleration`).toBeLessThan(40);
+    }
+  });
+
+  it('eases title ↔ locker framing changes', () => {
+    const frame = new WallFrame(15);
+    const rig = new CameraRig(W / H);
+    const st = climber(2.1);
+    const ctx: CameraContext = { frame, boulder: null, state: st, ceiling: 7.4, guide: { x: -1.05, depth: 1.5 } };
+    rig.titleFraming = { lift: 0.3, distance: 7.4 };
+    rig.setMode('title', { instant: true });
+    settle(rig, ctx, 4);
+    for (const f of [{ lift: -1.25, distance: 4.5 }, { lift: 0.3, distance: 7.4 }]) {
+      rig.titleFraming = f;
+      ctx.guide = f.lift < 0 ? null : { x: -1.05, depth: 1.5 };
+      const r = motion(rig, ctx, 3.5);
+      expect(r.jump).toBeLessThan(0.3);
+      expect(r.aMax).toBeLessThan(30);
+    }
+  });
+
+  it('an instant request still cuts', () => {
+    const frame = new WallFrame(10);
+    const rig = new CameraRig(W / H);
+    const ctx: CameraContext = { frame, boulder: null, state: climber(1.6), ceiling: 7.4, guide: null };
+    rig.setMode('title', { instant: true });
+    settle(rig, ctx, 3);
+    const before = rig.camera.position.clone();
+    rig.setMode('follow', { instant: true });
+    rig.update(1 / 60, ctx);
+    expect(rig.camera.position.distanceTo(before)).toBeGreaterThan(1);
+  });
+});
+
+describe('intro fly-in pacing', () => {
+  it('glides slowly while the card is up, then flies, monotonic with a continuous velocity', () => {
+    const dur = 8.5;
+    const hold = 4;
+    let prev = 0;
+    let prevV = 0;
+    let maxDv = 0;
+    for (let t = 0.01; t <= dur; t += 0.01) {
+      const p = introProgress(t, dur, hold);
+      const v = (p - prev) / 0.01;
+      expect(p).toBeGreaterThanOrEqual(prev - 1e-9);
+      if (t > 0.02) maxDv = Math.max(maxDv, Math.abs(v - prevV));
+      prev = p;
+      prevV = v;
+    }
+    expect(introProgress(hold * 0.8, dur, hold)).toBeLessThan(0.14);
+    expect(introProgress(dur, dur, hold)).toBeCloseTo(1, 5);
+    // velocity changes gradually (no step) at 100 Hz sampling
+    expect(maxDv).toBeLessThan(0.02);
+  });
+
+  it('lands on the title shot and hands over without a jump', async () => {
+    const frame = new WallFrame(20);
+    const rig = new CameraRig(W / H);
+    const ctx: CameraContext = { frame, boulder: null, state: climber(1.0, 'idle'), ceiling: 7.4, guide: { x: 1.05, depth: 1.5 } };
+    rig.setMode('title', { instant: true });
+    rig.update(1 / 30, ctx);
+    let landed = false;
+    void rig.playIntro(8, { hold: 3.5 }).then(() => {
+      landed = true;
+    });
+    const r = motion(rig, ctx, 11);
+    await Promise.resolve();
+    expect(landed).toBe(true);
+    expect(rig.mode).toBe('title');
+    expect(r.jump).toBeLessThan(0.45);
+  });
+
+  it('a skipped fly-in carries its motion into the next shot', () => {
+    const frame = new WallFrame(20);
+    const rig = new CameraRig(W / H);
+    const ctx: CameraContext = { frame, boulder: null, state: climber(1.0, 'idle'), ceiling: 7.4, guide: null };
+    rig.setMode('title', { instant: true });
+    rig.update(1 / 30, ctx);
+    void rig.playIntro(8, { hold: 2 });
+    motion(rig, ctx, 4.5);
+    rig.setMode('preview');
+    const r = motion(rig, ctx, 3);
+    expect(r.jump).toBeLessThan(0.45);
+    expect(r.aMax).toBeLessThan(60);
   });
 });

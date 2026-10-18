@@ -335,8 +335,8 @@ export function buildHuman(): THREE.Group {
     // vertical axis: the shrink-wrap poles land in the neck and under the cap, never on the face
     a: [0, 0.135, 0.004],
     b: [0, 0.288, -0.012],
-    rows: 64,
-    cols: 68,
+    rows: 60,
+    cols: 64,
     aoScale: 0.008,
     paint: (p, n, out) => {
       const ax = Math.abs(p.x);

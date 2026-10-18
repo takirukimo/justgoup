@@ -250,6 +250,17 @@ export const SIM = {
   flagSpread: 0.6,
   /** A foot dropped over blank wall at least this far (m) out to the side of its hip flags. */
   flagReach: 0.5,
+  // ── Hold shapes (HoldDef.shape, research §3.3 type defaults) ──
+  /** Hand grip × per shape (on top of the type's grip model): bucket 1.5 vs jug 1.35, horn 1.2 vs pinch 0.8 × the 20 mm edge. */
+  shapeGrip: { bucket: 1.1, horn: 1.48, rail: 1, micro: 1, chip: 1, macro: 1, 'dual-tex': 1.1, wood: 0.9 },
+  /** Foot capacity × per shape (a chip is a tiny screw-on; wood is slippery). */
+  shapeFoot: { bucket: 1.05, horn: 1, rail: 1, micro: 0.8, chip: 0.75, macro: 1, 'dual-tex': 1, wood: 0.85 },
+  /** Pull cones of shapes that grip differently from their type (horn ≈ 110° inner: a post you wrap; bucket ≈ 80°). */
+  shapeCone: {
+    bucket: { inner: 80, outer: 160, floor: 0.45 },
+    horn: { inner: 110, outer: 178, floor: 0.6 },
+    'dual-tex': { inner: 22, outer: 75, floor: 0.06 },
+  },
   /** Matching two hands on one hold shares its surface. */
   matchFactor: 0.88,
   /** Smearing (foot on blank wall). */
@@ -423,3 +434,22 @@ export const SIM = {
 } as const;
 
 export type HoldTypeTable = typeof SIM.handCap;
+
+/**
+ * Problem generator switches and route-setting tables (src/game/generator.ts, research §3).
+ * Mutable on purpose: tests and dev tools flip the flags; the shipped defaults are what the live game uses.
+ */
+export const GEN: {
+  /**
+   * Multi-angle wall profiles (kicker → steep → roof stacks, caves, lead headwalls with a roof crux).
+   * OFF until the renderer folds the panels (it draws one flat wall at BoulderDef.wallAngle today); every
+   * archetype that needs no profile (slab / overhang angles, traverses, zigzags, diagonals, dynos,
+   * compression, hold variety) is on regardless. GenerateOptions.profiles overrides it per problem.
+   */
+  profiles: boolean;
+  /** Hand holds bolted onto route volumes (needs the renderer to seat them on the volume face). */
+  holdsOnVolumes: boolean;
+} = {
+  profiles: false,
+  holdsOnVolumes: false,
+};

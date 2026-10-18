@@ -5,8 +5,10 @@
 //   mode=boulder|rope   angle=<deg>   seed=<n>   grade=<0..12>
 //   cam=title|intro|preview|follow|editor|celebrate|fall
 //   q=low|medium|high   tm=aces|agx   hl=1 (highlights demo)   guide=1   fx=1
-//   y=<m> (rope: climber height)   sim=0 (force synthetic pose)   hud=0   fixed=1 (fixed dt)
-//   head=<HeadId>  colorway=<ColorwayId>
+//   y=<m> (synthetic climber hand height; rope default 6)   sim=0 (force synthetic pose)   calm=1 (no reach anim)
+//   hud=0   fixed=1 (fixed dt)   head=<HeadId>  colorway=<ColorwayId>
+//   seq=preview@3,follow@6,title@9   (camera mode changes at t seconds; trajectory in window.__traj)
+//   framing=locker@4   (title ↔ locker framing change at t seconds)   view=px,py,pz,lx,ly,lz[,fov]
 
 import { GameRenderer } from '../src/render/renderer';
 import type { BoulderDef, ClimberState, HeadId, ColorwayId, HoldDef, HoldType, LimbId, LimbSnapshot, QualityLevel, QuickdrawDef, Vec2 } from '../src/core/types';
@@ -151,11 +153,11 @@ async function trySim(b: BoulderDef): Promise<SimLike | null> {
 
 function synthState(b: BoulderDef, t: number): ClimberState {
   const starts = b.holds.filter((h) => h.role === 'start');
-  const lift = mode === 'rope' ? num('y', 6) - 1.45 : 0;
+  const lift = qs.has('y') ? num('y', 1.45) - 1.45 : mode === 'rope' ? 6 - 1.45 : 0;
   const hold = (i: number) => starts[i] ?? starts[0];
   const L = hold(0);
   const R = hold(1);
-  const reach = (Math.sin(t * 0.9) * 0.5 + 0.5) * 0.35;
+  const reach = qs.get('calm') === '1' ? 0 : (Math.sin(t * 0.9) * 0.5 + 0.5) * 0.35;
   const lh = { x: L.x, y: L.y + lift };
   const rh = { x: R.x + reach * 0.4, y: R.y + lift + reach };
   const sway = Math.sin(t * 1.3) * 0.04;
@@ -214,7 +216,34 @@ async function main(): Promise<void> {
   if (camMode === 'intro') void r.playIntro().then(() => console.log('[world] intro done'));
   else r.setCameraMode(camMode, { instant: true });
   if (camMode === 'editor') r.setEditorView({ x: 0, y: b.height / 2 }, Math.min(b.height + 0.6, 6));
-  if (showGuide) r.setGuide({ x: -1.1, depth: 1.5, pose: mode === 'rope' ? 'belay' : 'wave', lookAt: { x: 0, y: 1.8 } });
+  let guideState: Parameters<typeof r.setGuide>[0] = null;
+  if (showGuide) {
+    // where the title scene puts Steini: beside the start, on the mats, looking up at the climber
+    const starts = b.holds.filter((h) => h.role === 'start');
+    const sx = starts.length ? starts.reduce((a, h) => a + h.x, 0) / starts.length : 0;
+    const half = b.width / 2 - 0.5;
+    const gx = Math.max(-half, Math.min(half, sx + (sx > 0 ? -1.05 : 1.05)));
+    const chestY = 1.45 + (qs.has('y') ? num('y', 1.45) - 1.45 : 0) - 0.4;
+    guideState = { x: mode === 'rope' ? -1.1 : gx, depth: mode === 'rope' ? 1.05 : 1.5, pose: mode === 'rope' ? 'belay' : 'idle', lookAt: { x: sx, y: chestY } };
+    r.setGuide(guideState);
+  }
+  // scripted camera changes (smoothness checks): seq=preview@3,follow@6 ; framing=locker@4
+  const seq = (qs.get('seq') ?? '')
+    .split(',')
+    .filter(Boolean)
+    .map((x) => {
+      const [m, at] = x.split('@');
+      return { mode: m as CameraMode, at: Number(at) };
+    });
+  const framingSeq = (qs.get('framing') ?? '')
+    .split(',')
+    .filter(Boolean)
+    .map((x) => {
+      const [f, at] = x.split('@');
+      return { f, at: Number(at) };
+    });
+  const traj: { t: number; x: number; y: number; z: number; dx: number; dy: number; dz: number; fov: number; mode: string }[] = [];
+  w.__traj = traj;
 
   // round-trip check wallToScreen → screenToWall
   const roundTrip = () => {
@@ -279,7 +308,18 @@ async function main(): Promise<void> {
       r.fx.chalkPuff(st.limbs.LH.pos, 1);
       if (camMode === 'celebrate') r.fx.confetti(st.limbs.RH.pos);
     }
+    while (seq.length && t >= seq[0].at) r.setCameraMode(seq.shift()!.mode);
+    while (framingSeq.length && t >= framingSeq[0].at) {
+      const f = framingSeq.shift()!.f;
+      r.setTitleFraming(f === 'locker' ? { lift: -1.25, distance: 4.5 } : f === 'title' ? { lift: 0.3, distance: 7.4 } : null);
+      r.setGuide(f === 'locker' ? null : guideState);
+    }
     r.frame(dt);
+    {
+      const cam = r.camera;
+      const d = cam.getWorldDirection(cam.position.clone());
+      traj.push({ t, x: cam.position.x, y: cam.position.y, z: cam.position.z, dx: d.x, dy: d.y, dz: d.z, fov: cam.fov, mode: r.cameraMode });
+    }
     if (!checked && frames === 30) {
       checked = true;
       roundTrip();

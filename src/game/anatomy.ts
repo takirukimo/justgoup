@@ -23,6 +23,7 @@
 
 import type { Vec2 } from '../core/types';
 import { BODY, SIM } from '../config/tuning';
+import { reachScale, type WallProfile } from './wall-profile';
 
 /** One knot: [φ degrees, max reach metres, anatomical strain weight 0..1 at the edge]. */
 export type EnvelopeKnot = readonly [phi: number, r: number, strain: number];
@@ -406,6 +407,67 @@ export function envProject(li: number, ax: number, ay: number, ux: number, uy: n
  */
 export function envClamp(li: number, ax: number, ay: number, ux: number, uy: number, tx: number, ty: number, tol: number): typeof PROJ_OUT {
   const d = envProject(li, ax, ay, ux, uy, tx, ty);
+  const out = PROJ_OUT;
+  if (d <= tol) {
+    out.x = tx;
+    out.y = ty;
+    out.dist = 0;
+    return out;
+  }
+  const k = tol / d;
+  out.x += (tx - out.x) * k;
+  out.y += (ty - out.y) * k;
+  out.dist = d - tol;
+  return out;
+}
+
+// ═══════════════════════════════ multi-angle walls ═══════════════════════════════
+//
+// On a folded wall (wall-profile.ts) the envelopes judge the fold-aware in-plane vector: the target is
+// moved along the anchor → target line by reachScale (closer across a concave corner, further around a
+// convex lip). With `prof` null (a flat wall) these are exactly envEval / envProject / envClamp.
+
+/** Last reach scale applied by envEvalOn / envProjectOn / envClampOn (1 on a flat stretch). */
+export const FOLD_K = { k: 1 };
+
+/** envEval on a (possibly) folded wall. */
+export function envEvalOn(prof: WallProfile | null, li: number, ax: number, ay: number, ux: number, uy: number, tx: number, ty: number): typeof ENV_OUT {
+  if (prof === null) return envEval(li, ax, ay, ux, uy, tx, ty);
+  const k = reachScale(prof, ax, ay, tx, ty);
+  FOLD_K.k = k;
+  if (k === 1) return envEval(li, ax, ay, ux, uy, tx, ty);
+  return envEval(li, ax, ay, ux, uy, ax + (tx - ax) * k, ay + (ty - ay) * k);
+}
+
+/**
+ * envProject on a folded wall: the projection is done in the fold-aware metric and mapped back along
+ * the anchor line (PROJ_OUT in surface coordinates). Returns the surface distance outside.
+ */
+export function envProjectOn(prof: WallProfile | null, li: number, ax: number, ay: number, ux: number, uy: number, tx: number, ty: number): number {
+  if (prof === null) return envProject(li, ax, ay, ux, uy, tx, ty);
+  const k = reachScale(prof, ax, ay, tx, ty);
+  FOLD_K.k = k;
+  if (k === 1) return envProject(li, ax, ay, ux, uy, tx, ty);
+  const d = envProject(li, ax, ay, ux, uy, ax + (tx - ax) * k, ay + (ty - ay) * k);
+  const out = PROJ_OUT;
+  if (d <= 0) {
+    out.x = tx;
+    out.y = ty;
+    out.dist = 0;
+    return 0;
+  }
+  out.x = ax + (out.x - ax) / k;
+  out.y = ay + (out.y - ay) / k;
+  const ex = tx - out.x;
+  const ey = ty - out.y;
+  out.dist = Math.sqrt(ex * ex + ey * ey);
+  return out.dist;
+}
+
+/** envClamp on a folded wall (result in surface coordinates, PROJ_OUT). */
+export function envClampOn(prof: WallProfile | null, li: number, ax: number, ay: number, ux: number, uy: number, tx: number, ty: number, tol: number): typeof PROJ_OUT {
+  if (prof === null) return envClamp(li, ax, ay, ux, uy, tx, ty, tol);
+  const d = envProjectOn(prof, li, ax, ay, ux, uy, tx, ty);
   const out = PROJ_OUT;
   if (d <= tol) {
     out.x = tx;

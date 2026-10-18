@@ -15,6 +15,14 @@
 // body in (it takes over part of the hands' keep-in pull, all of the legs' share on a roof). A drop knee
 // turns the hip into the wall (smaller d → less keep-in pull). A FLAG is not a contact: the leg out to the
 // side shifts the CoM (its mass) and widens the column the barn-door turns about (StaticsParams.flags).
+// Multi-angle walls (Phase B, wall-profile.ts; StaticsParams.profile): every contact feels the panel its
+// hold is on (grip base: sloper slope, overhang loss; feet: steep-wall loss, smears; per-foot normal
+// force in its own panel), and the out-of-plane balance is solved in the true side view: the "effective
+// wall" of a stance is the plane through its hands and feet (the chord from the feet to the hands in 3D),
+// the CoM sits `depth` off the wall along the blended normal under it, and the keep-in pull is the same
+// formula with the chord's angle, lever and CoM offset (on a flat wall it reduces exactly to the one
+// above). The in-plane weight is cos of that effective angle (StanceEval.cth / sth for the dynamics).
+// Reach across a fold uses the fold-aware metric (anatomy.envEvalOn). With profile null nothing changes.
 // Anatomy (anatomy.ts): each contact is measured against its limb's reach envelope in the pose's
 // body frame — ratio[] / excess[] — and gets an anatomical strain on top of its stress (awkward
 // edge → harder work, past the edge → pops off). poseViolation() keeps every limb (and a dragged
@@ -33,7 +41,8 @@ import {
   type GripContext,
 } from './holds';
 import { dcos, dsin, dcosSmall, dsinSmall } from './dmath';
-import { envEval as envEval_ } from './anatomy';
+import { envEval as envEval_, envEvalOn as envEvalOn_ } from './anatomy';
+import { normalSide, panelIndexAt, surfaceSide, type Side, type WallProfile } from './wall-profile';
 
 // Hot path (thousands of stance evaluations per plan): plain module-local bindings. Imported
 // bindings are live, and some module runners (vitest's SSR transform) read them through a getter
@@ -48,6 +57,7 @@ const hookCapacity = hookCapacity_;
 const hookPullIn = hookPullIn_;
 const isHandIdx = isHandIdx_;
 const envEval = envEval_;
+const envEvalOn = envEvalOn_;
 
 export interface Pose {
   px: number;
@@ -140,13 +150,18 @@ export interface StaticsParams {
    * foot's wall-local position; null = no flags (the planner).
    */
   flags: Float64Array | null;
+  /**
+   * Multi-angle wall (wall-profile.ts), or null for one flat panel at wallAngle. When set, each contact
+   * uses the angle of the panel it is on and the out-of-plane balance is solved in the side view.
+   */
+  profile: WallProfile | null;
   /** Cached trig of wallAngle (refreshed automatically when wallAngle changes). */
   trigAngle: number;
   cth: number;
   sth: number;
 }
 
-export function makeParams(wallAngle: number, assist = 0, pump = 0): StaticsParams {
+export function makeParams(wallAngle: number, assist = 0, pump = 0, profile: WallProfile | null = null): StaticsParams {
   return {
     wallAngle,
     assist,
@@ -161,6 +176,7 @@ export function makeParams(wallAngle: number, assist = 0, pump = 0): StaticsPara
     handPump: null,
     handFric: null,
     flags: null,
+    profile: profile && !profile.flat ? profile : null,
     trigAngle: wallAngle,
     cth: dcos(wallAngle * DEG),
     sth: dsin(wallAngle * DEG),
@@ -215,6 +231,14 @@ export class StanceEval {
   normalHooks = 0;
   /** Per contact: out-of-plane pull-in of a hook (body weights; 0 for the others). */
   readonly hookN = new Float64Array(4);
+  /**
+   * cos / sin of the stance's effective wall angle: the wall angle on a flat wall; on a folded wall the
+   * plane through the hands and feet (side view). The in-plane weight is `cth`, the pull off the wall `sth`.
+   */
+  cth = 1;
+  sth = 0;
+  /** Panel angle (degrees) under each contact (the wall angle on a flat wall). */
+  readonly angle = new Float64Array(4);
   feasible = true;
 }
 
@@ -257,7 +281,7 @@ const GRIP: GripContext = { wallAngle: 0, assist: 0, pump: 0, overhang: 0, frict
 const sq = (x: number, y: number): number => Math.sqrt(x * x + y * y);
 
 /** Estimated pelvis distance from the wall for a pose (bent legs push the hips out). */
-export function estimateDepth(p: Pose, contacts: Contacts, ax: Float64Array, ay: Float64Array, wallAngle: number): number {
+export function estimateDepth(p: Pose, contacts: Contacts, ax: Float64Array, ay: Float64Array, wallAngle: number, sinOverride = NaN): number {
   let n = 0;
   let sum = 0;
   let hooks = 0;
@@ -292,7 +316,7 @@ export function estimateDepth(p: Pose, contacts: Contacts, ax: Float64Array, ay:
     }
   }
   const comY = p.py + BODY.comT * (p.cy - p.py);
-  const s = Math.max(0, dsin(wallAngle * DEG));
+  const s = Math.max(0, sinOverride === sinOverride ? sinOverride : dsin(wallAngle * DEG));
   return clamp(0.2 + (nh ? s * Math.max(0, hy / nh - comY) * 0.85 : 0), 0.15, 1.2);
 }
 
@@ -304,8 +328,10 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
     prm.cth = dcos(prm.wallAngle * DEG);
     prm.sth = dsin(prm.wallAngle * DEG);
   }
-  const cth = prm.cth;
-  const sth = prm.sth;
+  // effective wall angle of the stance (the wall angle on a flat wall; see the profile block below)
+  let cth = prm.cth;
+  let sth = prm.sth;
+  const prof = prm.profile;
   const ax = out.ax;
   const ay = out.ay;
   computeAnchors(pose, ax, ay);
@@ -364,7 +390,14 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
       out.edge[i] = 0;
       continue;
     }
-    const en = envEval(i, ax[i], ay[i], ux, uy, c.x, c.y);
+    let en;
+    if (prof === null) {
+      en = envEval(i, ax[i], ay[i], ux, uy, c.x, c.y);
+      out.angle[i] = prm.wallAngle;
+    } else {
+      en = envEvalOn(prof, i, ax[i], ay[i], ux, uy, c.x, c.y);
+      out.angle[i] = prof.ang[panelIndexAt(prof, c.y)];
+    }
     const d = en.r;
     const r = en.ratio;
     out.ratio[i] = r;
@@ -394,7 +427,72 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
   }
   out.handsOn = nh;
   out.feetOn = nf + nk;
-  const depth = estimateDepth(pose, contacts, ax, ay, prm.wallAngle);
+  // folded wall: the stance's effective plane in the side view (chord feet → hands)
+  let leverE = 0;
+  let fH = 0;
+  let fZ = 0;
+  if (prof !== null) {
+    let hH = 0;
+    let hZ = 0;
+    for (let i = 0; i < 4; i++) {
+      const c = contacts[i];
+      if (!c || (i >= 2 && isHook(c.mode))) continue;
+      surfaceSide(prof, c.y, SV);
+      if (i < 2) {
+        hH += SV.h;
+        hZ += SV.z;
+      } else {
+        fH += SV.h;
+        fZ += SV.z;
+      }
+    }
+    if (nh) {
+      hH /= nh;
+      hZ /= nh;
+    }
+    if (nf) {
+      fH /= nf;
+      fZ /= nf;
+    }
+    // tangent of the wall under the centre of mass (blended across folds): the fallback frame
+    normalSide(prof, comY, SV);
+    const tH = SV.z;
+    const tZ = -SV.h;
+    if (nh > 0 && nf > 0) {
+      let uh = hH - fH;
+      let uz = hZ - fZ;
+      if (uh * tH + uz * tZ >= SIM.minLever) {
+        const l = Math.sqrt(uh * uh + uz * uz);
+        uh /= l;
+        uz /= l;
+        cth = uh;
+        sth = uz;
+        leverE = l;
+      } else {
+        cth = tH;
+        sth = tZ;
+        leverE = SIM.minLever;
+      }
+    } else if (nh + nf + nk > 0) {
+      // hanging from the hands (or standing on the feet alone): the panels under those contacts
+      let cs = 0;
+      let ss = 0;
+      for (let i = nh > 0 ? 0 : 2; i < (nh > 0 ? 2 : 4); i++) {
+        const c = contacts[i];
+        if (!c) continue;
+        const k = panelIndexAt(prof, c.y);
+        cs += prof.c[k];
+        ss += prof.s[k];
+      }
+      const l = Math.sqrt(cs * cs + ss * ss) || 1;
+      cth = cs / l;
+      sth = ss / l;
+    } else {
+      cth = tH;
+      sth = tZ;
+    }
+  }
+  const depth = estimateDepth(pose, contacts, ax, ay, prm.wallAngle, prof === null ? NaN : sth);
   out.depth = depth;
 
   // ── out-of-plane balance ──
@@ -404,13 +502,45 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
   const hyMean = nh ? hys / nh : 0;
   const fyMean = nf ? fys / nf : 0;
   if (nh > 0 && nf > 0) {
-    const lever = Math.max(SIM.minLever, hyMean - fyMean);
-    Nh = Math.max(0, (depth * cth + sth * (comY - fyMean)) / lever);
+    if (prof === null) {
+      const lever = Math.max(SIM.minLever, hyMean - fyMean);
+      Nh = Math.max(0, (depth * cth + sth * (comY - fyMean)) / lever);
+    } else {
+      // side view: the CoM `depth` off the wall along the blended normal, measured in the chord frame
+      offsetSideInto(prof, comY, depth);
+      const gh = SV.h - fH;
+      const gz = SV.z - fZ;
+      const along = gh * cth + gz * sth;
+      const off = -gh * sth + gz * cth;
+      Nh = Math.max(0, ((off > 0.05 ? off : 0.05) * cth + sth * along) / leverE);
+    }
   } else if (nh > 0) {
     Nh = Math.max(0, sth);
   }
   out.hookN[0] = out.hookN[1] = out.hookN[2] = out.hookN[3] = 0;
-  if (nk > 0 && nh > 0 && Nh > 0) {
+  if (prof !== null && nk > 0 && nh > 0 && nf === 0 && Nh > 0) {
+    // a folded wall, hanging on hands + hooks only (a roof): the out-of-plane weight splits between the
+    // hands and the hooks by moments about the CoM — the hooks carry Nh·arm (arm = their lever share:
+    // CoM near the hooks → they carry more), at most what they can pull; the hands the rest
+    let kSum = 0;
+    let capSum = 0;
+    for (let i = 2; i < 4; i++) {
+      const c = contacts[i];
+      if (!c || !isHook(c.mode)) continue;
+      out.hookN[i] = hookPullIn(c.hold, c.mode === FOOT_HEEL, prm.assist);
+      capSum += out.hookN[i];
+      kSum += c.y;
+    }
+    const kyMean = kSum / nk;
+    const arm = clamp((hyMean - comY) / Math.max(0.2, hyMean - kyMean), 0, 1);
+    const take = Math.min(Nh * arm, capSum, Nh * SIM.hookMaxShare);
+    for (let i = 2; i < 4; i++) {
+      if (out.hookN[i] <= 0) continue;
+      out.hookN[i] = capSum > 0 ? (out.hookN[i] / capSum) * take : 0;
+      Nk += out.hookN[i];
+    }
+    Nh -= take;
+  } else if (nk > 0 && nh > 0 && Nh > 0) {
     // hooks pull the body in and take over part of the hands' keep-in pull: a hook near the hands'
     // height substitutes ≈1:1, a low one less; with no pushing foot (a roof) they carry the legs' share
     let capSum = 0;
@@ -455,6 +585,22 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
   for (let i = 0; i < 4; i++) {
     const c = contacts[i];
     if (!c) continue;
+    let nFoot = nPerFoot;
+    if (prof !== null) {
+      // the panel this contact is on
+      const k = panelIndexAt(prof, c.y);
+      const si = prof.s[k];
+      const ci = prof.c[k];
+      GRIP.wallAngle = prof.ang[k];
+      GRIP.overhang = si > 0 ? si : 0;
+      if (i >= 2 && nf > 0) {
+        // the foot's own normal force: the chord-normal share turned into its panel, plus its push along
+        // the chord pressing it into a less steep panel (a kicker under a steep board) or off a steeper one
+        nFoot = nPerFoot * (ci * cth + si * sth) + ((FOOT_PUSH_SHARE * cth) / nf) * (sth * ci - cth * si);
+      }
+      // a pushing foot that has to PULL (toe-pull on a steep panel) carries that pull too
+      FOOT_PULL[i] = i >= 2 && !isHook(c.mode) && c.hold !== null ? nFoot : 0;
+    }
     let dx = ax[i] - c.x;
     let dy = ay[i] - c.y;
     const dl = sq(dx, dy);
@@ -474,7 +620,7 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
     } else if (isHook(c.mode)) {
       cap = c.hold ? hookCapacity(c.hold, c.mode === FOOT_HEEL, c.hx, c.hy, dx, dy, GRIP) : 0.02;
     } else {
-      cap = footCapacity(c.hold, c.hx, c.hy, dx, dy, nPerFoot, GRIP);
+      cap = footCapacity(c.hold, c.hx, c.hy, dx, dy, nFoot, GRIP);
     }
     out.cap[i] = Math.max(cap, 0.01);
   }
@@ -621,6 +767,7 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
       const share = handCapSum > 0 ? out.cap[i] / handCapSum : 1 / nh;
       load = sq(load, Nh * share);
     } else if (out.hookN[i] > 0) load = sq(load, out.hookN[i]);
+    else if (prof !== null && FOOT_PULL[i] < 0) load = sq(load, FOOT_PULL[i]);
     out.load[i] = load;
     const s = load / out.cap[i] + out.edge[i];
     out.stress[i] = s;
@@ -687,7 +834,7 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
   // ── reach strain of a dragged limb (beyond its anatomical envelope) ──
   if (prm.reachLimb >= 0) {
     const i = prm.reachLimb;
-    const en = envEval(i, ax[i], ay[i], ux, uy, prm.reachX, prm.reachY);
+    const en = prof === null ? envEval(i, ax[i], ay[i], ux, uy, prm.reachX, prm.reachY) : envEvalOn(prof, i, ax[i], ay[i], ux, uy, prm.reachX, prm.reachY);
     const m = prm.reachMargin;
     out.reachExcess = m > 0 ? (en.over > 0 ? en.excess + m : Math.max(0, en.r - (en.rMax - m))) : en.excess;
     // a foot pressing against its limit strains less than an arm hauling the body after it
@@ -698,7 +845,26 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
   }
 
   out.tension = worstStress + out.balancePen + out.barnPen + out.stretchPen + out.corePen + out.reachPen;
+  out.cth = cth;
+  out.sth = sth;
   return out;
+}
+
+/** Side-view scratch of the profile path. */
+const SV: Side = { h: 0, z: 0 };
+/** Profile path: each pushing foot's normal force in its own panel (negative = it must toe-pull). */
+const FOOT_PULL = new Float64Array(4);
+/** Share of the in-plane weight the feet are assumed to push along the chord (per-foot normal on a fold). */
+const FOOT_PUSH_SHARE = 0.6;
+
+/** SV ← side-view point `depth` off the wall at surface height y (blended normal). */
+function offsetSideInto(prof: WallProfile, y: number, depth: number): void {
+  surfaceSide(prof, y, SV);
+  const h = SV.h;
+  const z = SV.z;
+  normalSide(prof, y, SV);
+  SV.h = h + depth * SV.h;
+  SV.z = z + depth * SV.z;
 }
 
 // ═══════════════════════════ pose optimisation (planner, reset, respawn) ═══════════════════════════

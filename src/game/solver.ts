@@ -10,7 +10,7 @@
 // need ~35 at the median and < 260 at worst). The search evaluates children lazily (see expand()).
 // Hot-path numbers: ~25 ms median per generated boulder on a desktop core.
 
-import type { BoulderDef, HoldDef, LimbId, QuickdrawDef, Vec2 } from '../core/types';
+import type { BoulderDef, HoldDef, LimbId, QuickdrawDef, Vec2, WallPanel } from '../core/types';
 import type { BetaMove, ClimberSimAPI } from '../core/contracts';
 import { BODY, SIM } from '../config/tuning';
 import { clamp } from '../core/math';
@@ -18,6 +18,7 @@ import {
   canMatch,
   clipPoint,
   contactPoint,
+  footModeFor,
   LIMB_IDS,
   LIMB_INDEX,
   maxReachIdx,
@@ -28,9 +29,28 @@ import {
   usableByFoot,
   usableByHand,
 } from './holds';
-import { computeAnchors, initialPose, makeParams, newContact, optimizePose, setContact, setSmear, StanceEval, type Contact, type Contacts, type Pose, type StaticsParams } from './statics';
+import {
+  computeAnchors,
+  evaluateStance,
+  FOOT_DROP,
+  FOOT_HEEL,
+  FOOT_PUSH,
+  FOOT_TOE,
+  initialPose,
+  makeParams,
+  newContact,
+  optimizePose,
+  setContact,
+  setSmear,
+  StanceEval,
+  type Contact,
+  type Contacts,
+  type Pose,
+  type StaticsParams,
+} from './statics';
 import { dhypot } from './dmath';
-import { envEval } from './anatomy';
+import { envEvalOn } from './anatomy';
+import { angleAt, makeProfile, profileOf, smoothAngleAt, type WallProfile } from './wall-profile';
 
 /** Planner thresholds. The sim slips only above stress 1.05, so these leave a margin. */
 export const SOLVER = {
@@ -62,6 +82,17 @@ export const SOLVER = {
   minNodes: 320,
   /** Candidate targets kept per limb per expansion. */
   candidatesPerLimb: 7,
+  // ── deadpoints + dynos (planned only for style 'dyno' problems or PlanOptions.dynos; research §2.5) ──
+  /** Extra cost of a thrown move: a static beta is preferred whenever one exists. */
+  dynoCost: 2.2,
+  /** A throw is planned only to holds at least this good (nominal hand capacity, BW). */
+  dynoMinCap: 0.5,
+  /** The launch speed a throw needs must stay under this fraction of what the climber can produce. */
+  dynoSpeedMargin: 0.9,
+  /** The catch's peak stress must stay under this fraction of SIM.dynoCatchStress. */
+  dynoCatchMargin: 0.85,
+  /** Tension allowed right after a catch (feet cut: the climber puts them back at once). */
+  dynoLandMax: 0.98,
 } as const;
 
 /** Extra clearance (m) the planner keeps beyond the sim's self-clipping limits. */
@@ -88,6 +119,8 @@ export interface PlanOptions {
   startPose?: Pose;
   /** Rope: quickdraw ids already clipped (only the anchor matters for the goal). */
   clipped?: readonly string[];
+  /** Plan deadpoints / dynos too (default: only on problems of style 'dyno'). */
+  dynos?: boolean;
 }
 
 export interface PlanStep {
@@ -106,6 +139,12 @@ export interface PlanStep {
   smear?: Vec2;
   /** Rope: clip this quickdraw right after the move (verified: the other three limbs hold). */
   clip?: { quickdrawId: string; limb: LimbId; reachPose: Pose; tension: number };
+  /**
+   * A thrown move (move.dyno is set): launched from `reachPose` (the stance before), caught near the
+   * apex. `cut` are the limbs that come off in the flight (feet of a dyno, the other hand when it can't
+   * stay); the next steps put them back.
+   */
+  dyno?: { limbs: 'LH' | 'RH' | 'both'; kind: 'deadpoint' | 'dyno'; power: number; rise: number; speed: number; vmax: number; peakStress: number; cut: LimbId[] };
 }
 
 export interface PlanResult {
@@ -120,6 +159,23 @@ export interface PlanResult {
 }
 
 type Slot = HoldDef | 'smear' | null;
+
+/** A throw the planner considers (planned with the sim's launch model, ClimberSim.throwPlan). */
+interface DynoMove {
+  hands: number[];
+  kind: 'deadpoint' | 'dyno';
+  limbs: 'LH' | 'RH' | 'both';
+  vx: number;
+  vy: number;
+  /** Rigid body shift launch → apex. */
+  sx: number;
+  sy: number;
+  rise: number;
+  speed: number;
+  vmax: number;
+  /** Limbs that come off in the flight. */
+  cut: number[];
+}
 
 /** Planner node behind each step (for post-processing such as clip planning). */
 const STEP_NODE = new WeakMap<PlanStep, Node>();
@@ -141,6 +197,11 @@ interface Node {
    * g / f are optimistic lower bounds until the search pops it and evaluates the reach + stance.
    */
   move: LazyMove | null;
+  /**
+   * Right after a caught throw (feet cut, or still strenuous): the next moves may end in stances up to
+   * SOLVER.dynoLandMax while the climber gets the cut limbs back on.
+   */
+  transient?: boolean;
 }
 
 interface LazyMove {
@@ -153,6 +214,8 @@ interface LazyMove {
   fromX: number;
   fromY: number;
   reachKey: string;
+  /** A thrown move (deadpoint / dyno) instead of a static reach. */
+  dyno?: DynoMove;
 }
 
 class Heap {
@@ -208,11 +271,22 @@ class Planner {
   readonly footHolds: HoldDef[];
   readonly topIds: Set<string>;
   readonly topY: number;
+  /** Some panel of the wall takes a smear (≤ SIM.smearMaxAngle). */
   readonly smearOk: boolean;
   readonly anchor: QuickdrawDef | null;
+  /** Folded wall (wall-profile.ts), null for a flat one. */
+  readonly prof: WallProfile | null;
+  /** Plan deadpoints / dynos (style 'dyno' problems, or PlanOptions.dynos). */
+  dynos = false;
+  /**
+   * Traverse: the top is far to the side of the start, so progress is measured as the distance to the
+   * top (not just height). Weight of the horizontal distance in the heuristic (0 = height only).
+   */
+  lateral = 0;
+  topX = 0;
   private readonly contactObjs: Contact[] = [newContact(), newContact(), newContact(), newContact()];
   private readonly contacts: Contacts = [null, null, null, null];
-  private readonly stanceCache = new Map<string, { pose: Pose; tension: number; violation: number }>();
+  private readonly stanceCache = new Map<string, { pose: Pose; tension: number; violation: number; cth: number; sth: number }>();
   private readonly reachCache = new Map<string, { pose: Pose; tension: number; ok: boolean }>();
   private readonly tmpPose: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
   private readonly tmpV = { x: 0, y: 0 };
@@ -220,18 +294,57 @@ class Planner {
   private readonly AY = new Float64Array(4);
   private readonly tmpC = { x: 0, y: 0 };
 
-  constructor(b: BoulderDef, assist: number) {
+  constructor(b: BoulderDef, assist: number, prof: WallProfile | null = profileOf(b)) {
     this.b = b;
-    this.prm = makeParams(b.wallAngle, assist, SOLVER.pump);
-    this.reachPrm = makeParams(b.wallAngle, assist, SOLVER.pump);
+    this.prof = prof && !prof.flat ? prof : null;
+    this.prm = makeParams(b.wallAngle, assist, SOLVER.pump, this.prof);
+    this.reachPrm = makeParams(b.wallAngle, assist, SOLVER.pump, this.prof);
     this.handHolds = b.holds.filter(usableByHand);
     this.footHolds = b.holds.filter(usableByFoot);
     const tops = topHolds(b);
     this.topIds = new Set(tops.map((h) => h.id));
     this.topY = tops.length ? Math.max(...tops.map((h) => h.y)) : b.height - 0.35;
-    this.smearOk = b.wallAngle <= SIM.smearMaxAngle;
+    this.topX = tops.length ? tops.reduce((a, h) => a + h.x, 0) / tops.length : 0;
+    this.dynos = b.style === 'dyno';
+    // a traverse: the top well off to the side of the start holds
+    const starts = b.holds.filter((h) => h.role === 'start' && usableByHand(h));
+    if (starts.length && tops.length) {
+      const sx = starts.reduce((a, h) => a + h.x, 0) / starts.length;
+      if (Math.abs(this.topX - sx) > 1.4) this.lateral = 1;
+    }
+    this.smearOk = this.prof ? this.prof.minAngle <= SIM.smearMaxAngle : b.wallAngle <= SIM.smearMaxAngle;
     const q = b.mode === 'rope' ? b.quickdraws ?? [] : [];
     this.anchor = q.length ? q[q.length - 1] : null;
+  }
+
+  /** Wall angle (degrees) of the panel at surface height y. */
+  angleOf(y: number): number {
+    return this.prof ? angleAt(this.prof, y) : this.b.wallAngle;
+  }
+
+  /** Can a foot smear at surface height y (its panel ≤ SIM.smearMaxAngle)? */
+  smearAt(y: number): boolean {
+    return this.prof ? angleAt(this.prof, y) <= SIM.smearMaxAngle : this.smearOk;
+  }
+
+  /**
+   * Folded walls: feet on holds get the technique the live climber would use there (holds.footModeFor,
+   * the sim's rule) for the body in `pose` — hooks on roofs pull instead of pushing. Flat walls keep
+   * pushing feet (the planner's long-standing model).
+   */
+  applyFootModes(contacts: Contacts, pose: Pose): void {
+    const prof = this.prof;
+    if (!prof) return;
+    computeAnchors(pose, this.AX, this.AY);
+    const comY = pose.py + BODY.comT * (pose.cy - pose.py);
+    const bodyAngle = smoothAngleAt(prof, comY);
+    for (let i = 2; i < 4; i++) {
+      const c = contacts[i];
+      if (!c || !c.hold) continue;
+      const wall = Math.max(angleAt(prof, c.y), bodyAngle);
+      const m = footModeFor(c.hold, c.x, c.y, this.AX[i], this.AY[i], pose.px, wall, null);
+      c.mode = m === 'heel' ? FOOT_HEEL : m === 'toe' ? FOOT_TOE : m === 'drop' ? FOOT_DROP : FOOT_PUSH;
+    }
   }
 
   /** Fill this.contacts for a node's slots, optionally without limb `skip`. */
@@ -254,15 +367,16 @@ class Planner {
   }
 
   /** Best settled pose of a full stance (cached). */
-  stance(n: { slots: Slot[]; sx: number[]; sy: number[]; key: string }, seed: Pose | null): { pose: Pose; tension: number; violation: number } {
+  stance(n: { slots: Slot[]; sx: number[]; sy: number[]; key: string }, seed: Pose | null): { pose: Pose; tension: number; violation: number; cth: number; sth: number } {
     const hit = this.stanceCache.get(n.key);
     if (hit) return hit;
     const contacts = this.setContacts(n, -1);
     this.prm.reachLimb = -1;
     const init = seed ?? initialPose(contacts, this.prm, this.tmpPose);
+    if (this.prof) this.applyFootModes(contacts, init);
     const pose: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
     const r = seed ? optimizePose(contacts, this.prm, init, pose, this.ev, 44, true) : optimizePose(contacts, this.prm, init, pose, this.ev, 90);
-    const out = { pose, tension: r.tension, violation: r.violation };
+    const out = { pose, tension: r.tension, violation: r.violation, cth: this.ev.cth, sth: this.ev.sth };
     this.stanceCache.set(n.key, out);
     return out;
   }
@@ -272,6 +386,7 @@ class Planner {
     const hit = this.reachCache.get(cacheKey);
     if (hit) return hit;
     const contacts = this.setContacts(n, li);
+    if (this.prof) this.applyFootModes(contacts, n.pose);
     const prm = this.reachPrm;
     prm.reachLimb = li;
     prm.reachX = tx;
@@ -289,6 +404,7 @@ class Planner {
   heuristic(slots: Slot[]): number {
     let h = 0;
     const target = this.goalY ?? this.topY;
+    if (this.lateral > 0 && this.goalY === null) return this.lateralHeuristic(slots);
     for (let i = 0; i < 2; i++) {
       const s = slots[i];
       const y = s && s !== 'smear' ? s.y : target - 2;
@@ -302,6 +418,35 @@ class Planner {
       if (s && s !== 'smear') fy = Math.max(fy, s.y);
     }
     if (Number.isFinite(fy)) h += Math.max(0, target - 1.45 - fy) / 0.6;
+    return h;
+  }
+
+  /** Traverse heuristic: hand moves left ≈ distance to the top; the feet follow the hands sideways. */
+  lateralHeuristic(slots: Slot[]): number {
+    let h = 0;
+    let hx = 0;
+    let nh = 0;
+    for (let i = 0; i < 2; i++) {
+      const s = slots[i];
+      if (s && s !== 'smear') {
+        hx += s.x;
+        nh++;
+        if (this.topIds.has(s.id)) continue;
+        h += Math.max(0.5, dhypot(this.topX - s.x, this.topY - s.y) / 0.34 + 0.5);
+      } else h += 6;
+    }
+    let fx = 0;
+    let fy = -Infinity;
+    let nf = 0;
+    for (let i = 2; i < 4; i++) {
+      const s = slots[i];
+      if (s && s !== 'smear') {
+        fx += s.x;
+        fy = Math.max(fy, s.y);
+        nf++;
+      }
+    }
+    if (nf && nh) h += Math.max(0, Math.abs(fx / nf - hx / nh) - 0.45) / 0.6 + Math.max(0, this.topY - 1.45 - fy) / 0.6;
     return h;
   }
 
@@ -360,12 +505,16 @@ class Planner {
     const m = n.move!;
     const parent = n.parent!;
     n.move = null;
+    if (m.dyno) return this.evaluateDyno(n, m, m.dyno);
     const r = this.reach(parent, m.li, m.tx, m.ty, m.reachKey);
     if (!r.ok) return false;
     // the sim checks self-clipping where the limb is released, i.e. around the reach pose
     if (!this.clearAt(r.pose, parent, m.li, m.hold, m.tx, m.ty)) return false;
     const st = this.stance(n, r.pose);
-    if (st.violation > 0.004 || st.tension > SOLVER.stanceMax) return false;
+    // right after a caught throw the climber may pass through strenuous stances while the cut limbs go back on
+    const limit = parent.transient ? SOLVER.dynoLandMax : SOLVER.stanceMax;
+    if (st.violation > 0.004 || st.tension > limit) return false;
+    n.transient = !!parent.transient && (st.tension > SOLVER.stanceMax || !n.slots[2] || !n.slots[3]);
     const step: PlanStep = {
       move: { limb: LIMB_IDS[m.li], holdId: m.hold ? m.hold.id : SMEAR_ID },
       moveTension: r.tension,
@@ -384,6 +533,194 @@ class Planner {
     return true;
   }
 
+  private readonly apexPose: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
+
+  /**
+   * A thrown move from n (ClimberSim.throwPlan / launch, same model): the body shift that brings each
+   * throwing hand inside its envelope (+SIM.dynoMargin) with the apex SIM.dynoAimPast past it, the launch
+   * speed that needs against what the legs (their remaining extension) and arms produce, and which other
+   * limbs can't stay on at the apex. null when it isn't a throw (in static reach) or can't be thrown.
+   */
+  throwFrom(n: Node, hands: number[], h: HoldDef): DynoMove | null {
+    const pose = n.pose;
+    computeAnchors(pose, this.AX, this.AY);
+    let ux = pose.cx - pose.px;
+    let uy = pose.cy - pose.py;
+    const ul = dhypot(ux, uy) || 1;
+    ux /= ul;
+    uy /= ul;
+    const both = hands.length === 2;
+    let Dx = 0;
+    let Dy = 0;
+    let beyond = 0;
+    for (const i of hands) {
+      const c = contactPoint(h, i, both, this.tmpC);
+      const en = envEvalOn(this.prof, i, this.AX[i], this.AY[i], ux, uy, c.x, c.y);
+      if (en.excess > SIM.dynoMaxReach) return null;
+      if (en.excess > beyond) beyond = en.excess;
+      const vx = c.x - this.AX[i];
+      const vy = c.y - this.AY[i];
+      const l = dhypot(vx, vy) || 1;
+      const need = en.excess > 0 ? en.excess + SIM.dynoMargin : 0;
+      Dx += (vx / l) * need;
+      Dy += (vy / l) * need;
+    }
+    // within static reach: a normal move does it
+    if (beyond <= SIM.reachTolerance + 0.02) return null;
+    Dx /= hands.length;
+    Dy /= hands.length;
+    const st = this.stanceCache.get(n.key);
+    const cth = st ? st.cth : this.prm.cth;
+    const sth = st ? st.sth : this.prm.sth;
+    const gp = Math.max(0.5, SIM.gravity * cth);
+    const hop = Math.max(Dy + SIM.dynoAimPast, SIM.dynoMinHop, SIM.dynoLateralHop * Math.abs(Dx));
+    const vy = Math.sqrt(2 * gp * hop);
+    const vx = Dx / (vy / gp);
+    // launch speed: legs over their remaining extension (+ arms), as ClimberSim.launchSpeedMax
+    let ext = 0;
+    let nf = 0;
+    for (let i = 2; i < 4; i++) {
+      const sl = n.slots[i];
+      if (!sl) continue;
+      const fx = sl === 'smear' ? n.sx[i] : contactPoint(sl, i, n.slots[i ^ 1] === sl, this.tmpC).x;
+      const fy = sl === 'smear' ? n.sy[i] : this.tmpC.y;
+      ext += Math.max(0, BODY.legMax * 0.97 - dhypot(this.AX[i] - fx, this.AY[i] - fy));
+      nf++;
+    }
+    const legs = nf ? Math.sqrt(2 * SIM.dynoLegAccel * (ext / nf)) * (1 - SIM.dynoSteepLegLoss * Math.max(0, sth)) : 0;
+    let nh = 0;
+    for (let i = 0; i < 2; i++) if (n.slots[i] && n.slots[i] !== 'smear') nh++;
+    const arms = Math.sqrt(2 * SIM.dynoArmAccel * SIM.dynoArmExt * Math.max(nh, 1) * 0.5);
+    const vmax = Math.sqrt(legs * legs + arms * arms);
+    const speed = dhypot(vx, vy);
+    if (speed > vmax * SOLVER.dynoSpeedMargin) return null;
+    const tA = Math.max(0.04, vy / gp);
+    const sx = vx * tA;
+    const sy = vy * tA - 0.5 * gp * tA * tA;
+    let kind: 'deadpoint' | 'dyno' = both ? 'dyno' : 'deadpoint';
+    const cut: number[] = [];
+    if (!both) {
+      // the other hand stays if its arm reaches from the apex, else it lets go too
+      const j = 1 - hands[0];
+      const sl = n.slots[j] as HoldDef;
+      const c = contactPoint(sl, j, false, this.tmpC);
+      if (envEvalOn(this.prof, j, this.AX[j] + sx, this.AY[j] + sy, ux, uy, c.x, c.y).excess > 0.06) {
+        cut.push(j);
+        kind = 'dyno';
+      }
+    }
+    for (let i = 2; i < 4; i++) {
+      const sl = n.slots[i];
+      if (!sl) continue;
+      const fx = sl === 'smear' ? n.sx[i] : contactPoint(sl, i, n.slots[i ^ 1] === sl, this.tmpC).x;
+      const fy = sl === 'smear' ? n.sy[i] : this.tmpC.y;
+      const stay = kind === 'deadpoint' && envEvalOn(this.prof, i, this.AX[i] + sx, this.AY[i] + sy, ux, uy, fx, fy).excess <= 0.03;
+      if (!stay) cut.push(i);
+    }
+    return {
+      hands: hands.slice(),
+      kind,
+      limbs: both ? 'both' : hands[0] === 0 ? 'LH' : 'RH',
+      vx,
+      vy,
+      sx,
+      sy,
+      rise: dhypot(Dx, Dy),
+      speed,
+      vmax,
+      cut,
+    };
+  }
+
+  /**
+   * Evaluate a thrown child: at the apex (the launch pose shifted rigidly) every remaining contact must be
+   * in reach, and each catching hand's peak stress — the static load × (1 + v²/2g·SIM.dynoAbsorb), the arm
+   * absorbing the remaining speed (research 1.1–1.6 BW) — under the catch limit; then the body settles
+   * into the post-catch stance (≤ SOLVER.dynoLandMax).
+   */
+  evaluateDyno(n: Node, m: LazyMove, d: DynoMove): boolean {
+    const parent = n.parent!;
+    const hold = m.hold!;
+    const a = this.apexPose;
+    a.px = parent.pose.px + d.sx;
+    a.py = parent.pose.py + d.sy;
+    a.cx = parent.pose.cx + d.sx;
+    a.cy = parent.pose.cy + d.sy;
+    const contacts = this.setContacts(n, -1);
+    if (this.prof) this.applyFootModes(contacts, a);
+    const prm = this.prm;
+    prm.reachLimb = -1;
+    const ev = evaluateStance(a, contacts, prm, this.ev);
+    if (!ev.feasible) return false;
+    for (let i = 0; i < 4; i++) if (contacts[i] && ev.excess[i] > (i < 2 ? SIM.dynoCatchTol : 0.03)) return false;
+    const v2 = d.vx * d.vx + SIM.dynoGrabVy * SIM.dynoGrabVy;
+    const dyn = 1 + v2 / (2 * SIM.gravity * SIM.dynoAbsorb);
+    let peak = 0;
+    for (const i of d.hands) peak = Math.max(peak, (ev.load[i] * dyn) / Math.max(ev.cap[i], 0.01));
+    if (peak > SIM.dynoCatchStress * SOLVER.dynoCatchMargin) return false;
+    const st = this.stance(n, { px: a.px, py: a.py, cx: a.cx, cy: a.cy });
+    if (st.violation > 0.004 || st.tension > SOLVER.dynoLandMax) return false;
+    const fromH = parent.slots[d.hands[0]];
+    const step: PlanStep = {
+      move: { limb: LIMB_IDS[d.hands[0]], holdId: hold.id, dyno: d.limbs },
+      moveTension: Math.max(parent.tension, peak * 0.75),
+      tension: st.tension,
+      distance: fromH && fromH !== 'smear' ? dhypot(hold.x - fromH.x, hold.y - fromH.y) : d.rise,
+      pose: st.pose,
+      reachPose: parent.pose,
+      dyno: { limbs: d.limbs, kind: d.kind, power: 1, rise: d.rise, speed: d.speed, vmax: d.vmax, peakStress: peak, cut: d.cut.map((i) => LIMB_IDS[i]) },
+    };
+    n.pose = st.pose;
+    n.tension = st.tension;
+    n.step = step;
+    n.transient = st.tension > SOLVER.stanceMax || !n.slots[2] || !n.slots[3] || !n.slots[0] || !n.slots[1];
+    n.g = parent.g + this.moveCost(st.tension, 0.7) + SOLVER.dynoCost;
+    n.f = n.g + SOLVER.heuristicWeight * this.heuristic(n.slots);
+    STEP_NODE.set(step, n);
+    return true;
+  }
+
+  /** Lazy dyno children of n (only when this.dynos): throws to good holds beyond static reach. */
+  expandDynos(n: Node, push: (c: Node) => void, closed: Set<string>): void {
+    const a = n.slots[0];
+    const b = n.slots[1];
+    if (!a || !b || a === 'smear' || b === 'smear') return;
+    if (!n.slots[2] && !n.slots[3]) return; // no campus dynos
+    const maxHandY = Math.max(a.y, b.y);
+    const mx = (a.x + b.x) / 2;
+    for (const h of this.handHolds) {
+      if (h === a || h === b) continue;
+      if (h.y < maxHandY + 0.25) continue;
+      if (dhypot(h.x - mx, h.y - maxHandY) > BODY.armMax + SIM.dynoMaxReach + 0.4) continue;
+      if (!this.topIds.has(h.id) && nominalCapacity(h, true, this.angleOf(h.y)) < SOLVER.dynoMinCap) continue;
+      const tries: number[][] = canMatch(0, h) ? [[0, 1], [0], [1]] : [[0], [1]];
+      for (const hands of tries) {
+        const d = this.throwFrom(n, hands, h);
+        if (!d) continue;
+        const slots = n.slots.slice();
+        for (const i of d.hands) slots[i] = h;
+        for (const i of d.cut) slots[i] = null;
+        const key = slots.map(slotId).join('|');
+        if (closed.has(key)) continue;
+        const g = n.g + 1 + SOLVER.dynoCost;
+        push({
+          slots,
+          sx: n.sx.slice(),
+          sy: n.sy.slice(),
+          key,
+          pose: n.pose,
+          tension: n.tension,
+          g,
+          f: g + SOLVER.heuristicWeight * this.heuristic(slots),
+          parent: n,
+          step: null,
+          depth: n.depth + 1,
+          move: { li: d.hands[0], hold: h, tx: h.x, ty: h.y, fromX: h.x, fromY: h.y, reachKey: '', dyno: d },
+        });
+      }
+    }
+  }
+
   /**
    * Is the target (contact point) of limb li legal from node n as far as anatomy and self-clipping
    * go: inside the limb's envelope seen from the node pose, grown by `slack` (the body still moves
@@ -397,7 +734,7 @@ class Planner {
     const l = dhypot(ux, uy) || 1;
     ux /= l;
     uy /= l;
-    if (envEval(li, this.AX[li], this.AY[li], ux, uy, tx, ty).excess > slack) return false;
+    if (envEvalOn(this.prof, li, this.AX[li], this.AY[li], ux, uy, tx, ty).excess > slack) return false;
     const contacts = this.setContacts(n, li);
     return !placementBlocked(li, tx, ty, hold, contacts, this.AX, this.AY, PLAN_CLEARANCE_MARGIN);
   }
@@ -438,17 +775,22 @@ class Planner {
       if (d > reach) continue;
       let score: number;
       if (hand) {
-        if (h.y < curY - 0.3) continue;
+        if (h.y < curY - (this.lateral > 0 ? 0.45 : 0.3)) continue;
         // matching the other hand's hold is only useful on the top (or a big jug)
         if (n.slots[pair] === h && !this.topIds.has(h.id) && (h.size < 0.09 || !canMatch(li, h))) continue;
-        score = (h.y - curY) * 1.6 + nominalCapacity(h, true, this.b.wallAngle) * 1.2 - d * 0.4;
+        // progress: height gained, or on a traverse the distance gained toward the top
+        const gain =
+          this.lateral > 0 && cur && cur !== 'smear'
+            ? dhypot(this.topX - cur.x, this.topY - cur.y) - dhypot(this.topX - h.x, this.topY - h.y)
+            : h.y - curY;
+        score = gain * 1.6 + nominalCapacity(h, true, this.angleOf(h.y)) * 1.2 - d * 0.4;
         if (this.topIds.has(h.id)) score += 2;
       } else {
         if (h.y > n.pose.py - 0.12) continue;
         if (h.y < maxHandY - 2.15) continue;
         if (n.slots[pair] === h && (h.size < 0.05 || !canMatch(li, h))) continue;
         const ideal = minHandY - 1.2;
-        score = -Math.abs(h.y - ideal) * 1.4 + nominalCapacity(h, false, this.b.wallAngle) * 0.35 + (h.y - curY) * 0.5 - Math.abs(h.x - n.pose.px) * 0.4;
+        score = -Math.abs(h.y - ideal) * 1.4 + nominalCapacity(h, false, this.angleOf(h.y)) * 0.35 + (h.y - curY) * 0.5 - Math.abs(h.x - n.pose.px) * 0.4;
       }
       const cp = contactPoint(h, li, n.slots[pair] === h, this.tmpC);
       if (!this.targetOk(n, li, h, cp.x, cp.y, slack)) continue;
@@ -458,7 +800,7 @@ class Planner {
       const side = li === 2 ? -1 : 1;
       const sx = n.pose.px + side * 0.16;
       const sy = Math.max(0.35, minHandY - 1.25);
-      if (this.targetOk(n, li, null, sx, sy, slack)) out.push({ hold: null, x: sx, y: sy, score: -1.2 });
+      if (this.smearAt(sy) && this.targetOk(n, li, null, sx, sy, slack)) out.push({ hold: null, x: sx, y: sy, score: -1.2 });
     }
     out.sort((a, c) => c.score - a.score);
     if (out.length > SOLVER.candidatesPerLimb) out.length = SOLVER.candidatesPerLimb;
@@ -535,6 +877,7 @@ class Planner {
         });
       }
     }
+    if (this.dynos) this.expandDynos(n, push, closed);
   }
 
   private anchorTmp = { x: 0, y: 0 };
@@ -564,7 +907,8 @@ export class StanceLab {
   private readonly p: Planner;
   private readonly empty = [0, 0, 0, 0];
   private seq = 0;
-  constructor(wallAngle: number, assist = 0) {
+  /** `profile`: panels of a folded wall (BoulderDef.profile) with its surface length, or null for a flat wall. */
+  constructor(wallAngle: number, assist = 0, profile: { panels: readonly WallPanel[]; length: number } | null = null) {
     const b: BoulderDef = {
       id: 'lab',
       name: 'lab',
@@ -572,12 +916,18 @@ export class StanceLab {
       mode: 'boulder',
       wallAngle,
       width: 4.6,
-      height: 4.5,
+      height: profile ? profile.length : 4.5,
       holds: [],
       color: '#fff',
       seed: 0,
     };
-    this.p = new Planner(b, assist);
+    const prof = profile && profile.panels.length > 1 ? makeProfile(profile.panels, wallAngle, profile.length) : null;
+    this.p = new Planner(b, assist, prof && !prof.flat ? prof : null);
+  }
+
+  /** Wall angle (degrees) of the panel at surface height y. */
+  angleAt(y: number): number {
+    return this.p.angleOf(y);
   }
 
   /** Settled pose + tension of a stance; ok when it is within the planner's limits. */
@@ -630,7 +980,7 @@ function startSlots(p: Planner, ids: (string | null)[], b: BoulderDef, pose: Pos
   }
   if (!slots[0] || !slots[1]) return null;
   // Feet without holds smear (same rule as the sim's start placement).
-  if (p.smearOk) {
+  if (p.smearOk && p.smearAt(Math.max(0.45, pose ? pose.py - 0.62 : Math.min((slots[0] as HoldDef).y, (slots[1] as HoldDef).y) - 1.25))) {
     const h0 = slots[0] as HoldDef;
     const h1 = slots[1] as HoldDef;
     const cx = pose ? pose.px : (h0.x + h1.x) / 2;
@@ -908,6 +1258,9 @@ const GRADE_SCORES: readonly number[] = [3.3, 4.1, 5.1, 5.9, 6.6, 7.3, 8.0, 8.5,
 
 export function difficultyMetrics(b: BoulderDef, plan: PlanResult): DifficultyMetrics {
   const byId = new Map(b.holds.map((h) => [h.id, h] as const));
+  const prof = profileOf(b);
+  let angSum = 0;
+  let angN = 0;
   let handMoves = 0;
   let sumMove = 0;
   let maxMove = 0;
@@ -925,7 +1278,10 @@ export function difficultyMetrics(b: BoulderDef, plan: PlanResult): DifficultyMe
       maxMove = Math.max(maxMove, s.distance);
       const h = byId.get(s.move.holdId);
       if (h) {
-        const c = nominalCapacity(h, true, b.wallAngle);
+        const a = prof ? angleAt(prof, h.y) : b.wallAngle;
+        angSum += a;
+        angN++;
+        const c = nominalCapacity(h, true, a);
         capSum += c;
         capN++;
         minCap = Math.min(minCap, c);
@@ -939,7 +1295,9 @@ export function difficultyMetrics(b: BoulderDef, plan: PlanResult): DifficultyMe
   // Raw difficulty: weaker holds, longer moves, steeper wall, more strenuous stances.
   const holdTerm = clamp((0.78 - meanCap) / 0.42, 0, 1.4) * 3.6 + clamp((0.7 - minCap) / 0.45, 0, 1.3) * 1.4;
   const moveTerm = clamp((meanMove - 0.36) / 0.34, -0.3, 1.5) * 2.4 + clamp((maxMove - 0.5) / 0.4, 0, 1.4) * 0.8;
-  const angleTerm = clamp(b.wallAngle / 40, -0.3, 1.1) * 2.2;
+  // the wall the hands actually climb (a folded wall: the mean panel angle under the hand moves)
+  const wallAngle = prof && angN ? angSum / angN : b.wallAngle;
+  const angleTerm = clamp(wallAngle / 40, -0.3, 1.1) * 2.2;
   const tensionTerm = clamp((meanT - 0.3) / 0.4, 0, 1.4) * 1.6 + clamp((worst - 0.45) / 0.45, 0, 1.2) * 1.2;
   const score = holdTerm + moveTerm + angleTerm + tensionTerm;
   return {
@@ -951,7 +1309,7 @@ export function difficultyMetrics(b: BoulderDef, plan: PlanResult): DifficultyMe
     minHandCap: minCap,
     worstTension: worst,
     meanTension: meanT,
-    wallAngle: b.wallAngle,
+    wallAngle,
     score,
   };
 }

@@ -394,6 +394,15 @@ const _cp2 = new THREE.Vector3();
 let segS = 0;
 let segT = 0;
 
+const _ps = new THREE.Vector3();
+/** Distance from point p to segment ab. */
+function pointSegDist(p: THREE.Vector3, a: THREE.Vector3, b: THREE.Vector3): number {
+  _ps.subVectors(b, a);
+  const l2 = _ps.lengthSq();
+  const t = l2 > 1e-12 ? Math.min(1, Math.max(0, (_sr.subVectors(p, a).dot(_ps)) / l2)) : 0;
+  return _sr.copy(a).addScaledVector(_ps, t).distanceTo(p);
+}
+
 /** Closest points between segments p1q1 and p2q2 → _cp1/_cp2, params segS/segT; returns the distance. */
 function segSeg(p1: THREE.Vector3, q1: THREE.Vector3, p2: THREE.Vector3, q2: THREE.Vector3): number {
   _sd1.subVectors(q1, p1);
@@ -445,9 +454,11 @@ export function fitHeadProxies(head: THREE.Object3D, out: Float32Array): number 
   const parent = head.parent;
   if (parent) parent.remove(head);
   head.updateMatrixWorld(true);
-  const groups: { pts: number[]; k: number }[] = [
-    { pts: [], k: 5 },
-    { pts: [], k: 6 },
+  // fur: the skull, snout, ears and beard (the neck tube is left to the body's neck capsule);
+  // keratin / cap: horns, beaks or the cap, with enough spheres to follow a long swept horn closely
+  const groups: { pts: number[]; k: number; pct: number }[] = [
+    { pts: [], k: 6, pct: 0.8 },
+    { pts: [], k: 10, pct: 0.75 },
   ];
   const v = new THREE.Vector3();
   head.traverse((o) => {
@@ -459,6 +470,7 @@ export function fitHeadProxies(head: THREE.Object3D, out: Float32Array): number 
     const step = Math.max(1, Math.floor(pos.count / 2500));
     for (let i = 0; i < pos.count; i += step) {
       v.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld);
+      if (g === groups[0] && v.y < 0.05) continue; // the neck below the jaw
       g.pts.push(v.x, v.y, v.z);
     }
   });
@@ -535,7 +547,8 @@ export function fitHeadProxies(head: THREE.Object3D, out: Float32Array): number 
         C[c * 3 + 2] = acc[c * 4 + 2] / acc[c * 4 + 3];
       }
     }
-    // radius: 88th percentile of the member distances (tips poke out a little, no huge spheres)
+    // radius: a percentile of the member distances (ear tips / brim edges poke out a little; no
+    // spheres fatter than the part they stand for)
     for (let c = 0; c < k; c++) {
       const ds: number[] = [];
       for (let i = 0; i < np; i++) {
@@ -547,7 +560,7 @@ export function fitHeadProxies(head: THREE.Object3D, out: Float32Array): number 
       out[n * 4] = C[c * 3];
       out[n * 4 + 1] = C[c * 3 + 1];
       out[n * 4 + 2] = C[c * 3 + 2];
-      out[n * 4 + 3] = Math.max(0.015, ds[Math.floor(ds.length * 0.88)]);
+      out[n * 4 + 3] = Math.max(0.015, ds[Math.floor(ds.length * g.pct)]);
       n++;
     }
   }
@@ -839,9 +852,9 @@ export class BodyRig {
   private cL1 = 0;
   private cL2 = 0;
   // collision proxies (rig space)
-  private headLocal = new Float32Array(4 * 12);
+  private headLocal = new Float32Array(4 * 16);
   private headN = 0;
-  private headW = new Float32Array(4 * 12);
+  private headW = new Float32Array(4 * 16);
   private chestA = new THREE.Vector3();
   private chestB = new THREE.Vector3();
   private bellyA = new THREE.Vector3();
@@ -855,6 +868,9 @@ export class BodyRig {
   private headAvoid = 0;
   private headAvoidT = 0;
   private headWallPitch = 0;
+  /** Extra head turn / nod that keeps the face out of the arms (damped). */
+  private headArmYaw = 0;
+  private headArmPitch = 0;
   /** Contacts resolved in the last solve (QA counter). */
   contacts = 0;
   /** Limit evaluations / chain solves in the last solve (QA counters). */
@@ -1162,8 +1178,8 @@ export class BodyRig {
         cap0: 0.007,
         cap1: 0.007,
         rows: 2,
-        capRows: 3,
-        cols: 8,
+        capRows: 2,
+        cols: 6,
         sec: () => ({ rx: 0.0072, rz: 0.006 }),
         uvRect: ATLAS_RECTS.blank,
         attrib: attr(REGION.skin, ids.hand, 0, 0.95),
@@ -1187,9 +1203,9 @@ export class BodyRig {
           y1: L,
           cap0: r0 * FR[f] * 0.9,
           cap1: r1 * FR[f],
-          rows: 3,
-          capRows: 3,
-          cols: 10,
+          rows: 2,
+          capRows: 2,
+          cols: 8,
           sec: (y) => {
             const k = y / L;
             const r = (r0 + (r1 - r0) * k) * FR[f];
@@ -2029,10 +2045,73 @@ export class BodyRig {
       }
     }
     this.headWallPitch += (wallTarget - this.headWallPitch) * (dt <= 0 ? 1 : 1 - Math.exp(-dt * 14));
-    _e.set(this.pitch + this.headWallPitch, this.yaw, g.headRoll, 'YXZ');
+    // keep the face (snout, horns, cap brim) out of the arms: a long ibex face swings into an arm when
+    // the head turns to watch a hand reach across. Test the head against both arms as last solved and
+    // take the smallest turn (then nod) that clears them, keeping the side already chosen.
+    let armYaw = 0;
+    let armPitch = 0;
+    if (this.headN > 0) {
+      const p0 = this.pitch + this.headWallPitch;
+      const need = 0.008;
+      const m0 = this.headArmClearance(neck, p0, this.yaw + this.headArmYaw * 0.5, g.headRoll);
+      if (m0 < need) {
+        const pref = this.headArmYaw !== 0 ? Math.sign(this.headArmYaw) : 1;
+        let found = false;
+        for (let k = 1; k <= 6 && !found; k++) {
+          const step = k * 0.17;
+          for (const sg of [pref, -pref]) {
+            const y = this.yaw + sg * step;
+            if (Math.abs(y) > L.headYaw * DEG + 0.25) continue;
+            if (this.headArmClearance(neck, p0, y, g.headRoll) >= need) {
+              armYaw = sg * step;
+              found = true;
+              break;
+            }
+          }
+        }
+        if (!found) {
+          // turning alone cannot clear it (an arm right across the face): nod down past it as well
+          for (const pp of [-0.3, 0.3]) {
+            if (this.headArmClearance(neck, p0 + pp, this.yaw + pref * 0.5, g.headRoll) >= need) {
+              armYaw = pref * 0.5;
+              armPitch = pp;
+              break;
+            }
+          }
+        }
+      }
+    }
+    const ka = dt <= 0 ? 1 : 1 - Math.exp(-dt * 10);
+    this.headArmYaw += (armYaw - this.headArmYaw) * ka;
+    this.headArmPitch += (armPitch - this.headArmPitch) * ka;
+    _e.set(this.pitch + this.headWallPitch + this.headArmPitch, this.yaw + this.headArmYaw, g.headRoll, 'YXZ');
     _q1.setFromEuler(_e);
     neck.quaternion.copy(this.qChest).multiply(_q1);
     this.joints.head.set(0, BODY.neck, 0).applyQuaternion(neck.quaternion).add(neck.position);
+  }
+
+  /**
+   * Smallest clearance between the head spheres (for a head pitch / yaw) and the arms (upper arm and
+   * forearm capsules as last solved), rig space.
+   */
+  private headArmClearance(neck: THREE.Bone, pitch: number, yaw: number, roll: number): number {
+    _e.set(pitch, yaw, roll, 'YXZ');
+    _q1.setFromEuler(_e);
+    _qa.copy(this.qChest).multiply(_q1);
+    const J = this.joints;
+    const H = this.headLocal;
+    let m = Infinity;
+    for (let j = 0; j < this.headN; j++) {
+      this.hs.set(H[j * 4], H[j * 4 + 1], H[j * 4 + 2]).applyQuaternion(_qa).add(neck.position);
+      const r = H[j * 4 + 3];
+      for (let s = 0; s < 2; s++) {
+        const c1 = pointSegDist(this.hs, J.shoulder[s], J.elbow[s]) - r - R_UPPER[1];
+        const c2 = pointSegDist(this.hs, J.elbow[s], J.wrist[s]) - r - R_FORE[0];
+        if (c1 < m) m = c1;
+        if (c2 < m) m = c2;
+      }
+    }
+    return m;
   }
 
   /** Smallest wall clearance of the head spheres for a head pitch (rig space). */
@@ -2210,14 +2289,23 @@ export class BodyRig {
     }
     // limited IK; the ankle range re-orients the foot about the toe (the toe stays on the hold)
     const iters = this.quick ? 1 : 3;
+    let reoriented = false;
     for (let iter = 0; iter < iters; iter++) {
       basisQuat(dir, up, qf);
       if (goal.jointTarget) J.ankle[s].copy(tgt);
       else J.ankle[s].copy(tgt).sub(_t2.copy(this.cToe).applyQuaternion(qf));
       this.stretchK[li] = this.chain(li, Hp, J.ankle[s], this.poleW[li], J.knee[s], this.cOut);
       J.ankle[s].copy(this.cOut);
-      const changed = this.ankleLimit(s);
-      if (!changed || goal.jointTarget) break;
+      reoriented = this.ankleLimit(s);
+      if (!reoriented || goal.jointTarget) break;
+    }
+    if (reoriented && !goal.jointTarget) {
+      // the last pass turned the foot about the toe: put the ankle back behind the toe contact so the
+      // toe stays on its hold / on top of the pad (never dug in by a stale ankle)
+      basisQuat(dir, up, qf);
+      J.ankle[s].copy(tgt).sub(_t2.copy(this.cToe).applyQuaternion(qf));
+      this.stretchK[li] = this.chain(li, Hp, J.ankle[s], this.poleW[li], J.knee[s], this.cOut);
+      J.ankle[s].copy(this.cOut);
     }
     basisQuat(dir, up, qf);
     _t0.copy(this.cToe).applyQuaternion(qf);
@@ -3009,6 +3097,10 @@ export class ClimberModel extends THREE.Group {
   private sStand = 0;
   /** Drop-knee / backstep amount per foot (foot crossed inward of its hip) and the hip turn it drives. */
   private dropK = [0, 0];
+  private dropRaw = [0, 0];
+  /** Heel / toe hook blend per foot (sim footMode) and which kind it is. */
+  private hookK = [0, 0];
+  private hookHeel = [false, false];
   private sDrop = 0;
   /** High step: the hips sit back from the wall and that hip hikes up. */
   private sSit = 0;
@@ -3273,14 +3365,26 @@ export class ClimberModel extends THREE.Group {
     let yaw = state.bodyYaw;
     if (celebrating) yaw += 0.34 * sstep(0.1, 0.6, ct); // open the right side toward the camera
     this.sYaw += (yaw - this.sYaw) * (snap ? 1 : dampK(10, d));
-    // drop-knee / backstep: a foot crossed inward of its hip turns that hip into the wall
+    // drop knee / backstep: the knee turns in and that hip turns into the wall. The sim says when
+    // (footMode 'drop'); without it, only a foot crossing the body's midline counts, and only one
+    // leg at a time (matched feet under the body keep both knees out)
     let dk = 0;
     for (let s = 0; s < 2; s++) {
       const L = state.limbs[FOOT_IDS[s]];
       const on = (L.holdId !== null || L.smearing) && onWall;
-      const across = -((L.pos.x - L.anchor.x) * bRx + (L.pos.y - L.anchor.y) * bRy) * SIGN[s];
-      const k = on ? sstep(0.0, 0.26, across) : 0;
-      this.dropK[s] += (k - this.dropK[s]) * (snap ? 1 : dampK(8, d));
+      let k = 0;
+      if (on) {
+        if (L.footMode !== undefined) k = L.footMode === 'drop' ? 1 : 0;
+        else {
+          const across = -((L.pos.x - state.pelvis.x) * bRx + (L.pos.y - state.pelvis.y) * bRy) * SIGN[s];
+          k = sstep(0.03, 0.2, across);
+        }
+      }
+      this.dropRaw[s] = k;
+    }
+    if (this.dropRaw[0] > 0 && this.dropRaw[1] > 0) this.dropRaw[this.dropRaw[0] >= this.dropRaw[1] ? 1 : 0] = 0;
+    for (let s = 0; s < 2; s++) {
+      this.dropK[s] += (this.dropRaw[s] - this.dropK[s]) * (snap ? 1 : dampK(8, d));
       dk -= SIGN[s] * this.dropK[s] * 0.42;
     }
     this.sDrop += (dk - this.sDrop) * (snap ? 1 : dampK(8, d));
@@ -3510,13 +3614,20 @@ export class ClimberModel extends THREE.Group {
     let depth = L.depth;
     if (L.holdId && info) depth = Math.max(L.depth, info.depth * 0.55 + 0.008);
     else if (L.smearing) depth = 0.012;
+    {
+      const want = L.holdId !== null && (L.footMode === 'heel' || L.footMode === 'toe') && (ph === 'climbing' || ph === 'idle' || ph === 'topped') ? 1 : 0;
+      if (want) this.hookHeel[s] = L.footMode === 'heel';
+      this.hookK[s] += (want - this.hookK[s]) * (snap ? 1 : dampK(10, d));
+    }
     frame.toWorld(L.pos, depth, this.v0);
     fg.jointTarget = false;
     fg.autoPoint = true;
     const dir = fg.dir;
     const up = fg.up;
     const pole = fg.pole;
-    let mode: 'hold' | 'drag' | 'dangle' | 'stand' | 'wall' = L.holdId || L.smearing ? 'hold' : L.dragging ? 'drag' : 'dangle';
+    const fm = L.footMode;
+    // a flag (no hold: the leg out to the side as a counterweight) is posed like a reaching foot
+    let mode: 'hold' | 'drag' | 'dangle' | 'stand' | 'wall' = L.holdId || L.smearing ? 'hold' : L.dragging || fm === 'flag' ? 'drag' : 'dangle';
 
     if (ph === 'landed') {
       mode = 'stand';
@@ -3579,6 +3690,32 @@ export class ClimberModel extends THREE.Group {
         this.v2.copy(Rw).multiplyScalar(-side * 0.45).addScaledVector(Uw, -0.7).addScaledVector(Nw, 0.35).normalize();
         pole.normalize().lerp(this.v2, dkk);
       }
+      // hooks (sim footMode): the foot turns so the heel / the top of the toes takes the hold
+      const hk = this.hookK[s];
+      if (hk > 0.001 && mode === 'hold') {
+        const heel = this.hookHeel[s];
+        if (heel) {
+          // heel hook: toes out along the wall and a little away from it, sole down onto the hold,
+          // knee bent up and out
+          this.v2.copy(Rw).multiplyScalar(side * 0.8).addScaledVector(Nw, 0.45).addScaledVector(Uw, 0.2).normalize();
+          this.v3.copy(Uw);
+        } else {
+          // toe hook: toes toward the hold and into the wall, the instep pressing up under it
+          const sx = L.pos.x - L.anchor.x >= 0 ? 1 : -1;
+          this.v2.copy(Rw).multiplyScalar(sx * 0.85).addScaledVector(Nw, -0.4).normalize();
+          this.v3.copy(Uw).addScaledVector(Nw, 0.2);
+        }
+        dir.lerp(this.v2, hk).normalize();
+        up.lerp(this.v3, hk);
+        up.addScaledVector(dir, -up.dot(dir)).normalize();
+        this.v2.copy(Rw).multiplyScalar(side * (heel ? 0.45 : 0.6)).addScaledVector(Uw, heel ? 0.75 : 0.25).addScaledVector(Nw, 0.5).normalize();
+        pole.normalize().lerp(this.v2, hk);
+        // the target is the toe contact: shift it so the heel (back of the shoe) or the toe box top
+        // sits on the hold instead
+        if (heel) fg.target.addScaledVector(dir, 0.234 * hk).addScaledVector(up, -0.016 * hk);
+        else fg.target.addScaledVector(dir, 0.018 * hk).addScaledVector(up, -0.036 * hk);
+        fg.autoPoint = false;
+      }
     } else if (mode === 'drag') {
       dir.copy(Nw).multiplyScalar(-0.85).addScaledVector(Uw, -0.15).addScaledVector(Rw, side * 0.25).normalize();
       up.copy(Uw).addScaledVector(dir, -Uw.dot(dir)).normalize();
@@ -3590,6 +3727,11 @@ export class ClimberModel extends THREE.Group {
       dir.applyQuaternion(this.q);
       up.copy(WORLD_UP);
       pole.copy(this.Nh).multiplyScalar(-0.75).addScaledVector(g.pelvisRight, side * (0.55 - 0.3 * st)).addScaledVector(WORLD_UP, 0.1);
+      // stand on the toe contact (flat foot: same ankle), so in a deep landing crouch the ankle range
+      // lifts the heel instead of tipping the toes into the pad
+      fg.target.addScaledVector(dir, 0.168).addScaledVector(up, -0.066);
+      fg.jointTarget = false;
+      fg.autoPoint = false;
     } else {
       // dangling: toes point down, knees a touch forward
       dir.copy(Nw).multiplyScalar(-0.45).addScaledVector(WORLD_UP, -0.9).addScaledVector(Rw, side * 0.12).normalize();
