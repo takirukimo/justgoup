@@ -28,6 +28,16 @@ import { RopeMesh } from './rope-mesh';
 import { renderPortrait, resetPortraitEnvironment } from './portrait';
 import { disposeHoldCache } from './holds';
 
+/** Optional fx beyond RendererAPI['fx'] (the app calls them when present). */
+export interface GameRendererFx {
+  /** A hand dipping into the chalk bag (p = the chalking hand / bag, wall-local). */
+  chalkDip(p: Vec2, intensity?: number): void;
+  /** The chalk slap of a hand catching a hold after a dyno (+ a weighted camera sag). */
+  catchBurst(p: Vec2, intensity?: number): void;
+  /** Fingers skidding off a missed throw's target hold (the renderer also detects misses itself). */
+  missScuff(p: Vec2, intensity?: number): void;
+}
+
 export interface RendererOptions {
   /** Initial quality (default: detectQuality()). */
   quality?: QualityLevel;
@@ -142,7 +152,10 @@ export class GameRenderer implements RendererAPI {
   private plane = new THREE.Plane();
   private ndc2 = new THREE.Vector2();
 
-  readonly fx: RendererAPI['fx'];
+  readonly fx: RendererAPI['fx'] & GameRendererFx;
+  /** Flight being watched for a miss (dyno / deadpoint limbs + target hold), and the last miss puff time. */
+  private watchFlight: { limbs: LimbSnapshot['id'][]; holdId: string } | null = null;
+  private lastMissAt = -10;
 
   constructor(canvas: HTMLCanvasElement, opts: RendererOptions = {}) {
     this.canvas = canvas;
@@ -178,12 +191,24 @@ export class GameRenderer implements RendererAPI {
     this.scene.add(this.wall.group, this.highlights.group, this.fxSys.points, this.contact.mesh);
     this.setupLights();
 
-    this.fx = {
+    const fx: RendererAPI['fx'] & GameRendererFx = {
       chalkPuff: (p, intensity) => this.fxSys.chalkPuff(p, intensity ?? 1),
       dust: (p, intensity) => this.fxSys.dust(p, intensity ?? 1),
       confetti: (p) => this.fxSys.confetti(p),
       cameraShake: (amount) => this.rig.addShake(clamp(amount, 0, 1)),
+      chalkDip: (p, intensity) => this.chalkDip(p, intensity ?? 0.7),
+      catchBurst: (p, intensity) => {
+        const k = intensity ?? 1;
+        this.fxSys.catchBurst(p, k);
+        // the arms take the body's weight: the view sags and springs back
+        this.rig.addSag(0.35 + 0.45 * clamp(k, 0, 1.5));
+      },
+      missScuff: (p, intensity) => {
+        this.lastMissAt = this.time;
+        this.fxSys.missScuff(p, intensity ?? 1);
+      },
     };
+    this.fx = fx;
   }
 
   // ───────────────────────────── lifecycle ─────────────────────────────
@@ -446,7 +471,41 @@ export class GameRenderer implements RendererAPI {
     if (this.climber) this.climber.visible = v;
   }
 
+  /** Chalk dip puff out of the bag at the chalking hand (world), else at p in front of the hips. */
+  private chalkDip(p: Vec2, intensity: number): void {
+    const st = this.state;
+    if (this.climber && st) {
+      for (const id of ['LH', 'RH'] as const) {
+        if (!st.limbs[id].chalking) continue;
+        this.climber.getLimbWorld(id, this.v);
+        this.fxSys.chalkDipAt(this.v, intensity);
+        return;
+      }
+    }
+    this.wallFrame.toWorldXYZ(p.x, p.y, st ? st.pelvisDepth + 0.05 : 0.35, this.v);
+    this.fxSys.chalkDipAt(this.v, intensity);
+  }
+
+  /** Dyno / deadpoint misses: when a flight ends with a thrown hand not on its target, scuff the hold. */
+  private watchMisses(state: ClimberState): void {
+    const f = state.flight;
+    if (f && f.limbs.length) {
+      this.watchFlight = { limbs: f.limbs.slice(), holdId: f.holdId };
+      return;
+    }
+    const w = this.watchFlight;
+    if (!w) return;
+    this.watchFlight = null;
+    const missed = w.limbs.some((l) => (l === 'LH' || l === 'RH') && state.limbs[l].holdId !== w.holdId);
+    const h = this.wall.holds.holds.get(w.holdId);
+    if (missed && h && this.time - this.lastMissAt > 0.4) {
+      this.lastMissAt = this.time;
+      this.fxSys.missScuff({ x: h.x, y: h.y }, 1);
+    }
+  }
+
   updateClimber(state: ClimberState, dt: number): void {
+    if (this.state !== state || dt > 0) this.watchMisses(state);
     this.state = state;
     // folded walls: the body frame (wall up / normal the climber poses against) is the wall where the climber is
     this.wallFrame.setBodyY((state.pelvis.y + state.chest.y) / 2);

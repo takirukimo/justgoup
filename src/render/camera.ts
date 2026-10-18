@@ -347,6 +347,17 @@ export class CameraRig {
     this.trauma = clamp(this.trauma + amount, 0, 1);
   }
 
+  /**
+   * A weighted jolt: the view drops by ~`amount`·9 cm and springs back (a dyno catch loading the
+   * arms, a hard landing). Underdamped so it reads as weight, not as noise.
+   */
+  addSag(amount: number): void {
+    this.sagV -= clamp(amount, 0, 1.5) * 0.85;
+  }
+
+  private sagX = 0;
+  private sagV = 0;
+
   setAspect(aspect: number): void {
     this.camera.aspect = aspect;
     this.camera.updateProjectionMatrix();
@@ -1063,13 +1074,18 @@ export class CameraRig {
       this.roll.step(this.tRoll, 0.6, d);
     }
 
+    // weighted sag (catch jolt): an underdamped spring on the view height
+    this.sagV += (-90 * this.sagX - 9 * this.sagV) * d;
+    this.sagX += this.sagV * d;
+    if (Math.abs(this.sagX) < 1e-5 && Math.abs(this.sagV) < 1e-4) this.sagX = this.sagV = 0;
+
     // shake: transient trauma² + continuous tremor from the climber
     this.trauma = Math.max(0, this.trauma - d * 1.3);
     const shake = this.trauma * this.trauma;
     const cont = this.continuousShake;
     const st = this.time * 22;
     const amp = shake * 0.07 + cont * 0.012;
-    this.shakeOff.set(noise1(st, 1.3) * amp, noise1(st, 7.1) * amp, noise1(st, 3.7) * amp * 0.5);
+    this.shakeOff.set(noise1(st, 1.3) * amp, noise1(st, 7.1) * amp + this.sagX, noise1(st, 3.7) * amp * 0.5);
 
     const cam = this.camera;
     if (this.debugView) {

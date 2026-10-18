@@ -86,6 +86,7 @@ export class FxSystem {
   private up = new THREE.Vector3();
   private nrm = new THREE.Vector3();
   private tmpC = new THREE.Color();
+  private tmpC2 = new THREE.Color();
   private dynAttrs: THREE.BufferAttribute[] = [];
 
   constructor(
@@ -193,6 +194,105 @@ export class FxSystem {
         vx, vy, vz,
         this.rng.range(0.8, 1.6), this.rng.range(0.025, 0.05), this.rng.range(0.12, 0.22) * Math.sqrt(k),
         this.rng.range(0.35, 0.6), 2.4, -0.12, this.tmpC, 0,
+      );
+    }
+  }
+
+  /**
+   * A hand dipping into the chalk bag (world position of the bag mouth / hand): a small dense puff
+   * rising out of the bag, a little cloud that lingers, and a few motes sifting down.
+   */
+  chalkDipAt(w: THREE.Vector3, intensity = 0.7): void {
+    const k = Math.max(0.2, Math.min(1.6, intensity));
+    const count = Math.round(16 * k);
+    for (let i = 0; i < count; i++) {
+      const a = this.rng.range(0, Math.PI * 2);
+      const sp = this.rng.range(0.05, 0.28) * k;
+      this.tmpC.copy(this.chalk).multiplyScalar(this.rng.range(0.92, 1.06));
+      this.spawn(
+        w.x + this.rng.range(-0.02, 0.02), w.y + this.rng.range(0, 0.03), w.z + this.rng.range(-0.02, 0.02),
+        Math.cos(a) * sp, this.rng.range(0.12, 0.45) * k, Math.sin(a) * sp,
+        this.rng.range(0.9, 1.9), this.rng.range(0.02, 0.04), this.rng.range(0.09, 0.17) * Math.sqrt(k),
+        this.rng.range(0.4, 0.62), 3.2, -0.05, this.tmpC, 0,
+      );
+    }
+    for (let i = 0; i < Math.round(6 * k); i++) {
+      this.tmpC.copy(this.chalk);
+      this.spawn(
+        w.x + this.rng.range(-0.04, 0.04), w.y, w.z + this.rng.range(-0.04, 0.04),
+        this.rng.range(-0.08, 0.08), this.rng.range(-0.05, 0.12), this.rng.range(-0.08, 0.08),
+        this.rng.range(1.2, 2.0), 0.008, 0.012, 0.8, 1.4, -0.9, this.tmpC, 1,
+      );
+    }
+  }
+
+  /**
+   * The slap of a hand catching a hold after a dyno: a sharp ring of chalk thrown out along the wall
+   * around the hand, a puff off the wall and a few chalk flecks dropping.
+   */
+  catchBurst(p: Vec2, intensity = 1): void {
+    const k = Math.max(0.3, Math.min(2, intensity));
+    const f = this.frame;
+    const base = f.toWorldXYZ(p.x, p.y, 0.05, this.tmp);
+    const bx = base.x, by = base.y, bz = base.z;
+    const up = f.upAt(p.y, this.up);
+    const nrm = f.normalAt(p.y, this.nrm);
+    const ring = Math.round(22 * k);
+    for (let i = 0; i < ring; i++) {
+      const a = (i / ring) * Math.PI * 2 + this.rng.range(-0.1, 0.1);
+      const sp = this.rng.range(0.9, 1.6) * k;
+      const out = this.rng.range(0.1, 0.35);
+      this.tmpC.copy(this.chalk).multiplyScalar(this.rng.range(0.94, 1.06));
+      this.spawn(
+        bx, by, bz,
+        f.right.x * Math.cos(a) * sp + up.x * Math.sin(a) * sp + nrm.x * out,
+        f.right.y * Math.cos(a) * sp + up.y * Math.sin(a) * sp + nrm.y * out,
+        f.right.z * Math.cos(a) * sp + up.z * Math.sin(a) * sp + nrm.z * out,
+        this.rng.range(0.5, 0.95), this.rng.range(0.02, 0.035), this.rng.range(0.1, 0.18),
+        this.rng.range(0.45, 0.7), 6.5, -0.1, this.tmpC, 0,
+      );
+    }
+    this.chalkPuff(p, 0.7 * k, 0.07);
+    for (let i = 0; i < Math.round(8 * k); i++) {
+      this.tmpC.copy(this.chalk);
+      this.spawn(
+        bx + this.rng.range(-0.04, 0.04), by, bz,
+        this.rng.range(-0.3, 0.3) + nrm.x * 0.3, this.rng.range(0, 0.4), this.rng.range(-0.3, 0.3) + nrm.z * 0.4,
+        this.rng.range(0.9, 1.6), 0.01, 0.014, 0.9, 1.2, -3.2, this.tmpC, 1,
+      );
+    }
+  }
+
+  /**
+   * A missed throw: the fingers skid off the hold — a streak of chalk dust smeared down the wall
+   * under it and a pale cloud falling away with the climber.
+   */
+  missScuff(p: Vec2, intensity = 1): void {
+    const k = Math.max(0.3, Math.min(2, intensity));
+    const f = this.frame;
+    const up = f.upAt(p.y, this.up);
+    const nrm = f.normalAt(p.y, this.nrm);
+    const dustC = this.tmpC2.set('#c9c4ba');
+    const streak = Math.round(20 * k);
+    for (let i = 0; i < streak; i++) {
+      // a downward streak hugging the wall under the hold
+      const t = this.rng.next();
+      const base = f.toWorldXYZ(p.x + this.rng.range(-0.05, 0.05), p.y - t * 0.22, 0.03 + this.rng.range(0, 0.03), this.tmp);
+      this.tmpC.copy(i % 3 ? this.chalk : dustC).multiplyScalar(this.rng.range(0.85, 1.02));
+      this.spawn(
+        base.x, base.y, base.z,
+        -up.x * this.rng.range(0.2, 0.7) + nrm.x * 0.12, -up.y * this.rng.range(0.2, 0.7) + nrm.y * 0.12 - 0.1, -up.z * this.rng.range(0.2, 0.7) + nrm.z * 0.12,
+        this.rng.range(0.7, 1.4), this.rng.range(0.025, 0.045), this.rng.range(0.1, 0.2),
+        this.rng.range(0.32, 0.5), 2.6, -0.6, this.tmpC, 0,
+      );
+    }
+    for (let i = 0; i < Math.round(10 * k); i++) {
+      const base = f.toWorldXYZ(p.x, p.y, 0.05, this.tmp);
+      this.tmpC.copy(this.chalk);
+      this.spawn(
+        base.x + this.rng.range(-0.05, 0.05), base.y, base.z,
+        this.rng.range(-0.35, 0.35) + nrm.x * 0.5, this.rng.range(-0.2, 0.3), this.rng.range(-0.35, 0.35) + nrm.z * 0.5,
+        this.rng.range(1.0, 1.8), 0.009, 0.013, 0.9, 1.0, -4, this.tmpC, 1,
       );
     }
   }
