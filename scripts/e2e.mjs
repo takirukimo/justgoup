@@ -363,7 +363,7 @@ if (want('sendtrain')) {
   await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'climb start', 60000);
   await page.waitForTimeout(600);
   await shot('climbing');
-  const b = await page.evaluate(() => ({ name: window.__jgu.sim.boulder.name, grade: window.__jgu.sim.boulder.grade, angle: window.__jgu.sim.boulder.wallAngle }));
+  const b = await page.evaluate(() => ({ id: window.__jgu.sim.boulder.id, name: window.__jgu.sim.boulder.name, grade: window.__jgu.sim.boulder.grade, angle: window.__jgu.sim.boulder.wallAngle }));
   log(`boulder ${b.name} V${b.grade} ${b.angle}°`);
   let midShot = false;
   const sent = await autoClimb({
@@ -398,7 +398,7 @@ if (want('sendtrain')) {
   await veilClear();
   await page.waitForTimeout(1200);
   const pv2 = await page.evaluate(() => document.querySelector('#ui')?.textContent ?? '');
-  ok(/BOULDER 02/.test(pv2), 'NEXT BOULDER opens boulder 02 of the run');
+  ok(/STREAK ×1/.test(pv2) && (await page.evaluate(() => window.__jgu.app.activeSession?.boulder.id)) !== b.id, 'NEXT BOULDER opens the next problem of the run (streak ×1)');
   await shot('preview-boulder-02');
   await tap('.pv-hit', 'TAP TO START');
   await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'climb start (02)', 60000);
@@ -413,7 +413,7 @@ if (want('sendtrain')) {
   await tap('.hud-eye', 'LOOK');
   await page.waitForTimeout(400);
   ok((await page.evaluate(() => window.__jgu.renderer.cameraMode)) === 'preview', 'LOOK switches to the route overview');
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(6000);
   await shot('overview');
   await tap('.hud-eye', 'LOOK');
   await page.waitForTimeout(400);
