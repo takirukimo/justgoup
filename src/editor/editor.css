@@ -857,7 +857,7 @@
   color: var(--c-chalk);
 }
 .ed-angle-w {
-  color: var(--c-signal);
+  color: var(--c-signal-ink);
 }
 .ed-angle-slider {
   flex: 1;

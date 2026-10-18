@@ -196,7 +196,8 @@ export function createResults(ctx: UICtx, props: P): ScreenView<P> {
       }
       const t0 = performance.now();
       const step = (now: number): void => {
-        const t = Math.min(1, (now - t0) / dur);
+        // rAF timestamps are the frame's start and can precede t0: clamp, or the first frame flashes a negative number
+        const t = Math.min(1, Math.max(0, (now - t0) / dur));
         target.textContent = fmtInt(to * easeOut(t));
         if (t < 1) raf = requestAnimationFrame(step);
         else resolve();
