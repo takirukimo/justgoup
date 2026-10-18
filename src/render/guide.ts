@@ -33,6 +33,10 @@ const UPV = new THREE.Vector3(0, 1, 0);
 const ANKLE = 0.078;
 
 const dampK = (lambda: number, dt: number): number => (dt <= 0 ? 1 : 1 - Math.exp(-lambda * dt));
+const sstep01 = (e0: number, e1: number, x: number): number => {
+  const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+};
 
 interface HandPose {
   wrist: THREE.Vector3;
@@ -85,8 +89,12 @@ export class GuideModel extends THREE.Group {
   private poseT = 0;
   private pose: GuidePose = 'idle';
   private yaw = 0;
+  /** Chest twist toward the look target (radians about up, damped) and the lean back to look up. */
+  private twist = 0;
+  private lean = 0;
   private initialized = false;
   private blinkT = 1.5;
+  private hasLook = false;
   // guide frame
   private O = new THREE.Vector3();
   private F = new THREE.Vector3();
@@ -132,7 +140,10 @@ export class GuideModel extends THREE.Group {
     let target: number;
     if (g.pose === 'belay') target = toLook;
     else if (g.pose === 'point') target = toLook * 0.55;
-    else target = (g.lookAt ? toLook : 0) * 0.3 + (g.x < 0 ? 0.28 : -0.28);
+    else if (g.lookAt && (g.pose === 'idle' || g.pose === 'think')) {
+      // watching someone: the hips turn most of the way, never past a 3/4 view from the camera side
+      target = Math.max(-1.1, Math.min(1.1, toLook * 0.62));
+    } else target = (g.lookAt ? toLook : 0) * 0.3 + (g.x < 0 ? 0.28 : -0.28);
     // shortest-path damping
     let diff = target - this.yaw;
     while (diff > Math.PI) diff -= Math.PI * 2;
@@ -140,7 +151,22 @@ export class GuideModel extends THREE.Group {
     this.yaw += diff * (snap ? 1 : dampK(4, d));
     this.F.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     this.R.crossVectors(this.F, UPV).normalize();
+    // the chest turns the rest of the way toward the look target (spine twist, clamped), and the
+    // torso leans back a little to look up at a climber on the wall
+    let tw = 0;
+    let up = 0;
+    if (g.lookAt && (g.pose === 'idle' || g.pose === 'think' || g.pose === 'point' || g.pose === 'belay')) {
+      let dy = toLook - this.yaw;
+      while (dy > Math.PI) dy -= Math.PI * 2;
+      while (dy < -Math.PI) dy += Math.PI * 2;
+      tw = Math.max(-0.45, Math.min(0.45, dy * 0.7));
+      const horiz = Math.hypot(this.v0.x, this.v0.z);
+      up = Math.max(0, Math.min(1, (Math.atan2(this.lookW.y - (pad + 1.6), Math.max(0.3, horiz)) - 0.15) / 0.8));
+    }
+    this.twist += (tw - this.twist) * (snap ? 1 : dampK(3.5, d));
+    this.lean += (up - this.lean) * (snap ? 1 : dampK(2.5, d));
 
+    this.hasLook = !!g.lookAt;
     this.computePose(g.pose);
     this.blendIntoGoal(snap, d);
 
@@ -187,8 +213,8 @@ export class GuideModel extends THREE.Group {
       front = 0.12;
       lean = -0.02;
     }
-    this.at(T.pelvis, shift, 0.925 + bob, 0);
-    this.at(T.chest, shift * 0.4, 0.925 + bob + 0.5, lean);
+    this.at(T.pelvis, shift, 0.925 + bob, this.lean * 0.012);
+    this.at(T.chest, shift * 0.4, 0.925 + bob + 0.5 - this.lean * 0.006, lean - this.lean * 0.045);
     for (let s = 0; s < 2; s++) {
       const sg = SIGN[s];
       // belay: left foot forward
@@ -218,10 +244,15 @@ export class GuideModel extends THREE.Group {
     const Rh = T.hands[1];
     switch (pose) {
       case 'idle': {
-        // left hand on the hip, occasional look around
+        // left hand on the hip; watching the look target (a slow, small drift keeps it alive), or a
+        // look around now and then when nobody is being watched
         this.handOnHip(L, 0);
-        const glance = Math.sin(t * 0.31) > 0.75 ? 1 : 0;
-        if (glance) T.look.addScaledVector(this.R, 1.2).addScaledVector(UPV, 0.3);
+        if (this.hasLook) {
+          T.look.addScaledVector(this.R, Math.sin(t * 0.27) * 0.08).addScaledVector(UPV, Math.sin(t * 0.19 + 1) * 0.05);
+        } else {
+          const glance = sstep01(0.6, 0.85, Math.sin(t * 0.31));
+          T.look.addScaledVector(this.R, 1.2 * glance).addScaledVector(UPV, 0.3 * glance);
+        }
         T.roll = Math.sin(t * 0.4) * 0.05;
         break;
       }
@@ -347,7 +378,7 @@ export class GuideModel extends THREE.Group {
     g.pelvis.lerp(T.pelvis, snap ? 1 : dampK(10, d));
     g.chest.lerp(T.chest, snap ? 1 : dampK(10, d));
     g.pelvisRight.copy(this.R);
-    g.chestRight.copy(this.R);
+    g.chestRight.copy(this.R).applyAxisAngle(UPV, this.twist);
     // self-collision escapes toward the guide's front (no wall); feet stay planted on the mats
     g.wall = false;
     g.away.copy(this.F);

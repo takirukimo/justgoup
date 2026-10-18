@@ -212,7 +212,7 @@ function colorwaysView(): void {
   applyCam([0, 1.3, 8.6, 0, 1.0, 0, 34]);
 }
 
-const guides: { m: GuideModel; pose: GuidePose; x: number }[] = [];
+const guides: { m: GuideModel; pose: GuidePose; x: number; lookAt?: { x: number; y: number }; depth?: number }[] = [];
 const gframe = new WallFrame(0);
 function guideView(): void {
   floor();
@@ -231,6 +231,18 @@ function guideView(): void {
   studioLights(new THREE.Vector3(0, 1, 1.5));
   const wide = poses.length > 1;
   applyCam(wide ? [0, 1.3, 9.5, 0, 1.0, 1.5, 34] : [0.3, 1.45, 4.2, 0, 1.15, 1.5, 30]);
+}
+
+/** Home screen: the climber steady on holds ~2 m up, Steini on the mats watching his chest. */
+function homeView(): void {
+  poseScene = buildPoseScene(scene, ['rest'], num('angle', 0));
+  const st = poseScene.climbers[0];
+  const g = new GuideModel();
+  scene.add(g);
+  const chest = { x: st.ox + 0.02, y: 2.55 };
+  guides.push({ m: g, pose: 'idle', x: num('gx', -1.15), lookAt: chest, depth: num('gd', 1.7) });
+  studioLights(new THREE.Vector3(0, 1.6, 0.8));
+  applyCam([0.4, 1.25, 6.6, -0.45, 1.45, 0.6, 46]);
 }
 
 function portraitsView(): void {
@@ -277,6 +289,7 @@ else if (view === 'body') bodyView();
 else if (view === 'guide') guideView();
 else if (view === 'colorways') colorwaysView();
 else if (view === 'tees') teesView();
+else if (view === 'home') homeView();
 else if (view === 'head') headsView((qs.get('id') ?? 'ibex') as HeadId);
 else if (view === 'ref') refHead((qs.get('id') ?? 'ibex') as HeadId);
 
@@ -290,7 +303,7 @@ function tick(now: number): void {
   const blink = qs.has('blink') ? num('blink', 0) : Math.max(0, 1 - Math.abs(((t % 3.2) - 0.1) / 0.08));
   for (const h of heads) setHeadBlink(h, blink);
   if (poseScene && (freeze === null || qs.get('step') === '1')) poseScene.tick(freeze === null ? dt : 1 / 60, t);
-  for (const g of guides) g.m.setState({ x: g.x, depth: 1.5, pose: g.pose, lookAt: g.pose === 'belay' ? { x: g.x + 0.3, y: 4 } : { x: g.x + 1.2, y: 2.2 } }, gframe, freeze !== null ? (t === freeze && !(g.m as unknown as { initialized: boolean }).initialized ? 0 : 1 / 60) : dt);
+  for (const g of guides) g.m.setState({ x: g.x, depth: g.depth ?? 1.5, pose: g.pose, lookAt: g.lookAt ?? (g.pose === 'belay' ? { x: g.x + 0.3, y: 4 } : { x: g.x + 1.2, y: 2.2 }) }, gframe, freeze !== null ? (t === freeze && !(g.m as unknown as { initialized: boolean }).initialized ? 0 : 1 / 60) : dt);
   gl.render(scene, camera);
   // labels
   for (const el of Array.from(labels.children) as (HTMLDivElement & { anchor?: THREE.Vector3 })[]) {

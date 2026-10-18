@@ -11,7 +11,7 @@ import { ClimberModel } from '../src/render/climber';
 import { RopeMesh } from '../src/render/rope-mesh';
 import { WallFrame } from '../src/render/wall-frame';
 
-export type PoseName = 'climb' | 'reach' | 'frog' | 'shake' | 'falling' | 'landed' | 'hanging' | 'topped';
+export type PoseName = 'climb' | 'reach' | 'frog' | 'shake' | 'falling' | 'landed' | 'hanging' | 'topped' | 'rest';
 export const POSES: PoseName[] = ['climb', 'reach', 'frog', 'shake', 'falling', 'landed', 'hanging', 'topped'];
 
 function limb(id: LimbId, pos: Vec2, anchor: Vec2, depth: number, extra: Partial<LimbSnapshot> = {}): LimbSnapshot {
@@ -93,6 +93,18 @@ export function poseState(name: PoseName, ox: number, t: number): ClimberState {
       lf = { x: -0.12, y: 1.4 };
       rf = { x: 0.12, y: 1.4 };
       for (const id of ['LH', 'RH', 'LF', 'RF'] as LimbId[]) ex[id] = { holdId: null, depth: 0.5 };
+      break;
+    case 'rest':
+      // home screen: steady on good holds ~2 m up the wall, calm (preview / idle phase)
+      phase = 'idle';
+      pelvis = { x: 0, y: 2.05 };
+      chest = { x: 0.02, y: 2.55 };
+      lh = { x: -0.28, y: 2.84 };
+      rh = { x: 0.27, y: 2.93 };
+      lf = { x: -0.24, y: 1.33 };
+      rf = { x: 0.27, y: 1.45 };
+      pd = 0.24;
+      tension = 0.15;
       break;
     case 'topped':
       phase = 'topped';

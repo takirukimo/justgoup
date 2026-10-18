@@ -3013,6 +3013,8 @@ export class ClimberModel extends THREE.Group {
   /** High step: the hips sit back from the wall and that hip hikes up. */
   private sSit = 0;
   private sHike = 0;
+  /** Calm-idle weight (0..1): weight shifts, visible breathing, look-arounds on good holds. */
+  private sCalm = 0;
 
   // scratch
   private rawP = new THREE.Vector3();
@@ -3112,9 +3114,12 @@ export class ClimberModel extends THREE.Group {
     this.time += d;
     const ph = state.phase;
     let snap = !this.initialized || dt <= 0;
+    // a reset (anything → idle) usually teleports the climber onto the start holds: that snaps (below,
+    // once the new pelvis is known); a phase change in place always blends
+    let enteringIdle = false;
     if (ph !== this.phase) {
-      // a reset (anything → idle) teleports the climber onto the start holds: snap
-      if (ph === 'idle' || this.phase === null) snap = true;
+      if (this.phase === null) snap = true;
+      else if (ph === 'idle') enteringIdle = true;
       if (ph === 'falling' || ph === 'idle') this.celebrateT = -1;
       // the send celebration plays automatically on topping out (celebrate() can also trigger it)
       if (ph === 'topped' && this.celebrateT < 0) this.celebrateT = 0;
@@ -3188,6 +3193,8 @@ export class ClimberModel extends THREE.Group {
       this.sStand += (stand - this.sStand) * (snap ? 1 : dampK(6, d));
       const st = this.sStand;
       const standY = pad + 0.93;
+      // never sit lower than a deep squat on the pad (the legs would fold through it)
+      this.rawP.y = Math.max(this.rawP.y, pad + 0.46);
       this.rawP.y = this.rawP.y + (Math.max(this.rawP.y, standY) - this.rawP.y) * st;
       // relaxed weight shift once standing
       this.rawP.addScaledVector(frame.right, Math.sin(this.time * 0.85) * 0.018 * st);
@@ -3222,6 +3229,7 @@ export class ClimberModel extends THREE.Group {
       }
     }
 
+    if (enteringIdle && this.sP.distanceToSquared(this.rawP) > 0.25) snap = true;
     // smoothing (phase dependent); big jumps snap
     const lamBody = ph === 'falling' ? 60 : ph === 'hanging' ? 28 : ph === 'landed' ? 16 : 24;
     const kB = snap ? 1 : dampK(lamBody, d);
@@ -3240,8 +3248,18 @@ export class ClimberModel extends THREE.Group {
       g.pelvis.addScaledVector(Rw, wobble(t * 31, 1.3) * shake).addScaledVector(Uw, wobble(t * 27, 4.1) * shake * 0.6);
       g.chest.addScaledVector(Rw, wobble(t * 33, 2.2) * shake * 1.3).addScaledVector(Nw, wobble(t * 29, 7.7) * shake * 0.6);
     }
-    if (ph === 'climbing' || ph === 'idle' || ph === 'topped') {
+    // calm on good holds (preview, home screen, a rest mid-route): a slow weight shift from foot to
+    // foot and the shoulders rising with each breath; it fades out as soon as the position gets hard
+    const calmT = onWall ? sstep(0.55, 0.25, state.tension) * sstep(0.25, 0.05, state.shake) * (ph === 'idle' ? 1 : 0.6) : 0;
+    this.sCalm += (calmT - this.sCalm) * (snap ? 1 : dampK(1.5, d));
+    const calm = this.sCalm;
+    if (onWall) {
       g.pelvis.addScaledVector(Rw, Math.sin(t * 0.9) * 0.004).addScaledVector(Nw, Math.sin(t * 0.71 + 1) * 0.004);
+      if (calm > 1e-3) {
+        const shift = Math.sin(t * 0.37) * 0.75 + Math.sin(t * 0.23 + 1.3) * 0.25;
+        g.pelvis.addScaledVector(Rw, shift * 0.017 * calm).addScaledVector(Uw, -Math.abs(shift) * 0.005 * calm);
+        g.chest.addScaledVector(Rw, shift * 0.006 * calm);
+      }
     }
 
     // celebration bounce
@@ -3287,6 +3305,16 @@ export class ClimberModel extends THREE.Group {
     this.separate(g.hands[0].target, g.hands[1].target, 0.075, Rw, Uw);
     this.separate(g.feet[0].target, g.feet[1].target, 0.085, Rw, Uw);
     for (let f = 0; f < 2; f++) for (let h = 0; h < 2; h++) this.keepApart(g.feet[f].target, g.hands[h].target, 0.1, Uw, Nw);
+    // feet never go into the crash pads (falls, dangling legs near the ground, landing): a free foot
+    // stays on top of the pad and the knee bends instead
+    const padTop = frame.origin.y + pad;
+    for (let s = 0; s < 2; s++) {
+      const fg = g.feet[s];
+      const L = state.limbs[FOOT_IDS[s]];
+      if (onWall && (L.holdId !== null || L.smearing)) continue;
+      const minY = padTop + (fg.jointTarget ? ANKLE_H + 0.004 : 0.014);
+      if (fg.target.y < minY) fg.target.y = minY;
+    }
 
     // ── head ──
     this.poseHead(state, frame, d, snap, celebrating ? ct : -1);
@@ -3296,6 +3324,7 @@ export class ClimberModel extends THREE.Group {
     const rate = 0.26 + 0.34 * effort + (ph === 'landed' ? 0.25 * Math.exp(-this.phaseT * 0.3) : 0);
     g.breath = Math.sin(t * rate * Math.PI * 2);
     g.breathDepth = 0.45 + 0.55 * effort;
+    if (calm > 1e-3) g.chest.addScaledVector(Uw, (g.breath * 0.5 + 0.5) * 0.004 * calm);
 
     // blink
     this.blinkT -= d;
@@ -3630,6 +3659,14 @@ export class ClimberModel extends THREE.Group {
         this.v1.subVectors(target, frame.origin);
         target.addScaledVector(Nw, -this.v1.dot(Nw));
         target.addScaledVector(frame.right, Math.sin(t * 0.37) * 0.12).addScaledVector(Uw, Math.sin(t * 0.53 + 1) * 0.06);
+        // calm on good holds: now and then a glance down over the shoulder to the mats
+        const glance = this.sCalm * sstep(0.55, 0.85, Math.sin(t * 0.21 + 0.7));
+        if (glance > 1e-3) {
+          this.p2.x = state.pelvis.x - 0.9;
+          this.p2.y = 0;
+          frame.toWorld(this.p2, 2.2, this.v1);
+          target.lerp(this.v1, glance * 0.85);
+        }
       }
     }
     let nod = 0;

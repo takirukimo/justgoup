@@ -1,11 +1,12 @@
 // CHARACTER: offscreen collectible-card portrait of an animal head (PNG data URL, transparent
 // background), cached per (head, size).
 //
-// Every head is shot the same way: on the climber's own body (basalt tee, so the card shows a
-// little shoulder instead of a bare neck tube), from the same 3/4 view, framed from the shoulder
-// line to the top of the silhouette (horns, ears, crest) and centred on the head — so all nine
-// cards share one scale feel. Studio rig: warm key, cool fill, two coloured rim lights (signal +
-// glacier) that separate the silhouette from a dark card, plus a small room environment for glossy
+// Every head is shot the same way, as a collectible-card bust: on the climber's own body (the black
+// CHIRAL SPORTS tee, chest mark showing), from the same 3/4 view, with the shoulders and upper chest
+// filling the bottom of the card at one fixed scale, so every card shares the same bust and the
+// faces line up. Only a silhouette too tall for the card (the ibex's horns) widens the shot, just
+// enough to fit with a little headroom. Studio rig: warm key, cool fill, two rim lights (CHIRAL pink
+// + glacier) that separate the silhouette from a dark card, plus a small room environment for glossy
 // eyes and horns. HDR (half float, MSAA) → ACES + sRGB in a resolve pass → straight alpha → 2×
 // supersampled.
 
@@ -23,9 +24,11 @@ const FRAMING: Partial<Record<HeadId, { yaw?: number; zoom?: number }>> = {};
 /** Shared view: 3/4 from the front-right, a touch above eye level. */
 const VIEW_YAW = 0.62;
 const VIEW_PITCH = 0.1;
-/** Card layout (fractions of the card): the shoulder line sits this far up, the silhouette top this far down. */
-const SHOULDER_ROW = 0.075;
-const HEADROOM = 0.07;
+/** Card layout: the bust's bottom edge sits this far below the shoulder line, the card's base height (m). */
+const CHEST_BELOW = 0.15;
+const CARD_H = 0.55;
+/** Minimum headroom above the silhouette (fraction of the card). */
+const HEADROOM = 0.05;
 
 /** One shared bust (body + head) per renderer: the body is built once, heads swap in. */
 let bust: { model: ClimberModel; goal: BodyGoal; owner: THREE.WebGLRenderer } | null = null;
@@ -105,7 +108,7 @@ export function renderPortrait(renderer: THREE.WebGLRenderer, head: HeadId, size
   key1.position.set(1.6, 2.2, 2.4);
   const fill = new THREE.DirectionalLight('#a8c8dc', 0.55);
   fill.position.set(-2.2, 0.4, 1.4);
-  const rimA = new THREE.DirectionalLight('#ff8a5c', 3.4);
+  const rimA = new THREE.DirectionalLight('#ff5d78', 3.2);
   rimA.position.set(-1.8, 1.2, -1.6);
   const rimB = new THREE.DirectionalLight('#b8e6f0', 3.0);
   rimB.position.set(1.9, 0.9, -1.7);
@@ -156,15 +159,21 @@ export function renderPortrait(renderer: THREE.WebGLRenderer, head: HeadId, size
       if (py > maxY) maxY = py;
     }
   });
-  // shoulder line: the top of the trapezius, just below the neck joint (collar + shoulder caps show)
-  v.copy(neck).add(new THREE.Vector3(0, -0.035, 0)).applyMatrix4(cam.matrixWorldInverse);
-  const shoulderY = v.y / -v.z;
-  // vertical: shoulder row → silhouette top with headroom; horizontal: the head fits with margin
-  const spanY = (maxY - shoulderY) / (1 - SHOULDER_ROW - HEADROOM);
-  const spanX = (maxX - minX) / 0.86;
-  const half = Math.max(spanY, spanX) / 2 / (f.zoom ?? 1);
-  const cx = (minX + maxX) / 2;
-  const cy = maxY + HEADROOM * 2 * half - half;
+  // bust: the card's bottom edge cuts the upper chest a fixed distance below the shoulder line
+  v.copy(neck).add(new THREE.Vector3(0, -0.035 - CHEST_BELOW, 0)).applyMatrix4(cam.matrixWorldInverse);
+  const bottom = v.y / -v.z;
+  const dist = -v.z;
+  // fixed card height (same scale for every head) unless the silhouette needs more room
+  let half = CARD_H / dist / 2;
+  half = Math.max(half, (maxY - bottom) / (2 * (1 - HEADROOM)), (maxX - minX) / 2 / 0.88);
+  half /= f.zoom ?? 1;
+  const cy = bottom + half;
+  // horizontally: centred on the neck, nudged toward the silhouette's centre when it is lopsided
+  // (swept horns), never letting it leave the card
+  v.copy(neck).applyMatrix4(cam.matrixWorldInverse);
+  const neckX = v.x / -v.z;
+  let cx = neckX * 0.55 + ((minX + maxX) / 2) * 0.45;
+  cx = Math.min(Math.max(cx, maxX - half * 0.94), minX + half * 0.94);
   cam.fov = (2 * Math.atan(half) * 180) / Math.PI;
   cam.updateProjectionMatrix();
   cam.setViewOffset(S, S, ((cx / half) * S) / 2, ((-cy / half) * S) / 2, S, S);

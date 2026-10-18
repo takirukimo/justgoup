@@ -280,7 +280,14 @@ export function addSkull(kit: HeadKit, s: SkullSpec): void {
 /** Furry neck from the joint (origin) up into the skull. */
 export function addNeck(
   kit: HeadKit,
-  o: { top: [number, number, number]; r0: number; r1: number; front?: number; paint?: (p: THREE.Vector3, n: THREE.Vector3, out: VertexAttribs) => void; color: string },
+  o: {
+    top: [number, number, number];
+    r0: number;
+    r1: number;
+    front?: number;
+    paint?: (p: THREE.Vector3, n: THREE.Vector3, out: VertexAttribs) => void;
+    color: string;
+  },
 ): void {
   const base = lin(o.color);
   // the kit's inner group is shifted forward (+z) by 0.012/scale: start the tube behind to stay centred in the collar

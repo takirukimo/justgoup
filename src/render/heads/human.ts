@@ -11,8 +11,8 @@ import { MeshBuilder, addEllipsoid, ellipsoid, lin, loft, mirrorX, mixRGB, noise
 import { HeadKit, addNeck, addSkull } from './parts';
 import { CAP_TEX, createCapMaterial, createCapTexture } from '../materials';
 
-const EYE_C: [number, number, number] = [0.031, 0.217, 0.0662];
-const EYE_R = 0.0122;
+export const EYE_C: [number, number, number] = [0.031, 0.217, 0.0662];
+export const EYE_R = 0.0122;
 
 // ── cap geometry (authored head units) ──
 /** Band ellipse: centre, half axes (x = sides, z = front/back), front-up slope of the band plane. */
@@ -41,14 +41,16 @@ const UP = new THREE.Vector3(0, 1, 0);
 const _bp = new THREE.Vector3();
 const _d0 = new THREE.Vector3();
 const _q = new THREE.Quaternion();
-const _ax = new THREE.Vector3();
+const _qv = new THREE.Quaternion();
+/** Where the six panels meet (the button), as a direction from the skull centre. */
+const APEX_DIR = new THREE.Vector3(0, 1, -0.04).normalize();
 /**
  * Crown surface: v = 0 at the band → 1 at the button, a shell over the skull: the direction from
  * the skull centre swings from the band point up to the crown, and the radius eases from the band
  * onto the skull + a clearance that is generous over the structured front panels and snug at the
  * back. Negative v rolls the edge inward (the sweatband lip).
  */
-function crownPoint(u: number, v: number, out: THREE.Vector3): THREE.Vector3 {
+export function crownPoint(u: number, v: number, out: THREE.Vector3): THREE.Vector3 {
   bandPoint(u, _bp);
   _d0.subVectors(_bp, SKULL_C);
   const r0 = _d0.length();
@@ -57,14 +59,10 @@ function crownPoint(u: number, v: number, out: THREE.Vector3): THREE.Vector3 {
     const k = -v / 0.06;
     return out.copy(SKULL_C).addScaledVector(_d0, r0 - 0.004 * k).addScaledVector(UP, 0.003 * k);
   }
-  // swing the direction toward the crown (a touch behind straight up, where the button sits)
-  _ax.crossVectors(_d0, UP);
-  const total = Math.acos(Math.min(1, Math.max(-1, _d0.dot(UP)))) - 0.04;
-  if (_ax.lengthSq() < 1e-10) out.copy(_d0);
-  else {
-    _q.setFromAxisAngle(_ax.normalize(), total * v);
-    out.copy(_d0).applyQuaternion(_q);
-  }
+  // swing the direction toward the button (a touch behind straight up); every meridian meets there
+  _q.setFromUnitVectors(_d0, APEX_DIR);
+  _qv.identity().slerp(_q, v);
+  out.copy(_d0).applyQuaternion(_qv);
   const front = sstep(-0.2, 0.7, -Math.cos(u * Math.PI * 2)); // 1 at the front, 0 at the back
   // structured front: the panels stand off the forehead, most at mid height
   const clear = 0.0055 + 0.012 * front * Math.sin(Math.PI * Math.min(1, v * 1.25)) + 0.002 * (1 - v);
@@ -74,7 +72,7 @@ function crownPoint(u: number, v: number, out: THREE.Vector3): THREE.Vector3 {
 }
 
 /** Head field: cranium, face, jaw, chin, cheekbones, brow, nose, lips — and the hair shell. */
-function humanSdf(): { sdf: Sdf; hair: (x: number, y: number, z: number) => number } {
+export function humanSdf(): { sdf: Sdf; hair: (x: number, y: number, z: number) => number } {
   const cranium = ellipsoid([0, 0.232, -0.012], [0.073, 0.085, 0.09]);
   const face = ellipsoid([0, 0.196, 0.03], [0.06, 0.07, 0.056]);
   const lowerFace = ellipsoid([0, 0.158, 0.034], [0.05, 0.048, 0.046]);
@@ -394,7 +392,7 @@ export function buildHuman(): THREE.Group {
   // a human head reads small on the stylised (broad-shouldered) body next to the animal heads: a
   // touch larger, seated lower on the neck
   inner.scale.multiplyScalar(1.12);
-  inner.position.y -= 0.022;
+  inner.position.y -= 0.032;
   const cap = buildCap();
   cap.castShadow = true;
   cap.receiveShadow = true;

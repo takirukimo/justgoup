@@ -113,9 +113,9 @@ export function buildIbex(opts: IbexOptions = {}): THREE.Group {
 
   addNeck(kit, {
     top: [0, 0.18, -0.024],
-    r0: 0.062,
-    r1: 0.062,
-    front: 1.12,
+    r0: 0.055,
+    r1: 0.061,
+    front: 1.1,
     color: C.coat,
     paint: (p, n, out) => {
       // grey-beige throat high up, dark mane down the back of the neck
