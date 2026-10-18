@@ -347,6 +347,7 @@ export class App implements RunHost {
 
   private onBackend(b: BackendAPI): void {
     const { ui } = this.svc;
+    ui.setBackendLabel(b.label); // boards badge GLOBAL vs CLAUDE SHARED from this
     if (this.state !== 'menu') return;
     if (ui.current === 'title') ui.update('title', { profile: this.prof, backendLabel: b.label });
   }
