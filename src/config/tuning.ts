@@ -278,14 +278,75 @@ export const SIM = {
   pumpCapLoss: 0.4,
   /** Invincible mode caps pump here. */
   pumpInvincibleCap: 0.85,
-  // legacy global pump (replaced by forearm.ts in the next step)
-  pumpBase: 1 / 320,
-  pumpStrain: 0.036,
-  pumpCampus: 0.02,
-  pumpRecover: 0.022,
-  pumpShakeOut: 0.032,
-  ropePumpScale: 0.6,
-  ropeRecoverScale: 1.4,
+  /**
+   * Critical-force / W′ forearm model (research §2.6, fitted in forearm.ts; intensity f = load / fresh
+   * capacity of the hold). Below the critical force CF a forearm is near-sustainable, above it W′ drains
+   * at k·(f − CF). An unbroken grip above the occlusion band switches to the sustained values within
+   * the first seconds (blood flow occludes at ≈51–75 % MVC [47]); releases reset that.
+   */
+  forearm: {
+    cfIntermittent: 0.41,
+    cfSustained: 0.3,
+    kIntermittent: 1.0,
+    kSustained: 1.8,
+    /** Intensity band (MVC fraction) over which a sustained grip occludes. */
+    occlusionLo: 0.42,
+    occlusionHi: 0.62,
+    /** Seconds of unbroken grip over which occlusion sets in. */
+    occlusionRamp0: 0.5,
+    occlusionRamp1: 2.0,
+    /** W′ (MVC·s): the reserve above CF (research ≈30; fitted to the hang / 60 % anchors). */
+    wPrime: 35,
+    /**
+     * Recovery half-time (s) of a free forearm for strength 1 (research [50]: intermediate 45–60,
+     * advanced 15–30; a strong intermediate). Scales with strength^−1.6. Shaking out beside the body is
+     * ×shakeBoost faster (+32 % reoxygenation, Baláš 2016); holding on at intensity f recovers ×(1 − f/CF).
+     */
+    halfLife: 40,
+    shakeBoost: 1.3,
+    /** Seconds off a hold over which recovery ramps in (reperfusion delay). */
+    recoveryOnset: 1.0,
+    /**
+     * Slow residual fatigue: grows at creep·f per second of grip and lowers CF by (1 − residual); it decays
+     * with residualTau (s) off the wall (lactate stays up > 20 min [51]). Fitted so a steady 40 % MVC stance
+     * fails after ≈7.5 min and 40 % MVC 5 s on / 2 s off after ≈15 min (research [48]: 853 s for climbers;
+     * the tuning table's 7–14 min for a steady stance).
+     */
+    creep: 0.0024,
+    residualTau: 600,
+    /** The residual only recovers after this many seconds off (not in the brief pauses between holds). */
+    residualRestAfter: 5,
+    /**
+     * Technique: a bent, loaded arm also works the elbow flexors in the forearm (brachioradialis):
+     * intensity × (1 + lockoffCost·bend). A barn-door swing makes both hands squeeze: + barnCost·|barn|.
+     */
+    lockoffCost: 0.25,
+    barnCost: 0.12,
+  },
+  /** A forearm whose pump crosses this emits 'pump-warning' (re-armed below pumpWarnReset). */
+  pumpWarn: 0.75,
+  pumpWarnReset: 0.55,
+  /** A slip of a hand this pumped (or a forearm out of W′) is a pump failure (fall reason 'pump'). */
+  pumpFailAt: 0.7,
+
+  // ── Chalk + sweat (research §2.7, §6.5) ──
+  /** Seconds a hand is off for a chalk dip (ROADMAP ≈1 s; research 1–2 s). */
+  chalkTime: 1.0,
+  /**
+   * Chalk wear per second on the wall and per hand move; friction = 1 − smoothstep(wear) (1 = fresh
+   * chalk, 0 = sweaty). Lead: fresh → sweaty over ≈5 hand moves at a lead pace (≈35 s) [40];
+   * bouldering: noticeable (friction ≈0.65) only after ≈50 s and 10 moves.
+   */
+  sweatBoulder: { perSecond: 1 / 250, perMove: 0.02 },
+  sweatLead: { perSecond: 1 / 70, perMove: 0.1 },
+
+  // ── Shake-out ──
+  /** The other limbs must hold the climber below this worst stress for a hand to let go and shake. */
+  shakeOutMaxStress: 0.95,
+  /** Release zone for a shake-out: finger at least this far (m) below the shoulder, beside the body. */
+  shakeOutDrop: 0.25,
+  /** Release zone for a chalk dip: finger within this distance (m) of the chalk bag (behind the hips). */
+  chalkZone: 0.2,
 
   // ── Falling + rope ──
   /** Rope: soft catch stiffness (1/s²) per metre of rope out, and damping. */

@@ -83,7 +83,7 @@
  */
 
 import type { BoulderDef, ClimberPhase, ClimberState, HoldDef, LimbId, LimbSnapshot, QuickdrawDef, Vec2 } from '../core/types';
-import type { ClimberSimAPI, FallReason, SimEvent, SimOptions } from '../core/contracts';
+import type { ClimberSimAPI, FallReason, ReleaseOptions, SimEvent, SimOptions } from '../core/contracts';
 import { BODY, GAME, SIM } from '../config/tuning';
 import { clamp, clamp01, damp, DEG, smoothstep } from '../core/math';
 import {
@@ -94,6 +94,7 @@ import {
   LIMB_INDEX,
   maxReachIdx,
   placementBlocked,
+  pumpCapFactor,
   startPlacement,
   type LimbContact,
   topHolds,
@@ -118,6 +119,21 @@ import {
   type Pose,
   type StaticsParams,
 } from './statics';
+import { Forearm } from './forearm';
+
+/**
+ * ClimberSim construction options: the shared SimOptions plus Phase B body-model settings (kept out of
+ * SimOptions so Required<SimOptions> users stay valid).
+ */
+export interface ClimberSimOptions extends SimOptions {
+  /**
+   * Climber strength: × hand capacity and faster forearm recovery (half-time ∝ strength^−1.6).
+   * 1 = the default climber (≈0.52 BW on a 20 mm edge, research V3–V5 band); ≈1.6 a V6–V8 climber.
+   */
+  strength?: number;
+  /** Sweat rate multiplier for chalk wear (1 = research rates, 1.5 ≈ a humid gym, 0 = chalk never wears). */
+  sweat?: number;
+}
 
 interface LimbRt {
   hold: HoldDef | null;
@@ -140,6 +156,10 @@ interface LimbRt {
   busy: boolean;
   busyT: number;
   busyDraw: QuickdrawDef | null;
+  /** What keeps a busy hand busy: clipping a quickdraw or dipping into the chalk bag. */
+  busyKind: 'clip' | 'chalk' | null;
+  /** Hands: hanging free by the side, shaking the forearm out. */
+  shakeOut: boolean;
   load: number;
   stress: number;
   cap: number;
@@ -172,6 +192,12 @@ export interface SimStats {
   moves: number;
   /** Highest point reached by the pelvis (m). */
   maxHeight: number;
+  /** Chalk dips during this climb. */
+  chalkUps: number;
+  /** Shake-outs started during this climb. */
+  shakeOuts: number;
+  /** Highest forearm pump reached (either hand). */
+  maxPump: number;
 }
 
 const EMPTY_EVENTS: SimEvent[] = [];
@@ -209,6 +235,8 @@ function newLimb(): LimbRt {
     busy: false,
     busyT: 0,
     busyDraw: null,
+    busyKind: null,
+    shakeOut: false,
     load: 0,
     stress: 0,
     cap: 0,
@@ -243,6 +271,7 @@ function snapshot(id: LimbId): LimbSnapshot {
     busy: false,
     layer: 0,
     front: false,
+    ...(id === 'LH' || id === 'RH' ? { pump: 0, friction: 1, shakingOut: false, chalking: false, flying: false, flightTarget: null } : {}),
   };
 }
 
@@ -336,12 +365,38 @@ export class ClimberSim implements ClimberSimAPI {
 
   private events: SimEvent[] = [];
   private readonly state: ClimberState;
-  private readonly stats: SimStats = { slips: 0, maxTension: 0, shakeTime: 0, moves: 0, maxHeight: 0 };
+  private readonly stats: SimStats = { slips: 0, maxTension: 0, shakeTime: 0, moves: 0, maxHeight: 0, chalkUps: 0, shakeOuts: 0, maxPump: 0 };
 
-  constructor(boulder: BoulderDef, opts: SimOptions = {}) {
+  // Phase B body model
+  private readonly strength: number;
+  private readonly sweatT: number;
+  private readonly sweatM: number;
+  /** Per-forearm W′ pump (index 0 LH, 1 RH). */
+  private readonly forearms: [Forearm, Forearm];
+  /** Pump / chalk friction per hand, shared with the statics params (per-hand capacity). */
+  private readonly handPump = new Float64Array(2);
+  private readonly handFric = new Float64Array([1, 1]);
+  /**
+   * Chalk wear per hand 0..1 (0 = fresh). friction = 1 − smoothstep(wear): a fresh chalk layer soaks up
+   * the first sweat, then fades (research: bouldering noticeable only after ≈50 s / 10 moves).
+   */
+  private readonly chalkWear = new Float64Array(2);
+  /** pumpCapFactor the statics applied to each hand this step (fresh capacity = cap / this). */
+  private readonly capPumpF = new Float64Array([1, 1]);
+  private readonly pumpWarned = [false, false];
+  /** Signed barn-door amount of the last static solution. */
+  private barnAmt = 0;
+
+  constructor(boulder: BoulderDef, opts: ClimberSimOptions = {}) {
     this.boulder = boulder;
     this.assist = clamp01(opts.assist ?? 0);
     this.invincible = !!opts.invincible;
+    this.strength = clamp(Number.isFinite(opts.strength) ? opts.strength! : 1, 0.4, 3);
+    const sweat = Math.max(0, Number.isFinite(opts.sweat) ? opts.sweat! : 1);
+    const rates = boulder.mode === 'rope' ? SIM.sweatLead : SIM.sweatBoulder;
+    this.sweatT = rates.perSecond * sweat;
+    this.sweatM = rates.perMove * sweat;
+    this.forearms = [new Forearm(this.strength), new Forearm(this.strength)];
     this.holdById = new Map(boulder.holds.map((h) => [h.id, h] as const));
     this.handHolds = boulder.holds.filter(usableByHand);
     this.footHolds = boulder.holds.filter(usableByFoot);
@@ -355,6 +410,11 @@ export class ClimberSim implements ClimberSimAPI {
     this.prm = makeParams(boulder.wallAngle, this.assist, 0);
     this.prmScratch = makeParams(boulder.wallAngle, this.assist, 0);
     this.hipPrm = makeParams(boulder.wallAngle, this.assist, 0);
+    for (const prm of [this.prm, this.prmScratch, this.hipPrm]) {
+      prm.strength = this.strength;
+      prm.handPump = this.handPump;
+      prm.handFric = this.handFric;
+    }
     const limbs = {} as Record<LimbId, LimbSnapshot>;
     for (const id of LIMB_IDS) limbs[id] = snapshot(id);
     this.state = {
@@ -384,6 +444,15 @@ export class ClimberSim implements ClimberSimAPI {
     this.acc = 0;
     this.time = 0;
     this.pump = 0;
+    for (let i = 0; i < 2; i++) {
+      this.forearms[i].reset();
+      this.handPump[i] = 0;
+      this.handFric[i] = 1;
+      this.chalkWear[i] = 0;
+      this.capPumpF[i] = 1;
+      this.pumpWarned[i] = false;
+    }
+    this.barnAmt = 0;
     this.tension = 0;
     this.shakeAmt = 0;
     this.shaking = false;
@@ -399,6 +468,9 @@ export class ClimberSim implements ClimberSimAPI {
     this.stats.maxTension = 0;
     this.stats.shakeTime = 0;
     this.stats.moves = 0;
+    this.stats.chalkUps = 0;
+    this.stats.shakeOuts = 0;
+    this.stats.maxPump = 0;
     const place = startPlacement(this.boulder);
     this.placeLimbs(place, true);
     this.settle(1.6);
@@ -441,6 +513,14 @@ export class ClimberSim implements ClimberSimAPI {
     return this.envResidual;
   }
 
+  /**
+   * Optional extra: the forearm model of a hand (forearm.ts) — W′ left, residual fatigue, the current
+   * critical force and intensity. Read-only view for the HUD, debugging and tests.
+   */
+  forearm(hand: 'LH' | 'RH'): Readonly<Forearm> {
+    return this.forearms[hand === 'LH' ? 0 : 1];
+  }
+
   /** Optional extra: current hold id per limb (null = free / smearing). */
   placement(): Record<LimbId, string | null> {
     return {
@@ -477,6 +557,8 @@ export class ClimberSim implements ClimberSimAPI {
     if (i >= 2) this.reachCapY = this.P.y;
     if (held && i < 2) this.refreshMatch();
     if (wasAttached) this.events.push({ type: 'release', limb, holdId: held ? held.id : null });
+    if (L.shakeOut) this.endShakeOut(i);
+    if (i < 2) this.forearms[i].release();
     this.retarget();
     this.syncState();
     return true;
@@ -490,13 +572,14 @@ export class ClimberSim implements ClimberSimAPI {
     L.ty = p.y;
   }
 
-  endDrag(limb: LimbId): SimEvent[] {
+  endDrag(limb: LimbId, opts?: ReleaseOptions): SimEvent[] {
     const i = LIMB_INDEX[limb];
     const L = this.limbs[i];
     if (!L.dragging) return [];
     L.dragging = false;
     const out: SimEvent[] = [];
     if (this.phase !== 'climbing') return out;
+    void opts;
     const p = { x: L.tx, y: L.ty };
     const intent = this.releaseTarget(limb, p);
     const hold = intent.hold;
@@ -504,6 +587,7 @@ export class ClimberSim implements ClimberSimAPI {
     if (intent.clip) {
       const q = intent.clip;
       L.busy = true;
+      L.busyKind = 'clip';
       L.busyT = GAME.clipTime;
       L.busyDraw = q;
       out.push({ type: 'clip', quickdrawId: q.id });
@@ -519,8 +603,14 @@ export class ClimberSim implements ClimberSimAPI {
       const quality = this.predictGrip(limb, hold.id);
       this.attach(i, hold);
       this.stats.moves++;
+      // every hand move wears the chalk a little (research §6.5)
+      if (i < 2) this.wearChalk(i, this.sweatM);
       out.push({ type: 'grab', limb, holdId: hold.id, quality });
       if (i < 2 && this.topIds.has(hold.id)) out.push({ type: 'top-touch', limb });
+    } else if (i < 2 && this.releaseZone(i, p.x, p.y) === 'chalk' && this.startChalk(i, out)) {
+      // reached back to the chalk bag (behind the hips)
+    } else if (i < 2 && this.releaseZone(i, p.x, p.y) === 'shake' && this.canShakeOut(i)) {
+      this.startShakeOut(i, out);
     } else if (i >= 2 && this.boulder.wallAngle <= SIM.smearMaxAngle && this.smearSpot(i, p.x, p.y)) {
       const c = this.smearTmp;
       this.attachSmear(i, c.x, c.y);
@@ -551,6 +641,156 @@ export class ClimberSim implements ClimberSimAPI {
       this.posture.py = this.P.y;
       this.postureOn = true;
     }
+  }
+
+  // ═══════════════════════════════ chalk + shake-out ═══════════════════════════════
+
+  /**
+   * Chalk up: the hand lets go and dips into the chalk bag for SIM.chalkTime (busy, like clipping;
+   * the other limbs hold the climber), then returns to its hold with fresh chalk (friction 1).
+   * Events: 'release' (if it held a hold), 'chalk-start', later 'chalk-done' + 'return'. Refused while
+   * the other hand isn't on a hold, during a flight, or when the hand is busy / dragged.
+   */
+  chalkUp(hand: 'LH' | 'RH'): boolean {
+    const i = LIMB_INDEX[hand];
+    if (i > 1 || this.phase !== 'climbing') return false;
+    const L = this.limbs[i];
+    if (L.busy || L.dragging) return false;
+    const held = L.hold;
+    if (held) {
+      L.prevHold = held;
+      L.prevSmear = false;
+      L.prevX = L.cx;
+      L.prevY = L.cy;
+      L.hold = null;
+      L.sfx = 0;
+      L.sfy = 0;
+      L.slipT = 0;
+      L.overloaded = false;
+      this.refreshMatch();
+    }
+    const out: SimEvent[] = [];
+    if (!this.startChalk(i, out, !!held)) {
+      if (held) {
+        L.hold = held;
+        this.refreshMatch();
+      }
+      return false;
+    }
+    if (held) this.events.push({ type: 'release', limb: hand, holdId: held.id });
+    for (const e of out) this.events.push(e);
+    this.syncState();
+    return true;
+  }
+
+  /**
+   * Shake out: the hand lets go of its hold and hangs by the side, recovering its forearm
+   * SIM.forearm.shakeBoost × faster (research: +32 % reoxygenation). Only while the other hand holds a
+   * good hold (the remaining stance's worst stress ≤ SIM.shakeOutMaxStress). The hand stays off until
+   * it is dragged to a hold again. Events: 'release', 'shake-out-start' (… 'shake-out-end' on the drag).
+   */
+  shakeOut(hand: 'LH' | 'RH'): boolean {
+    const i = LIMB_INDEX[hand];
+    if (i > 1 || this.phase !== 'climbing') return false;
+    const L = this.limbs[i];
+    if (L.busy || L.dragging || L.shakeOut) return false;
+    if (!this.canShakeOut(i)) return false;
+    const held = L.hold;
+    if (held) {
+      L.prevHold = held;
+      L.prevSmear = false;
+      L.prevX = L.cx;
+      L.prevY = L.cy;
+      L.hold = null;
+      L.sfx = 0;
+      L.sfy = 0;
+      L.slipT = 0;
+      L.overloaded = false;
+      this.refreshMatch();
+      this.forearms[i].release();
+      this.events.push({ type: 'release', limb: hand, holdId: held.id });
+    }
+    const out: SimEvent[] = [];
+    this.startShakeOut(i, out);
+    for (const e of out) this.events.push(e);
+    this.syncState();
+    return true;
+  }
+
+  /** Where a released hand's finger points when it isn't over a hold: the chalk bag, beside the body, or neither. */
+  private releaseZone(i: number, x: number, y: number): 'chalk' | 'shake' | null {
+    const u = this.frameNow();
+    const P = this.P;
+    // the chalk bag hangs behind the hips, a little below the pelvis
+    const bx = P.x - u.x * 0.1;
+    const by = P.y - u.y * 0.1;
+    if (Math.hypot(x - bx, y - by) <= SIM.chalkZone) return 'chalk';
+    // beside the body: well below the shoulder, on the hand's own side (not across the chest)
+    const ax = this.ax[i];
+    const ay = this.ay[i];
+    const vx = x - ax;
+    const vy = y - ay;
+    const down = -(vx * u.x + vy * u.y);
+    const side = i === 0 ? -1 : 1;
+    const out = side * (vx * u.y - vy * u.x);
+    // …where a hanging arm is: between shakeOutDrop and a little past arm's length below the shoulder
+    if (down >= SIM.shakeOutDrop && down <= BODY.armMax + 0.15 && out >= -0.05 && out <= 0.4) return 'shake';
+    return null;
+  }
+
+  /** Can hand i let go to shake out: the other hand on a hold and the remaining stance holding well? */
+  private canShakeOut(i: number): boolean {
+    const o = this.limbs[1 - i];
+    if (!o.hold || o.dragging || o.busy) return false;
+    this.buildContacts();
+    const saved = this.contacts[i];
+    this.contacts[i] = null;
+    this.syncPose();
+    const prm = this.prmScratch;
+    prm.reachLimb = -1;
+    prm.maxPelvisY = Infinity;
+    const ev = evaluateStance(this.pose, this.contacts, prm, this.evScratch);
+    this.contacts[i] = saved;
+    return ev.feasible && ev.worstStress <= SIM.shakeOutMaxStress;
+  }
+
+  private startShakeOut(i: number, out: SimEvent[]): void {
+    const L = this.limbs[i];
+    L.shakeOut = true;
+    this.stats.shakeOuts++;
+    out.push({ type: 'shake-out-start', limb: LIMB_IDS[i] });
+    // hold still on the other three limbs
+    this.retarget();
+  }
+
+  private endShakeOut(i: number): void {
+    const L = this.limbs[i];
+    if (!L.shakeOut) return;
+    L.shakeOut = false;
+    this.events.push({ type: 'shake-out-end', limb: LIMB_IDS[i] });
+  }
+
+  /**
+   * Start a chalk dip of hand i (already off its hold; `returnAfter` = go back to L.prevHold after).
+   * Needs the other hand on a hold. Pushes 'chalk-start' to `out`.
+   */
+  private startChalk(i: number, out: SimEvent[], returnAfter = true): boolean {
+    const L = this.limbs[i];
+    const o = this.limbs[1 - i];
+    if (!o.hold || o.dragging || o.busy || this.phase !== 'climbing') return false;
+    if (L.shakeOut) this.endShakeOut(i);
+    L.busy = true;
+    L.busyKind = 'chalk';
+    L.busyT = SIM.chalkTime;
+    L.busyDraw = null;
+    if (!returnAfter) L.prevHold = null;
+    this.stats.chalkUps++;
+    out.push({ type: 'chalk-start', limb: LIMB_IDS[i] });
+    // hold still while the hand is in the bag: the other three limbs keep the current position
+    this.posture.px = this.P.x;
+    this.posture.py = this.P.y;
+    this.postureOn = true;
+    return true;
   }
 
   // ═══════════════════════════════ queries ═══════════════════════════════
@@ -654,7 +894,6 @@ export class ClimberSim implements ClimberSimAPI {
       return 0;
     }
     this.contacts[i] = c;
-    this.prmScratch.pump = this.pump;
     this.prmScratch.reachLimb = -1;
     this.prmScratch.maxPelvisY = Infinity;
     const ev = evaluateStance(this.pose, this.contacts, this.prmScratch, this.evScratch);
@@ -724,6 +963,8 @@ export class ClimberSim implements ClimberSimAPI {
     for (const L of this.limbs) {
       L.busy = false;
       L.busyDraw = null;
+      L.busyKind = null;
+      L.shakeOut = false;
       L.dragging = false;
     }
     this.placeLimbs(place, false);
@@ -734,7 +975,16 @@ export class ClimberSim implements ClimberSimAPI {
     this.matchT = 0;
     this.decked = false;
     this.ropeTaut = false;
-    this.pump = Math.max(0, this.pump - 0.2);
+    // hanging on the rope: the forearms got a rest and the climber chalked up
+    for (let i = 0; i < 2; i++) {
+      const fa = this.forearms[i];
+      fa.w = Math.min(1, fa.w + 0.2);
+      fa.exhausted = false;
+      this.handPump[i] = fa.pump;
+      this.chalkWear[i] = 0;
+      this.handFric[i] = 1;
+    }
+    this.pump = Math.max(this.handPump[0], this.handPump[1]);
     this.syncState();
   }
 
@@ -946,6 +1196,8 @@ export class ClimberSim implements ClimberSimAPI {
       L.dragging = false;
       L.busy = false;
       L.busyDraw = null;
+      L.busyKind = null;
+      L.shakeOut = false;
       L.prevHold = h;
       L.prevSmear = false;
       L.slipT = 0;
@@ -971,7 +1223,6 @@ export class ClimberSim implements ClimberSimAPI {
     this.buildContacts();
     initialPose(this.contacts, this.prm, init);
     const best: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
-    this.prm.pump = this.pump;
     this.prm.reachLimb = -1;
     this.prm.maxPelvisY = Infinity;
     let opt = optimizePose(this.contacts, this.prm, init, best, this.evScratch, 110);
@@ -1131,7 +1382,6 @@ export class ClimberSim implements ClimberSimAPI {
         break;
       }
     const prm = this.prmScratch;
-    prm.pump = this.pump;
     prm.reachLimb = reachLimb;
     prm.maxPelvisY = Infinity;
     if (reachLimb >= 0) {
@@ -1175,7 +1425,6 @@ export class ClimberSim implements ClimberSimAPI {
     if (!any) return;
     const L = this.limbs[li];
     const prm = this.prmScratch;
-    prm.pump = this.pump;
     prm.reachLimb = li;
     prm.reachX = L.tx;
     prm.reachY = this.reachY(li);
@@ -1205,7 +1454,6 @@ export class ClimberSim implements ClimberSimAPI {
     }
     this.syncPose();
     const prm = this.prmScratch;
-    prm.pump = this.pump;
     prm.reachLimb = -1;
     // while a foot is lifted the climber may settle lower, not climb up on its own
     let footUp = false;
@@ -1271,8 +1519,8 @@ export class ClimberSim implements ClimberSimAPI {
         reachLimb = i;
         break;
       }
-    this.prm.pump = this.pump;
     this.prm.reachLimb = reachLimb;
+    for (let i = 0; i < 2; i++) this.capPumpF[i] = pumpCapFactor(this.handPump[i]);
     if (reachLimb >= 0) {
       this.prm.reachX = this.limbs[reachLimb].tx;
       this.prm.reachY = this.reachY(reachLimb);
@@ -1311,6 +1559,7 @@ export class ClimberSim implements ClimberSimAPI {
     this.tension += (rawT - this.tension) * k;
     this.balance = ev.balance;
     this.barnPen = ev.barnPen;
+    this.barnAmt = ev.barn;
     this.depth = damp(this.depth, ev.depth, 4, h);
     const yawTarget = clamp(ev.barn * 0.75 + (reachLimb >= 0 ? 0 : 0), -0.8, 0.8);
     this.yawV += ((yawTarget - this.yaw) * 30 - this.yawV * 7) * h;
@@ -1322,7 +1571,7 @@ export class ClimberSim implements ClimberSimAPI {
     for (let i = 0; i < 4; i++) {
       const L = this.limbs[i];
       let s = smoothstep(0.75, 1.3, L.stress);
-      if (i < 2 && this.contacts[i]) s += 0.35 * smoothstep(0.6, 1, this.pump);
+      if (i < 2 && this.contacts[i]) s += 0.35 * smoothstep(0.6, 1, this.handPump[i]);
       if (i >= 2 && this.contacts[i]) s += 0.4 * bodyShake * smoothstep(0.4, 0.9, L.stress);
       L.shake = damp(L.shake, clamp01(s), 10, h);
     }
@@ -1342,7 +1591,8 @@ export class ClimberSim implements ClimberSimAPI {
     }
     if (this.shaking) this.stats.shakeTime += h;
 
-    this.updatePump(h);
+    this.updateForearms(h);
+    this.updateSweat(h);
     if (this.phase !== 'climbing') return;
     this.updateSlips(h);
     if (this.phase !== 'climbing') return;
@@ -1766,6 +2016,21 @@ export class ClimberSim implements ClimberSimAPI {
         L.px = damp(L.px, tx, 18, h);
         L.py = damp(L.py, ty, 18, h);
         L.depth = damp(L.depth, 0.1, 14, h);
+      } else if (L.busy && L.busyKind === 'chalk') {
+        // into the chalk bag behind the hips (the depth puts the hand behind the body)
+        const tx = this.P.x - sx * 0.1 + rx * side * 0.05;
+        const ty = this.P.y - sy * 0.1 + ry * side * 0.05;
+        L.px = damp(L.px, tx, 16, h);
+        L.py = damp(L.py, ty, 16, h);
+        L.depth = damp(L.depth, this.depth + 0.14, 12, h);
+      } else if (L.shakeOut) {
+        // hanging straight down beside the body, shaking (≈3 Hz) — the renderer animates the wrist too
+        const w = Math.sin(this.time * Math.PI * 2 * 3.1) * 0.025;
+        const tx = ax[i] - sx * 0.52 + rx * side * (0.09 + w);
+        const ty = ay[i] - sy * 0.52 + ry * side * (0.09 + w);
+        L.px = damp(L.px, tx, 12, h);
+        L.py = damp(L.py, ty, 12, h);
+        L.depth = damp(L.depth, this.depth * 0.6 + 0.1 + w, 10, h);
       } else if (L.hold || L.smear) {
         L.px = damp(L.px, L.cx, 30, h);
         L.py = damp(L.py, L.cy, 30, h);
@@ -1788,8 +2053,29 @@ export class ClimberSim implements ClimberSimAPI {
       if (!L.busy) continue;
       L.busyT -= h;
       if (L.busyT > 0) continue;
+      if (L.busyKind === 'chalk') {
+        L.busy = false;
+        L.busyKind = null;
+        this.chalkWear[i] = 0;
+        this.handFric[i] = 1;
+        this.events.push({ type: 'chalk-done', limb: LIMB_IDS[i] });
+        if (L.prevHold) {
+          let ret = this.returnLimb(i);
+          if (ret === null && !L.hold) {
+            const id = this.bestReachable(i);
+            if (id) {
+              this.attach(i, this.holdById.get(id)!);
+              ret = id;
+            }
+          }
+          this.events.push({ type: 'return', limb: LIMB_IDS[i], holdId: ret });
+        }
+        this.retarget();
+        continue;
+      }
       const q = L.busyDraw!;
       L.busy = false;
+      L.busyKind = null;
       L.busyDraw = null;
       if (!this.clipped.includes(q.id)) this.clipped.push(q.id);
       this.events.push({ type: 'clip-done', quickdrawId: q.id, limb: LIMB_IDS[i] });
@@ -1809,34 +2095,59 @@ export class ClimberSim implements ClimberSimAPI {
     }
   }
 
-  private updatePump(h: number): void {
-    let handStress = 0;
-    let hands = 0;
-    let feet = 0;
-    let goodHands = true;
-    for (let i = 0; i < 4; i++) {
-      if (!this.contacts[i]) continue;
+  /**
+   * Per-forearm pump (forearm.ts): intensity f = load / fresh capacity (the statics' capacity without
+   * the pump factor) of each gripping hand, plus the technique extras — a bent loaded arm (lock-off) and
+   * a barn-door swing make the forearm work harder. Free hands recover (shaking out / chalking faster).
+   */
+  private updateForearms(h: number): void {
+    const FA = SIM.forearm;
+    const drain = 1 - SIM.assistPump * this.assist;
+    const barn = Math.abs(this.barnAmt);
+    for (let i = 0; i < 2; i++) {
       const L = this.limbs[i];
-      if (i < 2) {
-        hands++;
-        if (L.stress > handStress) handStress = L.stress;
-        if (L.stress > 0.45) goodHands = false;
-      } else feet++;
+      const fa = this.forearms[i];
+      const gripping = !!this.contacts[i];
+      let f = 0;
+      if (gripping) {
+        const fresh = Math.max(L.cap / Math.max(this.capPumpF[i], 1e-6), 0.01);
+        f = L.load / fresh;
+        // lock-off: how bent the loaded arm is in 3D (the shoulder sits ≈ pelvisDepth off the wall)
+        const rx = L.cx - this.ax[i];
+        const ry = L.cy - this.ay[i];
+        const ds = clamp(this.depth, 0.18, 0.5);
+        const ext = Math.sqrt(rx * rx + ry * ry + ds * ds) / BODY.armMax;
+        const bend = 1 - smoothstep(0.42, 0.7, ext);
+        f *= 1 + FA.lockoffCost * bend;
+        f += FA.barnCost * barn;
+      }
+      fa.step(h, { f, gripping, shaking: L.shakeOut || L.busyKind === 'chalk', drainScale: drain });
+      if (this.invincible) {
+        if (fa.w < 1 - SIM.pumpInvincibleCap) fa.w = 1 - SIM.pumpInvincibleCap;
+        fa.exhausted = false;
+      }
+      const p = fa.pump;
+      this.handPump[i] = p;
+      if (!this.pumpWarned[i] && p >= SIM.pumpWarn) {
+        this.pumpWarned[i] = true;
+        this.events.push({ type: 'pump-warning', limb: LIMB_IDS[i], pump: p });
+      } else if (this.pumpWarned[i] && p < SIM.pumpWarnReset) this.pumpWarned[i] = false;
     }
-    const scale = this.isRope ? SIM.ropePumpScale : 1;
-    const recover = this.isRope ? SIM.ropeRecoverScale : 1;
-    let rate = SIM.pumpBase * scale;
-    if (hands) rate += SIM.pumpStrain * scale * smoothstep(0.25, 1.1, handStress) * (1 + handStress);
-    if (hands && !feet) rate += SIM.pumpCampus;
-    if (this.tension < 0.4 && feet && hands === 2 && goodHands) rate -= SIM.pumpRecover * recover;
-    if (hands === 1 && feet && handStress < 0.55) {
-      const free = this.limbs[this.contacts[0] ? 1 : 0];
-      if (!free.dragging && !free.busy) rate -= SIM.pumpShakeOut * recover;
-    }
-    if (rate > 0) rate *= 1 - SIM.assistPump * this.assist;
-    this.pump = clamp01(this.pump + rate * h);
-    if (this.invincible) this.pump = Math.min(this.pump, SIM.pumpInvincibleCap);
-    if (this.pump >= 1) this.fall('pump');
+    this.pump = Math.max(this.handPump[0], this.handPump[1]);
+    if (this.pump > this.stats.maxPump) this.stats.maxPump = this.pump;
+  }
+
+  /** Chalk wears off with time on the wall (sweat); every hand move costs a bit more (endDrag). */
+  private updateSweat(h: number): void {
+    const d = this.sweatT * h;
+    if (d <= 0) return;
+    for (let i = 0; i < 2; i++) if (this.limbs[i].busyKind !== 'chalk') this.wearChalk(i, d);
+  }
+
+  private wearChalk(i: number, d: number): void {
+    const w = Math.min(1, this.chalkWear[i] + d);
+    this.chalkWear[i] = w;
+    this.handFric[i] = 1 - smoothstep(0, 1, w);
   }
 
   private updateSlips(h: number): void {
@@ -1846,7 +2157,8 @@ export class ClimberSim implements ClimberSimAPI {
         L.slipT = 0;
         continue;
       }
-      const s = L.stress;
+      // a forearm out of W′ that still works above its critical force fails: that hand slips
+      const s = i < 2 && this.forearms[i].exhausted ? Math.max(L.stress, SIM.slipFull) : L.stress;
       if (s > 1 && !L.overloaded) {
         L.overloaded = true;
         this.events.push({ type: 'overload', limb: LIMB_IDS[i] });
@@ -1865,6 +2177,8 @@ export class ClimberSim implements ClimberSimAPI {
     const L = this.limbs[i];
     const id = L.hold ? L.hold.id : null;
     const barn = this.barnPen > 0.3;
+    // the overloaded forearm failed: a pumped hand's slip is a pump failure
+    const pumped = i < 2 && (this.forearms[i].exhausted || this.handPump[i] >= SIM.pumpFailAt);
     this.stats.slips++;
     if (id) this.events.push({ type: 'slip', limb: LIMB_IDS[i], holdId: id });
     else this.events.push({ type: 'slip', limb: LIMB_IDS[i], holdId: '' });
@@ -1886,9 +2200,10 @@ export class ClimberSim implements ClimberSimAPI {
         if (k < 2) hands++;
       }
     if (hands === 0 || contacts < 2) {
-      this.fall(barn ? 'barn-door' : 'slip');
+      this.fall(pumped ? 'pump' : barn ? 'barn-door' : 'slip');
       return;
     }
+    if (i < 2) this.forearms[i].release();
     this.retarget();
   }
 
@@ -1936,10 +2251,7 @@ export class ClimberSim implements ClimberSimAPI {
 
   private fall(reason: FallReason): void {
     if (this.phase === 'falling' || this.phase === 'landed') return;
-    if (this.invincible && reason !== 'forced') {
-      if (reason === 'pump') this.pump = SIM.pumpInvincibleCap;
-      return;
-    }
+    if (this.invincible && reason !== 'forced') return;
     if (this.phase !== 'climbing' && this.phase !== 'topped' && this.phase !== 'hanging' && reason !== 'forced') return;
     if (this.shaking) {
       this.shaking = false;
@@ -1960,6 +2272,8 @@ export class ClimberSim implements ClimberSimAPI {
       L.dragging = false;
       L.busy = false;
       L.busyDraw = null;
+      L.busyKind = null;
+      L.shakeOut = false;
       L.load = 0;
       L.stress = 0;
       L.cap = 0;
@@ -2085,11 +2399,21 @@ export class ClimberSim implements ClimberSimAPI {
     this.updateFlail(h, 'hang');
     this.tension = damp(this.tension, 0, 4, h);
     this.shakeAmt = damp(this.shakeAmt, 0, 6, h);
-    this.pump = Math.max(0, this.pump - 0.01 * h);
+    this.restForearms(h);
     if (this.feetWorldY() < GAME.padHeight) {
       // stretched to the floor while hanging – stand on the ground
       this.land();
     }
+  }
+
+  /** Off the wall (hanging on the rope): both forearms recover, the residual slowly. */
+  private restForearms(h: number): void {
+    for (let i = 0; i < 2; i++) {
+      const fa = this.forearms[i];
+      fa.step(h, { f: 0, gripping: false, shaking: true, drainScale: 1 });
+      this.handPump[i] = fa.pump;
+    }
+    this.pump = Math.max(this.handPump[0], this.handPump[1]);
   }
 
   private land(): void {
@@ -2211,6 +2535,12 @@ export class ClimberSim implements ClimberSimAPI {
       o.smearing = L.smear;
       o.shake = L.shake;
       o.busy = L.busy;
+      if (i < 2) {
+        o.pump = this.handPump[i];
+        o.friction = this.handFric[i];
+        o.shakingOut = L.shakeOut;
+        o.chalking = L.busy && L.busyKind === 'chalk';
+      }
       let layer = 0;
       for (let p = 0; p < CROSS_PAIRS.length; p++) {
         const c = this.cross[p];
