@@ -24,7 +24,7 @@ import { QUALITY_PRESETS, QualityGovernor, detectQuality, type QualityPreset } f
 import { ClimberModel } from './climber';
 import { GuideModel } from './guide';
 import { RopeMesh } from './rope-mesh';
-import { renderPortrait } from './portrait';
+import { renderPortrait, resetPortraitEnvironment } from './portrait';
 import { disposeHoldCache } from './holds';
 
 export interface RendererOptions {
@@ -102,6 +102,22 @@ export class GameRenderer implements RendererAPI {
   private disposed = false;
   private resizeObs: ResizeObserver | null = null;
   private onWinResize = () => this.resize();
+  private lost = false;
+  private readonly contextListeners = new Set<(lost: boolean) => void>();
+  // three.js' own listeners (registered first) preventDefault the loss and re-init its state on
+  // restore; these run after them and rebuild what only lived on the GPU.
+  private onContextLost = (): void => {
+    this.lost = true;
+    for (const fn of this.contextListeners) fn(true);
+  };
+  private onContextRestored = (): void => {
+    this.lost = false;
+    resetPortraitEnvironment();
+    this.env?.restoreContext();
+    this.cssW = this.cssH = 0; // force resize() to re-apply the drawing-buffer size
+    this.resize();
+    for (const fn of this.contextListeners) fn(false);
+  };
 
   // scratch
   private v = new THREE.Vector3();
@@ -128,6 +144,8 @@ export class GameRenderer implements RendererAPI {
     this.gl.shadowMap.enabled = true;
     this.gl.shadowMap.type = THREE.PCFShadowMap;
     this.gl.info.autoReset = false; // the composer renders several passes per frame
+    canvas.addEventListener('webglcontextlost', this.onContextLost, false);
+    canvas.addEventListener('webglcontextrestored', this.onContextRestored, false);
 
     const level = opts.quality ?? detectQuality(this.gl);
     this.preset = QUALITY_PRESETS[level];
@@ -453,7 +471,20 @@ export class GameRenderer implements RendererAPI {
   }
 
   portrait(head: HeadId, size?: number): string {
+    // a lost context renders nothing: '' lets the UI use its flat emblem (and nothing is cached)
+    if (this.lost) return '';
     return renderPortrait(this.gl, head, size);
+  }
+
+  /** True between 'webglcontextlost' and 'webglcontextrestored'. */
+  get contextLost(): boolean {
+    return this.lost;
+  }
+
+  /** Optional (app): hear about WebGL context loss (true) and restore (false). Returns an unsubscribe. */
+  onContextChange(fn: (lost: boolean) => void): () => void {
+    this.contextListeners.add(fn);
+    return () => this.contextListeners.delete(fn);
   }
 
   // ───────────────────────────── projection ─────────────────────────────
@@ -508,7 +539,7 @@ export class GameRenderer implements RendererAPI {
   }
 
   frame(dt: number): void {
-    if (!this.initialized || this.disposed) return;
+    if (!this.initialized || this.disposed || this.lost) return;
     // never show an empty gym: an unbranded hole would sit where the wall goes
     if (!this.boulder) this.loadBoulder(showcaseBoulder());
     const d = clamp(dt, 0, 0.1);
@@ -657,6 +688,9 @@ export class GameRenderer implements RendererAPI {
     if (this.disposed) return;
     this.disposed = true;
     window.removeEventListener('resize', this.onWinResize);
+    this.canvas.removeEventListener('webglcontextlost', this.onContextLost, false);
+    this.canvas.removeEventListener('webglcontextrestored', this.onContextRestored, false);
+    this.contextListeners.clear();
     this.resizeObs?.disconnect();
     this.highlights.dispose();
     this.wall.dispose();

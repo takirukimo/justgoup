@@ -235,8 +235,7 @@ export class ClimbSession {
         this.onClipped(e.quickdrawId);
         break;
       case 'top':
-        if (this.rope) void this.onRopeTop();
-        else void this.onSend();
+        this.guard(this.rope ? this.onRopeTop() : this.onSend(), 'send');
         break;
       case 'fall':
         this.onFall(e.reason);
@@ -246,10 +245,10 @@ export class ClimbSession {
         this.svc.ui.hud.callout('GROUND FALL', 'bad');
         break;
       case 'caught':
-        void this.onCaught(e.fallDistance);
+        this.guard(this.onCaught(e.fallDistance), 'rope catch');
         break;
       case 'land':
-        void this.onLand();
+        this.guard(this.onLand(), 'landing');
         break;
       default:
         break;
@@ -353,7 +352,7 @@ export class ClimbSession {
     bus.emit('game:fall', { boulder: this.boulder });
     // safety net if the landing never registers
     void this.timeline.wait(4.5).then(() => {
-      if (!this.landTimer) void this.onLand();
+      if (!this.landTimer) this.guard(this.onLand(), 'landing');
     });
   }
 
@@ -458,8 +457,8 @@ export class ClimbSession {
     };
     on('ui:pause', () => this.pause());
     on('ui:resume', () => this.resume());
-    on('ui:retry', () => void this.leave('retry'));
-    on('ui:quit', () => void this.leave('quit'));
+    on('ui:retry', () => this.guard(this.leave('retry'), 'retry'));
+    on('ui:quit', () => this.guard(this.leave('quit'), 'quit'));
     on('ui:hint', () => this.useHint());
     on('ui:toggle-overview', () => this.toggleOverview());
   }
@@ -653,6 +652,19 @@ export class ClimbSession {
       void this.result.then(() => {
         for (const o of offs) o();
       });
+    });
+  }
+
+  /**
+   * Run one of the async beats (send, landing, catch, leave). A beat that throws must not strand
+   * the player on a frozen wall with no result: end the climb and let the run move on.
+   */
+  private guard(beat: Promise<void>, what: string): void {
+    beat.catch((err: unknown) => {
+      console.error(`[session] ${what} failed`, err);
+      if (this.finished) return;
+      this.svc.ui.hud.toast('SOMETHING SLIPPED · BACK TO THE MENU');
+      this.finish({ kind: 'quit' });
     });
   }
 

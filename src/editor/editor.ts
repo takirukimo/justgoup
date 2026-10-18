@@ -873,7 +873,8 @@ export class BoulderEditor implements EditorAPI {
     this.published = this.hash;
     this.saveNow();
     bus.emit('editor:publish', { boulder });
-    this.toast('Published · live in Community', 'good');
+    // the app reports where it landed (GLOBAL / CLAUDE SHARED / saved offline) in its own toast
+    this.toast('Publishing to Community', 'good');
     this.render();
   }
 
@@ -1422,11 +1423,13 @@ export class BoulderEditor implements EditorAPI {
     const sel = this.selected();
     switch (e.key) {
       case 'Escape':
+        // also the Android back button (src/app/lifecycle.ts): peel one layer per press
         if (this.checkOpen || this.drawer) {
           this.checkOpen = false;
           this.drawer = null;
           this.render();
         } else if (sel) this.select(null);
+        else this.close(); // the draft is saved on the way out
         return;
       case 'Delete':
       case 'Backspace':

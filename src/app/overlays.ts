@@ -1,5 +1,6 @@
 // App-level overlays that belong to no single module: the transition veil between problems, the
-// hint ghost (where the suggested limb should go) and the fatal-error card.
+// hint ghost (where the suggested limb should go), the "graphics paused" card shown while the
+// WebGL context is lost, and the fatal-error card.
 
 import { BRAND, FONTS, PALETTE } from '../config/brand';
 
@@ -42,7 +43,17 @@ max-height:120px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin
 .jga-error-b{height:52px;border-radius:14px;border:0;background:${PALETTE.signal};color:${PALETTE.basalt};font:800 16px/1 ${FONTS.display};
 letter-spacing:.16em;cursor:pointer}
 .jga-error-b:active{transform:scale(.97)}
-@media (prefers-reduced-motion: reduce){.jga-veil,.jga-veil-in{transition:none}.jga-ghost .g-line,.jga-ghost .g-pulse,.jga-veil-bar i{animation:none}}
+.jga-lost{position:absolute;inset:0;z-index:85;display:grid;place-items:center;padding:24px;pointer-events:auto;
+background:radial-gradient(120% 80% at 50% 40%,rgba(23,25,29,.92),${PALETTE.basalt} 72%);color:${PALETTE.bone};
+opacity:0;transition:opacity .22s cubic-bezier(.2,.8,.2,1)}
+.jga-lost.on{opacity:1}
+.jga-lost[hidden]{display:none}
+.jga-lost .jga-error-card{align-items:flex-start}
+.jga-lost-bar{width:100%;height:2px;background:rgba(255,255,255,.08);overflow:hidden;border-radius:2px}
+.jga-lost-bar i{display:block;height:100%;width:40%;background:${PALETTE.signal};animation:jga-load 1.1s cubic-bezier(.6,.1,.4,.9) infinite}
+.jga-lost .jga-error-b{width:100%}
+.jga-lost .jga-error-b[hidden]{display:none}
+@media (prefers-reduced-motion: reduce){.jga-veil,.jga-veil-in,.jga-lost{transition:none}.jga-ghost .g-line,.jga-ghost .g-pulse,.jga-veil-bar i,.jga-lost-bar i{animation:none}}
 .reduced-motion-app .jga-veil,.reduced-motion-app .jga-veil-in{transition:none}
 `;
 
@@ -191,6 +202,83 @@ export class HintGhost {
     const tw = this.tag.offsetWidth || 90;
     const lx = side > 0 ? tx + rr + 8 : tx - rr - 8 - tw;
     this.tag.style.transform = `translate3d(${Math.round(lx)}px,${Math.round(ty - 11)}px,0)`;
+  }
+}
+
+// ───────────────────────────── graphics paused (WebGL context lost) ─────────────────────────────
+
+/** How long to wait for the browser to hand the GPU back before offering a reload. */
+const RESTORE_PATIENCE_MS = 6000;
+
+/**
+ * Mobile browsers drop the WebGL context under memory pressure or after a long background stay.
+ * The renderer rebuilds on 'webglcontextrestored'; until then this card covers the frozen canvas,
+ * and if the restore never comes it offers a reload (progress is saved first by the caller).
+ */
+export class GraphicsLostCard {
+  readonly el: HTMLDivElement;
+  private readonly reload: HTMLButtonElement;
+  private readonly body: HTMLParagraphElement;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(host: HTMLElement, onReload: () => void = () => location.reload()) {
+    ensureAppStyles(host.ownerDocument);
+    const d = host.ownerDocument;
+    this.el = d.createElement('div');
+    this.el.className = 'jga-lost';
+    this.el.hidden = true;
+    this.el.setAttribute('role', 'alert');
+    const card = d.createElement('div');
+    card.className = 'jga-error-card';
+    const k = d.createElement('span');
+    k.className = 'jga-error-k';
+    k.textContent = 'GRAPHICS PAUSED';
+    const h = d.createElement('h2');
+    h.className = 'jga-error-h';
+    h.textContent = 'Hold tight';
+    this.body = d.createElement('p');
+    this.body.className = 'jga-error-p';
+    const bar = d.createElement('div');
+    bar.className = 'jga-lost-bar';
+    bar.appendChild(d.createElement('i'));
+    this.reload = d.createElement('button');
+    this.reload.type = 'button';
+    this.reload.className = 'jga-error-b';
+    this.reload.textContent = 'RELOAD';
+    this.reload.hidden = true;
+    this.reload.addEventListener('click', () => onReload());
+    card.append(k, h, this.body, bar, this.reload);
+    this.el.appendChild(card);
+    host.appendChild(this.el);
+  }
+
+  get shown(): boolean {
+    return !this.el.hidden;
+  }
+
+  show(): void {
+    if (this.shown) return;
+    this.body.textContent = 'Your phone paused the 3D wall to free up memory. Bringing it back now. Your climb is paused and your progress is saved.';
+    this.reload.hidden = true;
+    this.el.hidden = false;
+    requestAnimationFrame(() => this.el.classList.add('on'));
+    this.clearTimer();
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.body.textContent = 'The wall did not come back by itself. Reload to keep climbing. Your progress is saved on this device.';
+      this.reload.hidden = false;
+    }, RESTORE_PATIENCE_MS);
+  }
+
+  hide(): void {
+    this.clearTimer();
+    this.el.classList.remove('on');
+    this.el.hidden = true;
+  }
+
+  private clearTimer(): void {
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
   }
 }
 

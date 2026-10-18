@@ -13,7 +13,8 @@ import { bus } from './core/events';
 import type { QualityLevel } from './core/types';
 import { App } from './app/app';
 import { ProblemFactory } from './app/gen';
-import { HintGhost, showFatalError, Veil } from './app/overlays';
+import { GraphicsLostCard, HintGhost, showFatalError, Veil } from './app/overlays';
+import { emitBackIntent, installBackButton, suppressBrowserGestures } from './app/lifecycle';
 
 declare global {
   interface Window {
@@ -26,6 +27,8 @@ declare global {
       editor: BoulderEditor;
       bus: typeof bus;
       readonly backend: BackendAPI | null;
+      /** ms from createBackend() to the chosen backend (QA). */
+      readonly backendMs: number | null;
       readonly sim: App['sim'];
       readonly frames: number;
       readonly fps: number;
@@ -54,6 +57,7 @@ async function boot(): Promise<void> {
 
   const fatal = (err: unknown, ctx?: string): void => {
     console.error('[jgu] fatal', err);
+    flushProfile();
     showFatalError(host, err, ctx);
     bootEl?.remove();
   };
@@ -70,14 +74,24 @@ async function boot(): Promise<void> {
   }
 
   // the backend probes (≤ ~3 s) run while the scene builds
+  const backendT0 = performance.now();
   const backend = createBackend();
 
   const ui = new GameUI();
   ui.mount(uiEl);
+  stray.ui = ui;
   ui.setPortraitProvider((h) => renderer.portrait(h, 256));
   ui.setSettings(profile.settings);
   const controls = new LimbControls(controlsEl, renderer);
   const audio = new GameAudio();
+  // Create + resume the AudioContext synchronously inside the very first gesture (iOS only lets
+  // audio start from within a user-gesture handler); app.start() awaits the same unlock later.
+  const firstGesture = (): void => {
+    for (const t of GESTURES) document.removeEventListener(t, firstGesture, true);
+    void audio.unlock();
+  };
+  for (const t of GESTURES) document.addEventListener(t, firstGesture, true);
+  suppressBrowserGestures(document);
   const gen = new ProblemFactory();
   const veil = new Veil(host);
   const ghost = new HintGhost(host, controlsEl);
@@ -134,22 +148,63 @@ async function boot(): Promise<void> {
   });
 
   // ── lifecycle ──
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
+  // backgrounded (tab switch, home button, incoming call): pause the climb, silence, save
+  const toBackground = (): void => {
+    app.onHidden();
+    audio.suspend();
+    flushProfile();
+  };
+  const toForeground = (): void => {
+    if (document.hidden) return;
+    audio.resume();
+    last = performance.now();
+  };
+  document.addEventListener('visibilitychange', () => (document.hidden ? toBackground() : toForeground()));
+  window.addEventListener('pagehide', toBackground);
+  // back/forward cache restore: the page comes back without a reload
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) toForeground();
+  });
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => renderer.resize()).observe(host);
+  // a phone turned sideways shows the "turn upright" card (index.html): don't climb blind under it
+  const sideways = matchMedia(SIDEWAYS_QUERY);
+  sideways.addEventListener?.('change', (e) => {
+    if (e.matches) app.onHidden();
+  });
+
+  // WebGL context loss (memory pressure, GPU reset, long background stays on iOS)
+  const lostCard = new GraphicsLostCard(host);
+  renderer.onContextChange((lost) => {
+    if (lost) {
+      console.warn('[jgu] WebGL context lost; waiting for the browser to restore it');
       app.onHidden();
-      audio.suspend();
       flushProfile();
+      lostCard.show();
     } else {
-      audio.resume();
+      console.info('[jgu] WebGL context restored');
+      lostCard.hide();
       last = performance.now();
+      // portraits rendered while the context was gone fell back to flat emblems: re-render them
+      ui.setPortraitProvider((h) => renderer.portrait(h, 256));
     }
   });
-  window.addEventListener('pagehide', () => flushProfile());
-  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => renderer.resize()).observe(host);
+
+  // Android back button / iOS edge swipe → the game's back (pause, close, leave a screen)
+  installBackButton({
+    atRoot: () => app.current === 'menu' && ui.current === 'title',
+    onBack: () => {
+      if (lostCard.shown) return;
+      emitBackIntent();
+    },
+  });
 
   if (DEBUG) {
     let backendRef: BackendAPI | null = null;
-    void backend.then((b) => (backendRef = b));
+    let backendMs: number | null = null;
+    void backend.then((b) => {
+      backendRef = b;
+      backendMs = performance.now() - backendT0;
+    });
     window.__jgu = {
       app,
       renderer,
@@ -160,6 +215,9 @@ async function boot(): Promise<void> {
       bus,
       get backend() {
         return backendRef;
+      },
+      get backendMs() {
+        return backendMs;
       },
       get sim() {
         return app.sim;
@@ -176,8 +234,31 @@ async function boot(): Promise<void> {
   await app.start();
 }
 
-window.addEventListener('unhandledrejection', (e) => {
-  console.error('[jgu] unhandled rejection', e.reason);
+const GESTURES = ['touchend', 'pointerup', 'click', 'keydown'] as const;
+/** Keep in sync with the #rotate card's media query in index.html. */
+const SIDEWAYS_QUERY = '(orientation: landscape) and (pointer: coarse) and (max-height: 540px)';
+
+// Last-resort error reporting: anything that escaped its own catch gets logged and one calm toast
+// (rate-limited); the frame loop and boot have their own fatal paths.
+let lastErrorToast = 0;
+function reportStray(kind: string, reason: unknown): void {
+  console.error(`[jgu] ${kind}`, reason);
+  const now = performance.now();
+  const ui = stray.ui;
+  if (!ui || now - lastErrorToast < 8000) return;
+  lastErrorToast = now;
+  try {
+    ui.hud.toast('SOMETHING SLIPPED · KEEP CLIMBING');
+  } catch {
+    /* the UI itself is gone */
+  }
+}
+const stray: { ui: GameUI | null } = { ui: null };
+window.addEventListener('unhandledrejection', (e) => reportStray('unhandled rejection', e.reason));
+window.addEventListener('error', (e) => {
+  // resource load errors (fonts, icons) arrive here too without an error object: not ours to report
+  if (e.error === undefined && !e.message) return;
+  reportStray('uncaught error', e.error ?? e.message);
 });
 
 boot().catch((err: unknown) => {

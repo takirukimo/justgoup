@@ -22,8 +22,11 @@
     />
     <style>
       /* Critical boot styles — the full design system lives in src/ui/styles.css */
-      html, body { margin: 0; height: 100%; background: #0D0E10; overflow: hidden; overscroll-behavior: none; }
-      body { -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; touch-action: none; }
+      /* Fixed full-bleed stage (no 100vh: mobile toolbars resize it), no pull-to-refresh / rubber band,
+         no pinch or double-tap zoom, no long-press callouts. */
+      html, body { margin: 0; height: 100%; background: #0D0E10; overflow: hidden; overscroll-behavior: none; touch-action: none; }
+      body { -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+             -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
       #stage { position: fixed; inset: 0; display: grid; place-items: center; background: #0D0E10; }
       /* Handheld format: full-bleed on phones, a centred portrait device on wide screens. */
       #app { position: relative; width: 100%; height: 100%; overflow: hidden; background: #0D0E10; contain: strict; }
@@ -36,6 +39,19 @@
       #ui { pointer-events: none; }
       #boot { position: absolute; inset: 0; display: grid; place-items: center; color: #E9E5DD;
               font: 600 12px/1 'JetBrains Mono', ui-monospace, monospace; letter-spacing: .3em; transition: opacity .6s; }
+      /* Portrait game: a phone held sideways gets a "turn upright" card (main.ts pauses the climb).
+         Keep the media query in sync with SIDEWAYS_QUERY in src/main.ts. */
+      #rotate { display: none; }
+      @media (orientation: landscape) and (pointer: coarse) and (max-height: 540px) {
+        #rotate { position: fixed; inset: 0; z-index: 100; display: grid; place-content: center; justify-items: center; gap: 14px;
+                  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+                  background: #0D0E10; color: #E9E5DD; text-align: center; }
+        #rotate svg { width: 46px; height: 46px; color: #FF4F1F; animation: jgu-turn 2.4s cubic-bezier(.2,.8,.2,1) infinite; }
+        #rotate b { font: 800 26px/1 'Barlow Condensed', 'Arial Narrow', sans-serif; letter-spacing: .1em; text-transform: uppercase; }
+        #rotate span { font: 600 10px/1 'JetBrains Mono', ui-monospace, monospace; letter-spacing: .26em; color: #8B929C; text-transform: uppercase; }
+      }
+      @keyframes jgu-turn { 0%, 30% { transform: rotate(-90deg); } 60%, 100% { transform: rotate(0deg); } }
+      @media (prefers-reduced-motion: reduce) { #rotate svg { animation: none; } }
     </style>
   </head>
   <body>
@@ -46,6 +62,13 @@
         <div id="ui"></div>
         <div id="boot">LOADING</div>
       </div>
+    </div>
+    <div id="rotate" role="alert">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+        <rect x="7" y="2.5" width="10" height="19" rx="2.2" /><path d="M10.5 18.5h3" />
+      </svg>
+      <b>Turn your phone upright</b>
+      <span>Just Go Up is climbed in portrait</span>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

@@ -76,7 +76,13 @@ export class GymEnvironment {
     scene.add(this.group);
     scene.background = new THREE.Color(FOG_COLOR);
     scene.fog = new THREE.FogExp2(FOG_COLOR, 0.028);
-    const pmrem = new THREE.PMREMGenerator(renderer);
+    this.buildEnvMap();
+    scene.environmentIntensity = 0.17;
+  }
+
+  /** PMREM room reflections. GPU-generated, so a lost WebGL context takes them with it. */
+  private buildEnvMap(): void {
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
     const room = new RoomEnvironment();
     this.envTarget = pmrem.fromScene(room, 0.04);
     room.traverse((o) => {
@@ -87,8 +93,14 @@ export class GymEnvironment {
       }
     });
     pmrem.dispose();
-    scene.environment = this.envTarget.texture;
-    scene.environmentIntensity = 0.17;
+    this.scene.environment = this.envTarget.texture;
+  }
+
+  /** After a WebGL context restore: everything re-uploads from its source except the PMREM map. */
+  restoreContext(): void {
+    // the old target's GL objects died with the context: drop it rather than delete stale handles
+    this.envTarget = null;
+    this.buildEnvMap();
   }
 
   get ceiling(): number {

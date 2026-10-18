@@ -133,7 +133,13 @@ export class App implements RunHost {
       renderer.setCameraMode('title', { instant: true });
       ui.show('none', {});
       void this.svc.veil.reveal();
-      await runIntro({ renderer, ui, audio });
+      try {
+        await runIntro({ renderer, ui, audio });
+      } catch (err) {
+        // the cinematic is a nicety: never let it keep a first-time player out of the game
+        console.error('[app] intro failed', err);
+        ui.guide.hide();
+      }
       p.introSeen = true;
       this.svc.save();
     }

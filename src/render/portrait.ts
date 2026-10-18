@@ -60,6 +60,12 @@ void main() {
   gl_FragColor = vec4(toSRGB(aces(c)), a);
 }`;
 
+/** The studio environment is GPU-generated: drop it after a WebGL context loss so it is rebuilt. */
+export function resetPortraitEnvironment(): void {
+  envTex = null;
+  envOwner = null;
+}
+
 function environment(renderer: THREE.WebGLRenderer): THREE.Texture {
   if (envTex && envOwner === renderer) return envTex;
   const pm = new THREE.PMREMGenerator(renderer);
