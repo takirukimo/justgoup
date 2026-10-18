@@ -37,8 +37,8 @@ export interface ProbeStats {
   fallbackPhases: Record<string, number>;
 }
 
-const PEN_BAD = 0.02;
-const FLOOR_BAD = 0.01;
+export const PEN_BAD = 0.02;
+export const FLOOR_BAD = 0.01;
 
 const SEG = ['chest', 'belly', 'pelvis', 'neck'];
 const LIMB = ['upperArmL', 'foreArmL', 'thighL', 'shinL', 'upperArmR', 'foreArmR', 'thighR', 'shinR'];
@@ -108,6 +108,102 @@ function attached(x: Cap, y: Cap): boolean {
   return false;
 }
 
+const caps: Cap[] = Array.from({ length: 32 }, () => ({ a: new THREE.Vector3(), b: new THREE.Vector3(), ra: 0, rb: 0, name: '', kind: 0, limb: 0, seg: 0 }));
+
+export interface Measure {
+  /** Worst capsule interpenetration (m) and the pair. */
+  pen: number;
+  what: string;
+  /** Worst joint depth under the pad surface (m) and the joint. */
+  floor: number;
+  floorWhat: string;
+}
+
+/**
+ * Measure one posed rig: worst forbidden capsule overlap (limb ↔ limb, limb ↔ torso / head) and the
+ * deepest joint under the crash-pad surface (in the pad zone in front of the wall). `pairs`, when
+ * given, counts every pair over PEN_BAD (QA histograms).
+ */
+export function measureRig(rig: BodyRig, wallN: THREE.Vector3, wallP: THREE.Vector3, out: Measure, pairs?: Record<string, number>): Measure {
+  let n = 0;
+  rig.forEachProxy((a, b, ra, rb) => {
+    const c = caps[n];
+    c.a.copy(a);
+    c.b.copy(b);
+    c.ra = ra;
+    c.rb = rb;
+    n++;
+  });
+  const headN = n - 12;
+  for (let i = 0; i < n; i++) {
+    const c = caps[i];
+    if (i < 4) {
+      c.kind = 0;
+      c.name = SEG[i];
+    } else if (i < 4 + headN) {
+      c.kind = 1;
+      c.name = `head${i - 4}`;
+    } else {
+      const k = i - 4 - headN;
+      c.kind = 2;
+      c.name = LIMB[k];
+      // limb index: 0 left arm, 1 left leg, 2 right arm, 3 right leg (seg 0 = proximal)
+      c.limb = Math.floor(k / 2);
+      c.seg = k % 2;
+    }
+  }
+  let worst = 0;
+  let what = '';
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const x = caps[i];
+      const y = caps[j];
+      if (x.kind !== 2 && y.kind !== 2) continue;
+      if (attached(x, y)) continue;
+      const [d, s, t] = segDist(x.a, x.b, y.a, y.b);
+      const pen = x.ra + (x.rb - x.ra) * s + y.ra + (y.rb - y.ra) * t - d;
+      if (pairs && pen > PEN_BAD) {
+        const k = x.kind === 1 ? `head↔${y.name}` : y.kind === 1 ? `${x.name}↔head` : `${x.name}↔${y.name}`;
+        pairs[k] = (pairs[k] ?? 0) + 1;
+      }
+      if (pen > worst) {
+        worst = pen;
+        what = `${x.name}↔${y.name}`;
+      }
+    }
+  }
+  const J = rig.joints;
+  const padTop = GAME.padHeight;
+  let fl = 0;
+  let flw = '';
+  const pts: [string, THREE.Vector3][] = [
+    ['kneeL', J.knee[0]],
+    ['kneeR', J.knee[1]],
+    ['ankleL', J.ankle[0]],
+    ['ankleR', J.ankle[1]],
+    ['toeL', J.toe[0]],
+    ['toeR', J.toe[1]],
+    ['wristL', J.wrist[0]],
+    ['wristR', J.wrist[1]],
+  ];
+  for (const [nm, p] of pts) {
+    const o = d1.subVectors(p, wallP).dot(wallN);
+    if (o < 0.25) continue;
+    // a toe / ankle / wrist on top of the pad sits ≥ its own thickness above it
+    const minY = nm.startsWith('ankle') ? padTop + 0.06 : nm.startsWith('toe') ? padTop : padTop + 0.02;
+    const under = minY - p.y;
+    if (under > fl) {
+      fl = under;
+      flw = nm;
+    }
+  }
+  out.pen = worst;
+  out.what = what;
+  out.floor = fl;
+  out.floorWhat = flw;
+  return out;
+}
+
 export function startProbe(targets: () => ProbeTarget[]): { stats: Record<string, ProbeStats>; reset(): void; stop(): void } {
   const stats: Record<string, ProbeStats> = {};
   const fresh = (): ProbeStats => ({
@@ -119,7 +215,7 @@ export function startProbe(targets: () => ProbeTarget[]): { stats: Record<string
     fallbackFrames: 0,
     fallbackPhases: {},
   });
-  const caps: Cap[] = Array.from({ length: 32 }, () => ({ a: new THREE.Vector3(), b: new THREE.Vector3(), ra: 0, rb: 0, name: '', kind: 0, limb: 0, seg: 0 }));
+  const m: Measure = { pen: 0, what: '', floor: 0, floorWhat: '' };
   const t0 = performance.now();
   let on = true;
   const tick = () => {
@@ -129,82 +225,13 @@ export function startProbe(targets: () => ProbeTarget[]): { stats: Record<string
       const st = (stats[tg.name] ??= fresh());
       const rig = tg.rig;
       if (!rig.root.visible || !rig.root.parent?.visible) continue;
-      let n = 0;
-      rig.forEachProxy((a, b, ra, rb) => {
-        const c = caps[n];
-        c.a.copy(a);
-        c.b.copy(b);
-        c.ra = ra;
-        c.rb = rb;
-        n++;
-      });
-      const headN = n - 12;
-      for (let i = 0; i < n; i++) {
-        const c = caps[i];
-        if (i < 4) {
-          c.kind = 0;
-          c.name = SEG[i];
-        } else if (i < 4 + headN) {
-          c.kind = 1;
-          c.name = `head${i - 4}`;
-        } else {
-          const k = i - 4 - headN;
-          c.kind = 2;
-          c.name = LIMB[k];
-          // limb index: 0 left arm, 1 left leg, 2 right arm, 3 right leg (seg 0 = proximal)
-          c.limb = Math.floor(k / 2);
-          c.seg = k % 2;
-        }
-      }
-      // world → the rig root may be transformed (guide / climber are at the origin; keep generic)
       const phase = tg.phase();
-      let worst = 0;
-      let what = '';
-      for (let i = 0; i < n; i++) {
-        for (let j = i + 1; j < n; j++) {
-          const x = caps[i];
-          const y = caps[j];
-          if (x.kind !== 2 && y.kind !== 2) continue;
-          if (attached(x, y)) continue;
-          const [d, s, t] = segDist(x.a, x.b, y.a, y.b);
-          const pen = x.ra + (x.rb - x.ra) * s + y.ra + (y.rb - y.ra) * t - d;
-          if (pen > worst) {
-            worst = pen;
-            what = `${x.name}↔${y.name}`;
-          }
-        }
-      }
+      measureRig(rig, tg.wallN, tg.wallP, m);
       st.frames++;
-      if (worst > PEN_BAD) st.penFrames++;
-      if (worst > st.pen.v) st.pen = { v: worst, what, phase, t: now };
-      // joints under the pad surface (only in the pad zone in front of the wall)
-      const J = rig.joints;
-      const padTop = GAME.padHeight;
-      let fl = 0;
-      let flw = '';
-      const pts: [string, THREE.Vector3][] = [
-        ['kneeL', J.knee[0]],
-        ['kneeR', J.knee[1]],
-        ['ankleL', J.ankle[0]],
-        ['ankleR', J.ankle[1]],
-        ['toeL', J.toe[0]],
-        ['toeR', J.toe[1]],
-        ['wristL', J.wrist[0]],
-        ['wristR', J.wrist[1]],
-      ];
-      for (const [nm, p] of pts) {
-        const out = d1.subVectors(p, tg.wallP).dot(tg.wallN);
-        if (out < 0.25) continue;
-        // a toe / ankle / wrist on top of the pad sits ≥ its own thickness above it
-        const minY = nm.startsWith('ankle') ? padTop + 0.06 : nm.startsWith('toe') ? padTop : padTop + 0.02;
-        const under = minY - p.y;
-        if (under > fl) {
-          fl = under;
-          flw = nm;
-        }
-      }
-      if (fl > FLOOR_BAD) st.floorFrames++;
-      if (fl > st.floor.v) st.floor = { v: fl, what: flw, phase, t: now };
+      if (m.pen > PEN_BAD) st.penFrames++;
+      if (m.pen > st.pen.v) st.pen = { v: m.pen, what: m.what, phase, t: now };
+      if (m.floor > FLOOR_BAD) st.floorFrames++;
+      if (m.floor > st.floor.v) st.floor = { v: m.floor, what: m.floorWhat, phase, t: now };
       if (rig.fallback.some(Boolean)) {
         st.fallbackFrames++;
         st.fallbackPhases[phase] = (st.fallbackPhases[phase] ?? 0) + 1;

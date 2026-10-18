@@ -121,6 +121,8 @@ export interface LimbGoal {
   pinned: boolean;
   /** Depth layer when this limb crosses another: the higher one passes in front (toward `away`). */
   layer: number;
+  /** Hands: forearm pump 0..1 (the forearm swells a little: LimbSnapshot.pump). */
+  pump: number;
 }
 
 export interface BodyGoal {
@@ -164,6 +166,7 @@ function limbGoal(): LimbGoal {
     jointTarget: false,
     pinned: false,
     layer: 0,
+    pump: 0,
   };
 }
 
@@ -384,6 +387,14 @@ const SW_WARM = 0.06;
 const SW_WALL_COST = 6;
 /** A swivel missing the joint limits by less than this (radians) is accepted rather than pulling the end in. */
 const SW_SOFT = 0.16;
+/**
+ * Max swivel speed of an elbow / knee about its limb axis (rad/s). When the closest valid swivel jumps
+ * to the other side (a limit just became binding), the joint swings over at this rate instead of
+ * popping there in one frame.
+ */
+const SW_RATE = 9;
+/** Swivel smoothing rate (1/s): the apex follows the solved swivel with a ≈45 ms lag. */
+const SW_LAMBDA = 22;
 
 // closest points of two segments (scratch, no allocation)
 const _sd1 = new THREE.Vector3();
@@ -775,6 +786,9 @@ export class BodyRig {
     toe: [new THREE.Vector3(), new THREE.Vector3()],
     tieIn: new THREE.Vector3(),
     head: new THREE.Vector3(),
+    /** Chalk bag opening (centre of the collar) and the bag's up axis (chalk-up dips). */
+    bagMouth: new THREE.Vector3(),
+    bagUp: new THREE.Vector3(0, 1, 0),
   };
   private qPelvis = new THREE.Quaternion();
   private qChest = new THREE.Quaternion();
@@ -820,6 +834,10 @@ export class BodyRig {
   readonly fallback = [false, false, false, false];
   private reqEnd = [0, 1, 2, 3].map(() => new THREE.Vector3());
   private stretchK = [1, 1, 1, 1];
+  /** Last frame's elbow / knee apex direction per limb (swivel rate limit) and the solve's dt. */
+  private apexPrev = [0, 1, 2, 3].map(() => new THREE.Vector3());
+  private apexPrevOk = [false, false, false, false];
+  private dtSolve = 0;
   private wallOn = false;
   private wallN = new THREE.Vector3(0, 0, 1);
   private wallP = new THREE.Vector3();
@@ -1940,6 +1958,7 @@ export class BodyRig {
   /** Pose every bone from the goal (rig space). dt drives the head damping + chalk-bag swing. */
   solve(g: BodyGoal, dt: number): void {
     const B = this.bones;
+    this.dtSolve = dt;
     this.wallOn = g.wall;
     this.wallN.copy(g.wallN);
     this.wallP.copy(g.wallP);
@@ -2010,6 +2029,23 @@ export class BodyRig {
     for (let s = 0; s < 2; s++) {
       this.writeArm(g, s);
       this.writeLeg(s);
+    }
+    // remember each elbow / knee apex for next frame's swivel rate limit
+    {
+      const J = this.joints;
+      for (let li = 0; li < 4; li++) {
+        const s = li & 1;
+        const root = li < 2 ? J.shoulder[s] : J.hip[s];
+        const mid = li < 2 ? J.elbow[s] : J.knee[s];
+        const end = li < 2 ? J.wrist[s] : J.ankle[s];
+        _t0.subVectors(end, root);
+        const l2 = _t0.lengthSq();
+        _t1.subVectors(mid, root);
+        if (l2 > 1e-8) _t1.addScaledVector(_t0, -_t1.dot(_t0) / l2);
+        this.apexPrevOk[li] = dt > 0 && _t1.lengthSq() > 1e-8;
+        if (this.apexPrevOk[li] || dt <= 0) this.apexPrev[li].copy(_t1).normalize();
+        if (dt <= 0) this.apexPrevOk[li] = _t1.lengthSq() > 1e-8;
+      }
     }
 
     // ── tie-in point (front of the harness) + chalk bag ──
@@ -2238,7 +2274,9 @@ export class BodyRig {
     B[ids.uarm].scale.set(1, k, 1);
     B[ids.farm].position.copy(J.elbow[s]);
     basisQuat(_t1, _t2, B[ids.farm].quaternion);
-    B[ids.farm].scale.set(1, k, 1);
+    // a pumped forearm swells (girth only; the length stays the solved one)
+    const flex = 1 + 0.075 * Math.min(1, Math.max(0, goal.pump));
+    B[ids.farm].scale.set(flex, k, flex);
     // hand
     const H = B[ids.hand];
     H.position.copy(J.wrist[s]);
@@ -2439,6 +2477,20 @@ export class BodyRig {
       if (Number.isNaN(th)) th = 0;
     }
     const ap = this.apex[li].copy(this.cE1).multiplyScalar(Math.cos(th)).addScaledVector(this.cE2, Math.sin(th));
+    if (this.dtSolve > 0 && this.apexPrevOk[li]) {
+      // continuity: the apex turns about the limb axis at most SW_RATE·dt from last frame's
+      const pp = this.cA.copy(this.apexPrev[li]).addScaledVector(this.cD, -this.apexPrev[li].dot(this.cD));
+      if (pp.lengthSq() > 1e-6) {
+        pp.normalize();
+        const ang = Math.acos(clampN(pp.dot(ap), -1, 1));
+        // low-pass (≈45 ms) capped at SW_RATE: no frame-to-frame swivel jitter, no flips
+        const step = Math.min(ang * (1 - Math.exp(-SW_LAMBDA * this.dtSolve)), SW_RATE * this.dtSolve);
+        if (ang - step > 1e-5) {
+          this.cB.crossVectors(pp, ap);
+          ap.copy(pp).applyAxisAngle(this.cD, this.cB.dot(this.cD) >= 0 ? step : -step);
+        }
+      }
+    }
     outMid.copy(this.cC).addScaledVector(ap, this.cH);
     this.wallSlack[li] = this.wallOn
       ? this.cA.subVectors(outMid, this.wallP).dot(this.wallN) - (li >= 2 ? R_KNEE_WALL : R_ELBOW_WALL) - WALL_MARGIN
@@ -3014,6 +3066,8 @@ export class BodyRig {
     _t2.subVectors(_t0, this.bagTip).normalize(); // bag up axis
     _t3.set(0, 0, 1).applyQuaternion(this.qPelvis); // away from the body (back)
     basisQuat(_t2, _t3, bag.quaternion);
+    this.joints.bagUp.copy(_t2);
+    this.joints.bagMouth.set(0, 0.003, 0.044).applyQuaternion(bag.quaternion).add(bag.position);
   }
 
   dispose(): void {
@@ -3059,6 +3113,13 @@ const SHAPE_REACH: HandShape = { a: 0.14, b: 0.1, thumb: 0.22 };
 const SHAPE_OPEN: HandShape = { a: 0.08, b: 0.04, thumb: 0.08 };
 const SHAPE_CLIP: HandShape = { a: 0.75, b: 0.55, thumb: 0.95 };
 const SHAPE_FIST: HandShape = { a: 1.45, b: 1.55, thumb: 1.0 };
+/** Fingers loosely together, cupped, dipping into the chalk bag. */
+const SHAPE_DIP: HandShape = { a: 0.52, b: 0.42, thumb: 0.45 };
+/** A shaken-out hand: wrist and fingers loose. */
+const SHAPE_LOOSE: HandShape = { a: 0.3, b: 0.34, thumb: 0.12 };
+/** Reach length shoulder → grip point with the arm straight. */
+const ARM_REACH = UPPER + FORE + 0.075;
+const LEG_REACH = THIGH + SHIN;
 
 const HAND_IDS: readonly LimbId[] = ['LH', 'RH'];
 const FOOT_IDS: readonly LimbId[] = ['LF', 'RF'];
@@ -3125,6 +3186,31 @@ export class ClimberModel extends THREE.Group {
   private sHike = 0;
   /** Calm-idle weight (0..1): weight shifts, visible breathing, look-arounds on good holds. */
   private sCalm = 0;
+  // ── Phase B techniques (LimbSnapshot.chalking / shakingOut / flying / pump / footMode) ──
+  /** Per hand: seconds into the chalk-up (−1 = not chalking) and the blend toward the bag. */
+  private chalkT = [-1, -1];
+  private chalkK = [0, 0];
+  private chalkPuffed = [false, false];
+  /** Per hand: shake-out / dyno-reach blends and the smoothed forearm pump. */
+  private shakeK = [0, 0];
+  private flyK = [0, 0];
+  private pumpS = [0, 0];
+  /** Per foot: flag / smear / trailing (airborne) blends. */
+  private flagK = [0, 0];
+  private smearK = [0, 0];
+  private trailK = [0, 0];
+  /** Per foot: how narrow the stance is next to the other foot (1 = matched); drives the hips out. */
+  private narrow = [0, 0];
+  private sNarrow = 0;
+  /** Body right axis in the wall plane (wall-local, from the last pose). */
+  private bRx = 1;
+  private bRy = 0;
+  /**
+   * Optional hook (the renderer wires it to its fx): a hand comes back out of the chalk bag. `p` is the
+   * wall-local point and `depth` its distance from the wall, ready for FxSystem.chalkPuff(p, k, depth).
+   * `p` is a scratch object: copy it to keep it.
+   */
+  onChalkDip: ((p: Vec2, depth: number, hand: 'LH' | 'RH') => void) | null = null;
 
   // scratch
   private rawP = new THREE.Vector3();
@@ -3256,6 +3342,8 @@ export class ClimberModel extends THREE.Group {
     const bUy = buy / bul;
     const bRx = bUy;
     const bRy = -bUx;
+    this.bRx = bRx;
+    this.bRy = bRy;
     const onWall = ph === 'climbing' || ph === 'idle' || ph === 'topped';
 
     // high step: a foot near / above hip height makes the hips sit back from the wall (room for the
@@ -3274,6 +3362,11 @@ export class ClimberModel extends THREE.Group {
         hike += SIGN[s] * 0.4 * sstep(-0.1, 0.25, hf) * sstep(0.0, 0.2, out);
       }
     }
+    // a narrow stance (feet matched / side by side) needs the knees forward under the body instead of
+    // splayed out (splayed knees turn the feet out and the heels into each other): hips a little out
+    const nar = onWall ? Math.min(this.narrow[0], this.narrow[1]) : 0;
+    this.sNarrow += (nar - this.sNarrow) * (snap ? 1 : dampK(4, d));
+    sit = Math.max(sit, 0.15 * this.sNarrow);
     this.sSit += (sit - this.sSit) * (snap ? 1 : dampK(5, d));
     this.sHike += (hike - this.sHike) * (snap ? 1 : dampK(5, d));
 
@@ -3283,7 +3376,7 @@ export class ClimberModel extends THREE.Group {
     if (ph === 'climbing' || ph === 'idle' || ph === 'topped') {
       for (let s = 0; s < 2; s++) {
         const L = state.limbs[HAND_IDS[s]];
-        if (!L.holdId && !L.busy) continue;
+        if ((!L.holdId && !L.busy) || L.chalking) continue;
         const dp = Math.hypot(L.pos.x - L.anchor.x, L.pos.y - L.anchor.y);
         const reach = 0.64;
         const gap = Math.sqrt(Math.max(0, reach * reach - dp * dp));
@@ -3425,7 +3518,8 @@ export class ClimberModel extends THREE.Group {
     // matched hands / feet sit side by side on a shared hold (never inside each other), and a
     // foot never shares a spot with a hand
     this.separate(g.hands[0].target, g.hands[1].target, 0.075, Rw, Uw);
-    this.separate(g.feet[0].target, g.feet[1].target, 0.085, Rw, Uw);
+    // (shoes are ≈ 9 cm wide: matched feet stand side by side, never inside each other)
+    this.separate(g.feet[0].target, g.feet[1].target, 0.112, Rw, Uw);
     for (let f = 0; f < 2; f++) for (let h = 0; h < 2; h++) this.keepApart(g.feet[f].target, g.hands[h].target, 0.1, Uw, Nw);
     // feet never go into the crash pads (falls, dangling legs near the ground, landing): a free foot
     // stays on top of the pad and the knee bends instead
@@ -3536,12 +3630,76 @@ export class ClimberModel extends THREE.Group {
       this.v0.lerp(this.v1, fistK);
     }
 
+    // ── Phase B techniques ──
+    const onWall = ph === 'climbing' || ph === 'idle' || ph === 'topped';
+    const J = this.rig.joints;
+    // chalk up: the hand travels out round the hip to the bag behind it, dips in twice, comes out
+    const chalking = onWall && L.chalking === true;
+    if (chalking) this.chalkT[s] = this.chalkT[s] < 0 ? 0 : this.chalkT[s] + d;
+    else this.chalkT[s] = -1;
+    if (!chalking) this.chalkPuffed[s] = false;
+    this.chalkK[s] += ((chalking ? 1 : 0) - this.chalkK[s]) * (snap ? 1 : dampK(chalking ? 7 : 6, d));
+    const ck = this.chalkK[s];
+    let dip = 0;
+    if (ck > 1e-3) {
+      const c2 = Math.max(0, this.chalkT[s]);
+      const u = sstep(0.3, 0.9, c2);
+      dip = 0.5 - 0.5 * Math.cos(u * Math.PI * 4); // two dips
+      // just above the collar → fingers into the chalk (a hand reaching across sits on the near rim)
+      this.v1.copy(J.bagMouth).addScaledVector(J.bagUp, 0.045 - 0.07 * dip).addScaledVector(g.pelvisRight, s === 0 ? -0.018 : 0.008);
+      this.v0.lerp(this.v1, ck);
+      if (chalking && !this.chalkPuffed[s] && u > 0.93) {
+        // out of the bag: a puff of chalk off the fingers
+        this.chalkPuffed[s] = true;
+        if (this.onChalkDip) {
+          this.v1.subVectors(J.bagMouth, frame.origin).addScaledVector(J.bagUp, 0.05);
+          this.p2.x = this.v1.dot(Rw);
+          this.p2.y = this.v1.dot(Uw);
+          this.onChalkDip(this.p2, this.v1.dot(Nw), HAND_IDS[s] as 'LH' | 'RH');
+        }
+      }
+    }
+    // shake-out: the arm hangs straight down beside the body and the forearm shakes, wrist loose
+    const shaking = onWall && L.shakingOut === true && !L.holdId;
+    this.shakeK[s] += ((shaking ? 1 : 0) - this.shakeK[s]) * (snap ? 1 : dampK(shaking ? 5 : 8, d));
+    const sk = this.shakeK[s];
+    const wS = t * Math.PI * 2 * 5.2 + s * 1.3;
+    if (sk > 1e-3) {
+      this.v2.copy(WORLD_UP).multiplyScalar(-0.8).addScaledVector(this.U, -0.2).normalize();
+      this.v1.copy(S).addScaledVector(this.v2, ARM_REACH * 0.93).addScaledVector(g.chestRight, side * 0.09).addScaledVector(this.Nh, 0.05);
+      this.v1.addScaledVector(g.chestRight, side * Math.sin(wS) * 0.03 * sk).addScaledVector(this.Nh, Math.cos(wS * 0.5 + 0.7) * 0.016 * sk);
+      this.v0.lerp(this.v1, sk);
+    }
+    // dyno / deadpoint: the reaching hand leads, the arm fully extended toward the target
+    const flying = onWall && L.flying === true;
+    this.flyK[s] += ((flying ? 1 : 0) - this.flyK[s]) * (snap ? 1 : dampK(flying ? 18 : 8, d));
+    const fk = this.flyK[s];
+    if (fk > 1e-3) {
+      this.v2.subVectors(this.v0, S);
+      const dl = this.v2.length();
+      if (dl > 1e-4 && dl < ARM_REACH * 0.97) {
+        this.v1.copy(S).addScaledVector(this.v2, (ARM_REACH * 0.97) / dl);
+        this.v0.lerp(this.v1, fk);
+      }
+    }
+    // a hand on its way to / from the bag or a shake-out swings out round the hip, never through it
+    const transit = Math.max(Math.sin(Math.PI * Math.min(1, ck)), Math.sin(Math.PI * Math.min(1, sk)) * 0.6);
+    if (transit > 1e-3) this.v0.addScaledVector(g.chestRight, side * 0.15 * transit).addScaledVector(this.Nh, 0.07 * transit);
+    // per-forearm pump: smoothed; a deep pump adds a fine tremor while holding on
+    this.pumpS[s] += ((L.pump ?? 0) - this.pumpS[s]) * (snap ? 1 : dampK(3, d));
+    hg.pump = this.pumpS[s];
+    const pumpTrem = L.holdId && onWall ? sstep(0.55, 1, this.pumpS[s]) : 0;
+    if (pumpTrem > 1e-3) this.v0.addScaledVector(Nw, wobble(t * 23, s * 4.7) * 0.0035 * pumpTrem);
+
     // smoothing
-    const lam = L.holdId ? 40 : L.dragging ? 30 : ph === 'falling' ? 50 : 16;
+    const lam = sk > 0.5 ? 40 : fk > 0.3 ? 45 : L.holdId ? 40 : L.dragging ? 30 : ph === 'falling' ? 50 : 16;
     if (snap || this.sHand[s].distanceToSquared(this.v0) > 0.3) this.sHand[s].copy(this.v0);
     else this.sHand[s].lerp(this.v0, dampK(lam, d));
     hg.target.copy(this.sHand[s]);
-    hg.pinned = rk > 0.5 || ((L.holdId !== null || L.busy) && ph !== 'falling' && ph !== 'landed' && fistK < 0.5);
+    hg.pinned =
+      rk > 0.5 ||
+      ck > 0.7 ||
+      ((L.holdId !== null || (L.busy && !chalking)) && ph !== 'falling' && ph !== 'landed' && fistK < 0.5 && ck < 0.05 && sk < 0.05);
     hg.layer = layerOf(L);
 
     // orientation
@@ -3558,6 +3716,27 @@ export class ClimberModel extends THREE.Group {
       dir.copy(WORLD_UP).addScaledVector(Nw, -0.15).normalize();
       up.copy(Nw).addScaledVector(Rw, 0.3);
       shape = SHAPE_FIST;
+    } else if (ck > 0.5) {
+      // fingers down into the bag, the back of the hand away from the body
+      dir.copy(J.bagUp).multiplyScalar(-1).addScaledVector(this.Nh, 0.15).normalize();
+      up.copy(this.Nh).addScaledVector(g.pelvisRight, side * 0.35);
+      shape = SHAPE_DIP;
+    } else if (sk > 0.5) {
+      // loose wrist: the hand flops a beat behind the forearm's shake
+      dir
+        .copy(WORLD_UP)
+        .multiplyScalar(-1)
+        .addScaledVector(g.chestRight, side * 0.5 * Math.sin(wS - 1.1))
+        .addScaledVector(this.Nh, 0.22 * Math.sin(wS * 0.5 - 0.4))
+        .normalize();
+      up.copy(g.chestRight).multiplyScalar(side).addScaledVector(this.Nh, 0.3);
+      shape = SHAPE_LOOSE;
+    } else if (fk > 0.5) {
+      // reaching through the throw: fingers straight along the arm, palm to the wall
+      dir.copy(this.v2).addScaledVector(Nw, -0.12).normalize();
+      up.copy(Nw).addScaledVector(dir, -dir.dot(Nw));
+      if (up.lengthSq() < 1e-6) up.copy(Nw);
+      shape = SHAPE_REACH;
     } else if (L.holdId && ph !== 'falling' && ph !== 'landed') {
       // fingers wrap over the hold: opposite to the hold's good direction, blended with the arm line
       this.v3.copy(this.v2).addScaledVector(Nw, -this.v2.dot(Nw));
@@ -3587,18 +3766,20 @@ export class ClimberModel extends THREE.Group {
       up.copy(this.goal.chestRight).multiplyScalar(side).addScaledVector(Nw, 0.3);
       if (ph !== 'falling') shape = SHAPE_FREE;
     }
+    // pumped fingers flutter on the hold (tiny, fast)
+    if (pumpTrem > 1e-3) dir.addScaledVector(Rw, wobble(t * 19, s * 2.9 + 1) * 0.05 * pumpTrem).normalize();
     // grip shape (damped so hands visibly close on a hold)
     const sh = this.sShape[s];
     const kS = snap ? 1 : dampK(14, d);
     sh.a += (shape.a - sh.a) * kS;
     sh.b += (shape.b - sh.b) * kS;
     sh.thumb += (shape.thumb - sh.thumb) * kS;
-    hg.curlA = sh.a;
+    hg.curlA = sh.a + (ck > 0.5 ? 0.25 * dip : 0);
     hg.curlB = sh.b;
     hg.thumb = sh.thumb;
-    // shoulder shrug when reaching up
+    // shoulder shrug when reaching up (fully up through a throw)
     const rel = this.v0.subVectors(hg.target, S).dot(WORLD_UP);
-    hg.lift = sstep(0.2, 0.55, rel) * 0.025;
+    hg.lift = Math.max(sstep(0.2, 0.55, rel) * 0.025, fk * sstep(0.1, 0.4, rel) * 0.035);
 
     // elbow pole: down + out on high holds, back + out on low ones; tremor wobbles the elbow
     const hi = sstep(-0.35, 0.25, rel);
@@ -3610,7 +3791,16 @@ export class ClimberModel extends THREE.Group {
       .addScaledVector(WORLD_UP, -0.25 * (1 - hi) - 0.65 * hi);
     if (ph === 'landed') pole.copy(Nw).multiplyScalar(0.8).addScaledVector(this.goal.chestRight, side * 0.6);
     if (rk > 0.5) pole.copy(WORLD_UP).multiplyScalar(-0.6).addScaledVector(this.goal.chestRight, side * 0.8).addScaledVector(Nw, 0.2);
-    const tremor = L.shake;
+    if (ck > 1e-3) {
+      // reaching back to the bag: the elbow points out to the side and back
+      this.v1.copy(this.goal.chestRight).multiplyScalar(side * 0.8).addScaledVector(this.Nh, 0.45).addScaledVector(WORLD_UP, 0.1);
+      pole.normalize().lerp(this.v1.normalize(), ck);
+    }
+    if (sk > 1e-3) {
+      this.v1.copy(this.Nh).multiplyScalar(0.7).addScaledVector(this.goal.chestRight, side * 0.4).addScaledVector(WORLD_UP, -0.2);
+      pole.normalize().lerp(this.v1.normalize(), sk);
+    }
+    const tremor = Math.max(L.shake, pumpTrem * 0.35);
     if (tremor > 0.01) {
       pole.addScaledVector(Uw, wobble(t * 41, s * 3.3) * tremor * 0.6).addScaledVector(Rw, wobble(t * 37, s * 5.1 + 2) * tremor * 0.5);
     }
@@ -3637,6 +3827,14 @@ export class ClimberModel extends THREE.Group {
       if (want) this.hookHeel[s] = L.footMode === 'heel';
       this.hookK[s] += (want - this.hookK[s]) * (snap ? 1 : dampK(10, d));
     }
+    const onWallF = ph === 'climbing' || ph === 'idle' || ph === 'topped';
+    const flagging = onWallF && L.footMode === 'flag' && L.holdId === null && !L.dragging;
+    this.flagK[s] += ((flagging ? 1 : 0) - this.flagK[s]) * (snap ? 1 : dampK(8, d));
+    const smearing = onWallF && L.smearing && L.holdId === null;
+    this.smearK[s] += ((smearing ? 1 : 0) - this.smearK[s]) * (snap ? 1 : dampK(10, d));
+    // dyno: both hands and the feet leave the wall; the legs trail below, toes pointed
+    const trailing = onWallF && state.airborne === true && L.holdId === null && !L.smearing && !L.dragging && L.footMode !== 'flag';
+    this.trailK[s] += ((trailing ? 1 : 0) - this.trailK[s]) * (snap ? 1 : dampK(trailing ? 14 : 6, d));
     frame.toWorld(L.pos, depth, this.v0);
     fg.jointTarget = false;
     fg.autoPoint = true;
@@ -3674,7 +3872,18 @@ export class ClimberModel extends THREE.Group {
       mode = 'dangle';
     }
 
-    const lam = L.holdId || L.smearing ? 40 : L.dragging ? 30 : ph === 'falling' ? 50 : 14;
+    const tk = this.trailK[s];
+    if (tk > 1e-3 && mode === 'dangle') {
+      // explosive extension: the legs stretch out below the hips (one a touch more bent), a little
+      // toward the wall after the push-off
+      this.v1
+        .copy(Hp)
+        .addScaledVector(this.U, -LEG_REACH * (s === 0 ? 0.9 : 0.84))
+        .addScaledVector(Nw, -0.05)
+        .addScaledVector(g.pelvisRight, side * 0.035);
+      this.v0.lerp(this.v1, tk);
+    }
+    const lam = L.holdId || L.smearing ? 40 : L.dragging ? 30 : ph === 'falling' ? 50 : tk > 0.3 ? 22 : 14;
     if (snap || this.sFoot[s].distanceToSquared(this.v0) > 0.3) this.sFoot[s].copy(this.v0);
     else this.sFoot[s].lerp(this.v0, dampK(lam, d));
     fg.target.copy(this.sFoot[s]);
@@ -3686,7 +3895,22 @@ export class ClimberModel extends THREE.Group {
     const high = sstep(-0.75, -0.05, hf);
     if (mode === 'hold' || mode === 'wall') {
       // toe into the wall, turned out (inside edge), heel dropped; Elvis leg = heel bounce
-      const turn = (0.36 + 0.55 * high) * (1 - 0.55 * overhang) * (mode === 'wall' ? 0.4 : 1);
+      const turn0 = (0.36 + 0.55 * high) * (1 - 0.55 * overhang) * (mode === 'wall' ? 0.4 : 1);
+      let turn = turn0;
+      {
+        // a turned-out foot swings its heel inward: with the other foot close on the inner side
+        // (matched feet, a narrow stance) the turn-out shrinks so the heels never cross
+        this.v2.subVectors(g.feet[1 - s].target, fg.target);
+        const inner = -this.v2.dot(Rw) * side;
+        const near = sstep(0.32, 0.16, Math.abs(this.v2.dot(Uw)));
+        this.narrow[s] = 0;
+        if (inner > -0.02 && near > 0 && mode === 'hold') {
+          // heels at most touching: half the toe gap minus the ankle's radius
+          const tmax = Math.asin(Math.max(0, Math.min(1, (Math.max(0, inner) * 0.5 - 0.035) / 0.17)));
+          turn = turn + (Math.min(turn, tmax) - turn) * near;
+          this.narrow[s] = sstep(0.28, 0.12, inner) * near;
+        }
+      }
       dir.copy(Nw).multiplyScalar(-Math.cos(turn)).addScaledVector(Rw, side * Math.sin(turn));
       let heel = L.smearing ? 0.72 : 0.24 + 0.1 * (1 - high) - 0.28 * overhang;
       if (mode === 'wall') heel = 0.95;
@@ -3696,17 +3920,42 @@ export class ClimberModel extends THREE.Group {
       // roll onto the inside edge for frog feet
       this.q.setFromAxisAngle(dir, side * 0.32 * high);
       up.applyQuaternion(this.q);
+      // the knee tracks over the toes: a foot turned out opens its knee to the side (frog), a foot kept
+      // straight beside the other one points its knee out from the wall (no knock-knees, no X legs)
+      const tk = 1 - this.narrow[s];
       pole
         .copy(Rw)
-        .multiplyScalar(side * (0.45 + 0.65 * high))
-        .addScaledVector(Nw, 0.6 - 0.15 * high)
-        .addScaledVector(Uw, 0.05 + 0.55 * high);
+        .multiplyScalar(side * ((0.45 + 0.65 * high) * tk + 0.3 * (1 - tk)))
+        .addScaledVector(Nw, (0.6 - 0.15 * high) * tk - 0.35 * (1 - tk))
+        .addScaledVector(Uw, 0.05 + 0.55 * high + 0.6 * (1 - tk));
       if (mode === 'wall') pole.copy(Nw).multiplyScalar(0.5).addScaledVector(WORLD_UP, 0.6).addScaledVector(Rw, side * 0.45);
-      // drop knee: the knee turns in and down when the foot crosses inward of the hip
+      // drop knee: the knee turns in and down when the foot crosses inward of the hip; the foot rolls
+      // onto its outside edge, toes into the wall and turned out, the instep facing out and up
       const dkk = this.dropK[s];
       if (dkk > 0.001 && mode === 'hold') {
         this.v2.copy(Rw).multiplyScalar(-side * 0.45).addScaledVector(Uw, -0.7).addScaledVector(Nw, 0.35).normalize();
         pole.normalize().lerp(this.v2, dkk);
+        this.v2.copy(Nw).multiplyScalar(-0.72).addScaledVector(Rw, side * 0.45).addScaledVector(Uw, 0.18).normalize();
+        this.v3.copy(Rw).multiplyScalar(side * 0.72).addScaledVector(Uw, 0.55).addScaledVector(Nw, 0.15);
+        dir.lerp(this.v2, dkk).normalize();
+        up.lerp(this.v3, dkk);
+        up.addScaledVector(dir, -up.dot(dir)).normalize();
+      }
+      // smear: rubber on blank wall, the sole laid almost flat against it (toes up the wall, heel low
+      // and out), knee out over the foot
+      const smk = this.smearK[s];
+      if (smk > 0.001 && mode === 'hold') {
+        const a = 0.5 - 0.15 * overhang;
+        this.v2.copy(Uw).multiplyScalar(Math.cos(a)).addScaledVector(Nw, -Math.sin(a)).addScaledVector(Rw, side * 0.18).normalize();
+        this.v3.copy(Nw).multiplyScalar(Math.cos(a)).addScaledVector(Uw, Math.sin(a));
+        dir.lerp(this.v2, smk).normalize();
+        up.lerp(this.v3, smk);
+        up.addScaledVector(dir, -up.dot(dir)).normalize();
+        this.v2.copy(Nw).multiplyScalar(0.75).addScaledVector(Rw, side * 0.45).addScaledVector(Uw, 0.2).normalize();
+        pole.normalize().lerp(this.v2, smk * 0.7);
+        // the ball of the foot (not the toe tip) presses on the wall
+        fg.target.addScaledVector(dir, -0.03 * smk).addScaledVector(Nw, -0.006 * smk);
+        fg.autoPoint = false;
       }
       // hooks (sim footMode): the foot turns so the heel / the top of the toes takes the hold
       const hk = this.hookK[s];
@@ -3718,15 +3967,24 @@ export class ClimberModel extends THREE.Group {
           this.v2.copy(Rw).multiplyScalar(side * 0.8).addScaledVector(Nw, 0.45).addScaledVector(Uw, 0.2).normalize();
           this.v3.copy(Uw);
         } else {
-          // toe hook: toes toward the hold and into the wall, the instep pressing up under it
-          const sx = L.pos.x - L.anchor.x >= 0 ? 1 : -1;
-          this.v2.copy(Rw).multiplyScalar(sx * 0.85).addScaledVector(Nw, -0.4).normalize();
-          this.v3.copy(Uw).addScaledVector(Nw, 0.2);
+          // toe hook: the leg reaches out straight, toes past the hold and curled into the wall, the
+          // top of the toes pulling against its far side
+          this.v1.subVectors(fg.target, Hp);
+          this.v1.addScaledVector(Nw, -this.v1.dot(Nw));
+          if (this.v1.lengthSq() < 1e-6) this.v1.copy(Rw).multiplyScalar(side);
+          this.v1.normalize();
+          this.v2.copy(this.v1).multiplyScalar(0.82).addScaledVector(Nw, -0.45).normalize();
+          // instep toward the climber's side of the hold: perpendicular to the leg, in the wall plane
+          this.v3.crossVectors(Nw, this.v1);
+          if (this.v3.dot(Uw) < 0) this.v3.negate();
+          this.v3.addScaledVector(Nw, 0.15);
         }
         dir.lerp(this.v2, hk).normalize();
         up.lerp(this.v3, hk);
         up.addScaledVector(dir, -up.dot(dir)).normalize();
-        this.v2.copy(Rw).multiplyScalar(side * (heel ? 0.45 : 0.6)).addScaledVector(Uw, heel ? 0.75 : 0.25).addScaledVector(Nw, 0.5).normalize();
+        // heel hook: knee bent up and out; toe hook: knee out from the wall over a nearly straight leg
+        if (heel) this.v2.copy(Rw).multiplyScalar(side * 0.45).addScaledVector(Uw, 0.75).addScaledVector(Nw, 0.5).normalize();
+        else this.v2.copy(Nw).multiplyScalar(0.8).addScaledVector(Uw, 0.25).addScaledVector(Rw, side * 0.3).normalize();
         pole.normalize().lerp(this.v2, hk);
         // the target is the toe contact: shift it so the heel (back of the shoe) or the toe box top
         // sits on the hold instead
@@ -3738,6 +3996,26 @@ export class ClimberModel extends THREE.Group {
       dir.copy(Nw).multiplyScalar(-0.85).addScaledVector(Uw, -0.15).addScaledVector(Rw, side * 0.25).normalize();
       up.copy(Uw).addScaledVector(dir, -Uw.dot(dir)).normalize();
       pole.copy(Rw).multiplyScalar(side * 0.6).addScaledVector(Nw, 0.55).addScaledVector(Uw, 0.3);
+      const flk = this.flagK[s];
+      if (flk > 0.001) {
+        // flag: the leg held out long as a counterweight, toes pointed along it and just brushing the
+        // wall (sole toward it). Crossed behind the other leg it is a back flag: it passes behind, the
+        // knee turned down
+        this.v1.subVectors(fg.target, Hp);
+        this.v1.addScaledVector(Nw, -this.v1.dot(Nw));
+        if (this.v1.lengthSq() < 1e-6) this.v1.copy(Uw).negate();
+        this.v1.normalize();
+        const across = -((L.pos.x - state.pelvis.x) * this.bRx + (L.pos.y - state.pelvis.y) * this.bRy) * side;
+        const back = sstep(0.0, 0.08, across);
+        this.v2.copy(this.v1).multiplyScalar(0.8).addScaledVector(Nw, -0.42).normalize();
+        this.v3.copy(Nw).addScaledVector(this.v2, -Nw.dot(this.v2)).normalize();
+        dir.lerp(this.v2, flk).normalize();
+        up.lerp(this.v3, flk);
+        up.addScaledVector(dir, -up.dot(dir)).normalize();
+        this.v2.copy(Nw).multiplyScalar(0.8 - 0.4 * back).addScaledVector(Uw, 0.3 - 0.85 * back).addScaledVector(Rw, side * 0.25 * (1 - back)).normalize();
+        pole.normalize().lerp(this.v2, flk);
+        if (back > 0.5) fg.layer = Math.min(fg.layer, -1);
+      }
     } else if (mode === 'stand') {
       const st = this.sStand;
       dir.copy(this.Nh).multiplyScalar(-1);
@@ -3755,6 +4033,15 @@ export class ClimberModel extends THREE.Group {
       dir.copy(Nw).multiplyScalar(-0.45).addScaledVector(WORLD_UP, -0.9).addScaledVector(Rw, side * 0.12).normalize();
       up.copy(Nw).multiplyScalar(-0.9).addScaledVector(WORLD_UP, 0.4);
       pole.copy(Nw).multiplyScalar(-0.65).addScaledVector(Rw, side * 0.4).addScaledVector(WORLD_UP, 0.1);
+      const tk2 = this.trailK[s];
+      if (tk2 > 0.001) {
+        // trailing through a dyno: toes pointed hard along the shin
+        this.v2.copy(this.U).multiplyScalar(-0.88).addScaledVector(Nw, -0.36).normalize();
+        this.v3.copy(Nw).multiplyScalar(-1).addScaledVector(this.v2, Nw.dot(this.v2)).normalize();
+        dir.lerp(this.v2, tk2).normalize();
+        up.lerp(this.v3, tk2);
+        up.addScaledVector(dir, -up.dot(dir)).normalize();
+      }
     }
     pole.normalize();
   }
@@ -3803,6 +4090,11 @@ export class ClimberModel extends THREE.Group {
     } else if (ph === 'hanging') {
       if (this.hasRopeAnchor) target.copy(this.ropeAnchor);
       else target.copy(g.pelvis).addScaledVector(WORLD_UP, 2.4).addScaledVector(Nw, -0.9);
+    } else if (this.flyK[0] > 0.3 || this.flyK[1] > 0.3) {
+      // through a dyno / deadpoint the eyes stay on the target hold
+      const L = state.limbs[this.flyK[1] > this.flyK[0] ? 'RH' : 'LH'];
+      frame.toWorld(L.pos, 0, target).addScaledVector(Uw, 0.04);
+      lam = 12;
     } else if (this.hasLook) {
       frame.toWorld(this.look, 0, target);
     } else {
