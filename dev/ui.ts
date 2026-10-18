@@ -5,8 +5,10 @@
 //   screen=splash|title|modes|name|hud|preview|pause|results|leaderboard|locker|settings|community|profile|
 //          guide|callout|confirm|toast|icons|portraits|all
 //   v=<variant>   results: send|fall|run-over|topped-rope · leaderboard/community: loading|empty|full ·
-//                 hud: boulder|rope|shake|top|tutorial · guide: top|bottom|think|warn|cheer · name: new|edit
+//                 hud: boulder|rope|shake|top|tutorial|calm|pumped|greasy|air|chalking|shakeout ·
+//                 guide: top|bottom|think|warn|cheer · name: new|edit
 //   bg=wall|gl|dark     pump=<0..1> tension=<0..1.5> (freeze HUD values)   rm=1 (reduced motion)   q=low
+//   pumpL / pumpR / frL / frR=<0..1> (per-forearm pump and per-hand chalk friction)   pure=1 (Pure mode)
 
 import { GameUI } from '../src/ui/ui';
 import { bus, type AppEvents } from '../src/core/events';
@@ -413,9 +415,19 @@ function portraitSheet(): void {
   root.appendChild(sheet);
 }
 
+/** HUD variants for the Phase B instruments (per-forearm pump, per-hand chalk, flight). */
+const HUD_VARIANTS: Record<string, { pumpL: number; pumpR: number; frL: number; frR: number; tension?: number }> = {
+  calm: { pumpL: 0.18, pumpR: 0.12, frL: 0.95, frR: 0.9, tension: 0.3 },
+  pumped: { pumpL: 0.86, pumpR: 0.41, frL: 0.62, frR: 0.8, tension: 0.95 },
+  greasy: { pumpL: 0.34, pumpR: 0.52, frL: 0.88, frR: 0.22, tension: 0.48 },
+  air: { pumpL: 0.3, pumpR: 0.44, frL: 0.85, frR: 0.7, tension: 0.2 },
+  chalking: { pumpL: 0.4, pumpR: 0.36, frL: 0.3, frR: 0.74, tension: 0.4 },
+  shakeout: { pumpL: 0.66, pumpR: 0.3, frL: 0.7, frR: 0.8, tension: 0.35 },
+};
+
 let hudT = 0;
 function hudLoop(): void {
-  const freeze = qs.has('pump') || qs.has('tension');
+  const freeze = qs.has('pump') || qs.has('tension') || variant in HUD_VARIANTS;
   const fixedPump = Number(qs.get('pump') ?? (variant === 'shake' ? 0.91 : 0.46));
   const fixedTen = Number(qs.get('tension') ?? (variant === 'shake' ? 1.05 : 0.52));
   let last = performance.now();
@@ -435,6 +447,32 @@ function hudLoop(): void {
       state.balance = Math.sin(hudT * 0.7) * 0.6;
     }
     state.topProgress = variant === 'top' ? 0.62 : 0;
+    // Phase B per-forearm pump + per-hand chalk, flight
+    const V = HUD_VARIANTS[variant] ?? null;
+    const num = (k: string, d: number): number => (qs.has(k) ? Number(qs.get(k)) : d);
+    const LH = state.limbs.LH;
+    const RH = state.limbs.RH;
+    if (V || qs.has('pumpL') || qs.has('frL')) {
+      LH.pump = num('pumpL', V?.pumpL ?? state.pump);
+      RH.pump = num('pumpR', V?.pumpR ?? state.pump * 0.6);
+      LH.friction = num('frL', V?.frL ?? 0.92);
+      RH.friction = num('frR', V?.frR ?? 0.86);
+      state.pump = Math.max(LH.pump, RH.pump);
+      if (V?.tension !== undefined) state.tension = V.tension;
+    } else {
+      LH.pump = state.pump;
+      RH.pump = state.pump * 0.62;
+      LH.friction = 0.9 - 0.05 * Math.sin(hudT * 0.3);
+      RH.friction = 0.55 + 0.2 * Math.sin(hudT * 0.25);
+    }
+    LH.chalking = variant === 'chalking';
+    LH.busy = variant === 'chalking';
+    LH.holdId = variant === 'chalking' || variant === 'shakeout' ? null : 'h0';
+    LH.shakingOut = variant === 'shakeout';
+    state.airborne = variant === 'air';
+    state.flight = variant === 'air' ? { kind: 'deadpoint', limbs: ['RH'], holdId: 'h4', t: 0.12, apexIn: 0.08, power: 1.1 } : null;
+    RH.flying = variant === 'air';
+    RH.holdId = variant === 'air' ? null : 'h1';
     if (ui.current === 'hud') ui.hud.update(state, (propsFor('hud') as ScreenProps['hud']).run);
     requestAnimationFrame(tick);
   };

@@ -28,6 +28,7 @@ import { createResults } from './screens/results';
 import { createSettings } from './screens/settings';
 import { createSplash } from './screens/splash';
 import { createTitle } from './screens/title';
+import { onPureMode } from '../input/pure';
 
 export type { HudRunInfo };
 
@@ -158,6 +159,8 @@ export class GameUI implements UIAPI {
     this.root = root;
     root.classList.add('jgu-ui');
     this.applyTokens(root);
+    // Pure mode (Phase D): one flag hides the HUD (and the limb handles, see LimbControls)
+    onPureMode((on) => root.classList.toggle('is-pure', on));
 
     this.layer = el('div', 'screens');
     this.fx = new FxLayer();

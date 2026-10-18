@@ -1,9 +1,19 @@
 // In-climb HUD. `frame()` runs every frame: it only touches text that changed and drives
 // meters with transforms / dash offsets (compositor-friendly, no layout reads, no innerHTML).
+//
+// Bottom instruments mirror the body: LEFT forearm · TENSION · RIGHT forearm. Each forearm column
+// shows that arm's pump (segmented bar + %, calm → working → PUMPED with a warning glyph and a pulse;
+// a 'pump-warning' sim event flashes it once) and that hand's chalk (FRESH → WORN → GREASY, CHALK
+// while it is in the bag, SHAKE while it shakes out). The column is the hand's CHALK button: a tap
+// sends 'ui:chalk' (LimbControls → sim.chalkUp); it invites a tap (hairline pill) when the hand is
+// greasy and could chalk now. While the body flies through a deadpoint / dyno the instrument glass
+// goes pink and the gauge reads AIRBORNE.
 
-import type { ScreenProps } from '../../core/contracts';
+import type { ScreenProps, SimEvent } from '../../core/contracts';
 import { bus } from '../../core/events';
-import type { ClimberState, RunInfo } from '../../core/types';
+import type { ClimberState, LimbSnapshot, RunInfo } from '../../core/types';
+import '../../input/bus-events';
+import { frictionWord } from '../../input/release';
 import { GAME, SIM } from '../../config/tuning';
 import { button, el, label, setText, toggle } from '../dom';
 import { icon } from '../icons';
@@ -25,6 +35,45 @@ export const CLIP_REACH_M = 1.0;
 const TENSION_FULL = 1.2;
 
 const SVGNS = 'http://www.w3.org/2000/svg';
+
+/** Forearm pump bands: working from 0.6, PUMPED from SIM.pumpWarn (deep pump), critical from 0.9. */
+const PUMP_WORK = 0.6;
+const PUMP_CRIT = 0.9;
+
+type ArmState = 'calm' | 'warn' | 'pumped' | 'crit';
+
+/** One forearm column of the instrument cluster (the hand's CHALK button). */
+interface ArmView {
+  hand: 'LH' | 'RH';
+  btn: HTMLButtonElement;
+  fill: HTMLElement;
+  pct: HTMLElement;
+  word: HTMLElement;
+  flash: HTMLElement;
+  q: { pump: number; pct: number; st: string; word: string; act: string; can: number; invite: number; aria: string };
+}
+
+/** Can this hand go to the chalk bag right now (mirrors ClimberSim.chalkUp's guards)? */
+export function canChalk(s: ClimberState, hand: 'LH' | 'RH'): boolean {
+  if (s.phase !== 'climbing' || s.airborne) return false;
+  const L = s.limbs[hand];
+  const o = s.limbs[hand === 'LH' ? 'RH' : 'LH'];
+  return !L.busy && !L.dragging && !L.flying && !!o.holdId && !o.busy && !o.dragging;
+}
+
+/** Forearm pump band for the HUD. */
+export function armState(pump: number): ArmState {
+  return pump >= PUMP_CRIT ? 'crit' : pump >= SIM.pumpWarn ? 'pumped' : pump >= PUMP_WORK ? 'warn' : 'calm';
+}
+
+/** What the chalk chip of a hand says: its activity (in the bag / shaking out) or its friction word. */
+export function chalkChip(L: LimbSnapshot): { word: string; act: 'chalk' | 'shake' | '' ; fr: 'fresh' | 'worn' | 'greasy' } {
+  const w = frictionWord(L.friction ?? 1);
+  const fr = w === 'FRESH' ? 'fresh' : w === 'WORN' ? 'worn' : 'greasy';
+  if (L.chalking) return { word: 'CHALK', act: 'chalk', fr };
+  if (L.shakingOut) return { word: 'SHAKE', act: 'shake', fr };
+  return { word: w, act: '', fr };
+}
 
 function arcGauge(): { svg: SVGSVGElement; val: SVGPathElement } {
   const svg = document.createElementNS(SVGNS, 'svg');
@@ -82,9 +131,9 @@ export class HudView implements ScreenView<P> {
   private altMarker = el('div', 'alt-marker', el('span', 'alt-val t-num', '0.0'));
   private altVal: HTMLElement;
   // meters
-  private pumpBox: HTMLElement;
-  private pumpFill = el('i', 'pump-fill');
-  private pumpPct = el('span', 'pump-pct t-num', '0%');
+  private arms: [ArmView, ArmView];
+  private instBox: HTMLElement;
+  private tenLbl: HTMLElement;
   private tenBox: HTMLElement;
   private tenArc: SVGPathElement;
   private tenState = el('span', 'tg-state', 'STEADY');
@@ -100,8 +149,7 @@ export class HudView implements ScreenView<P> {
 
   // last-written caches (avoid redundant DOM writes)
   private q = {
-    pump: -1,
-    pumpState: '',
+    air: '',
     ten: -1,
     tenState: '',
     bal: 999,
@@ -158,22 +206,20 @@ export class HudView implements ScreenView<P> {
     // top-hold progress
     this.topBox = el('div', 'hud-topprog hud-glass', icon('flag', 'tp-ic'), el('span', 'tp-txt', 'MATCH & HOLD'), el('span', 'tp-bar', this.topFill));
 
-    // instruments
-    this.pumpBox = el(
-      'div',
-      'inst inst-pump',
-      el('div', 'inst-head', icon('forearm', 'inst-ic'), label('PUMP'), icon('warn', 'inst-alert'), this.pumpPct),
-      el('div', 'pump-bar', this.pumpFill, el('i', 'pump-seg')),
-    );
+    // instruments: left forearm · tension · right forearm
+    this.arms = [this.buildArm('LH'), this.buildArm('RH')];
     const g = arcGauge();
     this.tenArc = g.val;
+    this.tenLbl = label('TENSION', 'tg-lbl');
     this.tenBox = el(
       'div',
       'inst inst-ten',
-      label('TENSION', 'tg-lbl'),
+      this.tenLbl,
       el('div', 'tg-wrap', g.svg, el('div', 'bal', el('i', 'bal-rail'), this.balDot)),
       el('div', 'tg-meta', icon('warn', 'inst-alert'), this.tenState),
     );
+    this.instBox = el('div', 'hud-inst hud-glass', this.arms[0].btn, el('i', 'inst-sep'), this.tenBox, el('i', 'inst-sep'), this.arms[1].btn);
+    bus.on('sim:event', this.onSimEvent);
 
     this.hintBtn = button({ icon: 'bulb', variant: 'icon', cls: 'hud-hint', aria: 'Hint', onTap: () => bus.emit('ui:hint') });
     this.hintBtn.appendChild(this.hintCount);
@@ -201,7 +247,7 @@ export class HudView implements ScreenView<P> {
         'div',
         'hud-bottom',
         el('div', 'hb-btn', this.hintBtn, label('HINT')),
-        el('div', 'hud-inst hud-glass', this.pumpBox, el('i', 'inst-sep'), this.tenBox),
+        this.instBox,
         el('div', 'hb-btn', this.eyeBtn, label('LOOK')),
       ),
     );
@@ -211,6 +257,100 @@ export class HudView implements ScreenView<P> {
   update(props: P): void {
     this.applyRun(props.run);
   }
+
+  private buildArm(hand: 'LH' | 'RH'): ArmView {
+    const side = hand === 'LH' ? 'L' : 'R';
+    const fill = el('i', 'fa-fill');
+    const pct = el('span', 'fa-pct t-num', '0%');
+    const word = el('span', 'fa-word', 'FRESH');
+    const flash = el('i', 'fa-flash');
+    const btn = el(
+      'button',
+      `fa fa-${side.toLowerCase()} st-calm fr-fresh`,
+      flash,
+      el('span', 'fa-head', el('b', 'fa-side', side), icon('forearm', 'fa-ic'), icon('warn', 'fa-alert'), pct),
+      el('span', 'fa-bar', fill, el('i', 'fa-seg')),
+      el('span', 'fa-chalk', icon('chalk', 'fa-bag'), word),
+    );
+    btn.type = 'button';
+    btn.addEventListener('click', () => bus.emit('ui:chalk', { hand }));
+    const v: ArmView = { hand, btn, fill, pct, word, flash, q: { pump: -1, pct: -1, st: 'calm', word: 'FRESH', act: '', can: -1, invite: -1, aria: '' } };
+    this.armAria(v, 0, 'FRESH');
+    return v;
+  }
+
+  private armAria(a: ArmView, pct: number, word: string): void {
+    const side = a.hand === 'LH' ? 'Left' : 'Right';
+    const aria = `${side} forearm pump ${pct}%, chalk ${word.toLowerCase()}. Tap to chalk up.`;
+    if (aria !== a.q.aria) {
+      a.q.aria = aria;
+      a.btn.setAttribute('aria-label', aria);
+    }
+  }
+
+  /** One forearm column per frame: cached, quantised writes only. */
+  private frameArm(a: ArmView, s: ClimberState): void {
+    const L = s.limbs[a.hand];
+    const q = a.q;
+    const pump = Math.min(1, Math.max(0, L.pump ?? s.pump));
+    const pq = Math.round(pump * 200);
+    if (pq !== q.pump) {
+      q.pump = pq;
+      a.fill.style.transform = `scaleX(${(pq / 200).toFixed(3)})`;
+    }
+    const pct = Math.round(pump * 100);
+    const chip = chalkChip(L);
+    if (pct !== q.pct) {
+      q.pct = pct;
+      setText(a.pct, `${pct}%`);
+      this.armAria(a, pct, chip.word);
+    }
+    const st = armState(pump);
+    if (st !== q.st) {
+      a.btn.classList.remove(`st-${q.st}`);
+      a.btn.classList.add(`st-${st}`);
+      q.st = st;
+    }
+    const wordKey = chip.word + '|' + chip.fr;
+    if (wordKey !== q.word) {
+      const prevFr = q.word.split('|')[1];
+      if (prevFr) a.btn.classList.remove(`fr-${prevFr}`);
+      a.btn.classList.add(`fr-${chip.fr}`);
+      q.word = wordKey;
+      setText(a.word, chip.word);
+      this.armAria(a, pct, chip.word);
+    }
+    if (chip.act !== q.act) {
+      toggle(a.btn, 'is-chalking', chip.act === 'chalk');
+      toggle(a.btn, 'is-shaking', chip.act === 'shake');
+      q.act = chip.act;
+    }
+    const can = canChalk(s, a.hand) ? 1 : 0;
+    if (can !== q.can) {
+      q.can = can;
+      toggle(a.btn, 'can', can === 1);
+    }
+    // invite a tap: greasy (or worn and pumped) and free to chalk right now
+    const invite = can && !chip.act && (chip.fr === 'greasy' || (chip.fr === 'worn' && st !== 'calm')) ? 1 : 0;
+    if (invite !== q.invite) {
+      q.invite = invite;
+      toggle(a.btn, 'invite', invite === 1);
+    }
+  }
+
+  private readonly onSimEvent = (e: SimEvent): void => {
+    if (e.type !== 'pump-warning' || !this.el.isConnected) return;
+    const a = e.limb === 'LH' ? this.arms[0] : e.limb === 'RH' ? this.arms[1] : null;
+    if (!a || typeof a.flash.animate !== 'function') return;
+    // one tasteful flash (opacity + scale only: compositor work, no layout)
+    a.flash.animate(
+      [
+        { opacity: 0.9, transform: 'scale(0.96)' },
+        { opacity: 0, transform: 'scale(1.08)' },
+      ],
+      { duration: 720, easing: 'cubic-bezier(.2,.8,.2,1)' },
+    );
+  };
 
   /** Static-ish run info (cheap to call every frame: guarded by caches). */
   private applyRun(run: HudRunInfo): void {
@@ -307,20 +447,18 @@ export class HudView implements ScreenView<P> {
       setText(this.timeEl, fmtClock(tenths / 10));
     }
 
-    // PUMP
+    // FOREARMS (pump + chalk per hand)
     const pump = Math.min(1, Math.max(0, s.pump));
-    const pq = Math.round(pump * 200);
-    if (pq !== q.pump) {
-      q.pump = pq;
-      this.pumpFill.style.transform = `scaleX(${(pq / 200).toFixed(3)})`;
-      const pctTxt = `${Math.round(pump * 100)}%`;
-      setText(this.pumpPct, pctTxt);
-      const st = pump >= 0.85 ? 'crit' : pump >= 0.6 ? 'warn' : 'calm';
-      if (st !== q.pumpState) {
-        this.pumpBox.classList.remove(`st-${q.pumpState}`);
-        this.pumpBox.classList.add(`st-${st}`);
-        q.pumpState = st;
-      }
+    this.frameArm(this.arms[0], s);
+    this.frameArm(this.arms[1], s);
+
+    // AIRBORNE: a deadpoint / dyno in flight
+    const air = s.airborne && s.flight ? s.flight.kind : s.airborne ? 'dyno' : '';
+    if (air !== q.air) {
+      q.air = air;
+      toggle(this.el, 'is-air', !!air);
+      setText(this.tenLbl, air === 'deadpoint' ? 'DEADPOINT' : air ? 'DYNO' : 'TENSION');
+      q.tenState = ''; // re-write the state word below
     }
 
     // TENSION
@@ -330,14 +468,14 @@ export class HudView implements ScreenView<P> {
       q.ten = tq;
       this.tenArc.style.strokeDashoffset = String(100 - tq / 2);
     }
-    const shaking = ten >= SIM.shakeOn || s.shake > 0.18;
-    const tst = shaking ? 'crit' : ten >= 0.42 ? 'warn' : 'calm';
+    const shaking = !air && (ten >= SIM.shakeOn || s.shake > 0.18);
+    const tst = air ? 'air' : shaking ? 'crit' : ten >= 0.42 ? 'warn' : 'calm';
     if (tst !== q.tenState) {
-      this.tenBox.classList.remove(`st-${q.tenState}`);
+      this.tenBox.classList.remove('st-calm', 'st-warn', 'st-crit', 'st-air');
       this.tenBox.classList.add(`st-${tst}`);
       toggle(this.el, 'is-shaking', shaking);
       q.tenState = tst;
-      setText(this.tenState, shaking ? 'SHAKING' : tst === 'warn' ? 'WORKING' : 'STEADY');
+      setText(this.tenState, air ? 'AIRBORNE' : shaking ? 'SHAKING' : tst === 'warn' ? 'WORKING' : 'STEADY');
     }
     const bq = Math.round(Math.max(-1, Math.min(1, s.balance)) * 40);
     if (bq !== q.bal) {

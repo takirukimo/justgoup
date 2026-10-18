@@ -10,7 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const mine = (p) => {
   const rel = path.relative(root, p).split(path.sep).join('/');
   if (rel === '' || rel === 'src' || rel === 'dev') return true;
-  return rel.startsWith('src/input') || rel.startsWith('src/ui') || rel.startsWith('dev/input');
+  return rel.startsWith('src/input') || rel.startsWith('src/ui') || rel.startsWith('dev/input') || rel.startsWith('dev/ui');
 };
 
 export default defineConfig({

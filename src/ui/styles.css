@@ -2217,9 +2217,12 @@
   height: 72px;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 14px 0 13px;
+  gap: 10px;
+  padding: 0 12px;
   border-radius: 20px;
+  transition:
+    border-color 0.18s,
+    box-shadow 0.18s;
 }
 .inst-sep {
   width: 1px;
@@ -2230,37 +2233,97 @@
 .inst {
   min-width: 0;
 }
-.inst-pump {
-  flex: 1;
+/* Forearm columns: left · tension · right. Each one is that hand's CHALK button. */
+.fa {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  align-self: stretch;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  justify-content: center;
+  gap: 7px;
+  margin: 6px 0;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 12px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
-.inst-head {
+.fa:focus-visible {
+  outline: 2px solid var(--c-chalk);
+  outline-offset: 2px;
+}
+.fa.is-pressed {
+  transform: scale(0.97);
+}
+.fa-flash {
+  position: absolute;
+  inset: -2px -6px;
+  border-radius: 12px;
+  opacity: 0;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1.5px var(--c-bad);
+  background: rgba(var(--c-bad-rgb), 0.12);
+}
+.fa-head,
+.fa-chalk {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  min-width: 0;
+  line-height: 1;
 }
-.inst-ic {
-  width: 17px !important;
-  height: 17px !important;
+.fa-r .fa-head,
+.fa-r .fa-chalk {
+  flex-direction: row-reverse;
+}
+.fa-side {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--c-bone);
+}
+.jgu-ui .fa-ic {
+  width: 14px;
+  height: 14px;
   color: var(--c-mist);
   transition: color 0.2s;
 }
-.pump-pct {
+.fa-r .fa-ic {
+  transform: scaleX(-1);
+}
+.jgu-ui .fa-alert {
+  display: none;
+  width: 12px;
+  height: 12px;
+  color: var(--c-bad);
+  stroke-width: 2.2;
+}
+.fa-pct {
   margin-left: auto;
   font-size: 12px;
   font-weight: 700;
   color: var(--c-chalk);
+  transition: color 0.2s;
 }
-.pump-bar {
+.fa-r .fa-pct {
+  margin-left: 0;
+  margin-right: auto;
+}
+.fa-bar {
   position: relative;
-  height: 9px;
+  display: block;
+  height: 8px;
   border-radius: 3px;
   background: rgba(255, 255, 255, 0.08);
   overflow: hidden;
 }
-.pump-fill {
+.fa-fill {
   position: absolute;
   inset: 0;
   transform-origin: left center;
@@ -2268,33 +2331,120 @@
   background: var(--c-glacier);
   transition: background-color 0.25s;
 }
-.pump-seg {
+.fa-r .fa-fill {
+  transform-origin: right center;
+}
+.fa-seg {
   position: absolute;
   inset: 0;
-  background: repeating-linear-gradient(90deg, transparent 0 calc(10% - 2px), rgba(13, 14, 16, 0.92) calc(10% - 2px) 10%);
+  background: repeating-linear-gradient(90deg, transparent 0 calc(12.5% - 2px), rgba(13, 14, 16, 0.92) calc(12.5% - 2px) 12.5%);
 }
-.inst-pump.st-warn .pump-fill {
-  background: var(--c-warn);
+.fa-chalk {
+  align-self: flex-start;
+  height: 16px;
+  margin: -1px -5px 0;
+  padding: 0 5px;
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 1px transparent;
+  transition: box-shadow 0.2s, background-color 0.2s;
 }
-.inst-pump.st-warn .inst-ic {
+.fa-r .fa-chalk {
+  align-self: flex-end;
+}
+.jgu-ui .fa-bag {
+  width: 12px;
+  height: 12px;
+  color: var(--c-mist);
+}
+.fa-word {
+  font-family: var(--f-mono);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--c-mist);
+  white-space: nowrap;
+}
+/* chalk: fresh → worn → greasy (words + the bag's tone; greasy also tints the bar's frame) */
+.fa.fr-worn .fa-word,
+.fa.fr-worn .fa-bag {
+  color: var(--c-fog);
+}
+.fa.fr-greasy .fa-word,
+.fa.fr-greasy .fa-bag {
   color: var(--c-warn);
 }
-.inst-pump.st-crit .pump-fill {
-  background: var(--c-bad);
-  animation: crit 0.4s ease-in-out infinite alternate;
+.fa.is-chalking .fa-word,
+.fa.is-chalking .fa-bag {
+  color: var(--c-chalk);
+  animation: fa-dip 0.5s ease-in-out infinite alternate;
 }
-.inst-pump.st-crit .inst-ic,
-.inst-pump.st-crit .pump-pct {
-  color: var(--c-bad);
+.fa.is-shaking .fa-word,
+.fa.is-shaking .fa-bag {
+  color: var(--c-glacier);
+}
+.fa.is-shaking .fa-fill {
+  background: var(--c-glacier);
+}
+/* an open invitation: greasy and free to chalk right now */
+.fa.invite .fa-chalk {
+  background: rgba(255, 178, 63, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(255, 178, 63, 0.5);
+  animation: fa-invite 1.6s ease-in-out infinite;
+}
+@keyframes fa-dip {
+  to {
+    opacity: 0.45;
+  }
+}
+@keyframes fa-invite {
+  50% {
+    box-shadow: inset 0 0 0 1px rgba(255, 178, 63, 0.18);
+  }
+}
+/* pump bands: working (amber) → PUMPED (danger, warning glyph, pulse) → critical (faster) */
+.fa.st-warn .fa-fill {
+  background: var(--c-warn);
+}
+.fa.st-warn .fa-ic {
+  color: var(--c-warn);
+}
+.fa.st-pumped .fa-fill,
+.fa.st-crit .fa-fill {
+  background: var(--c-bad);
+  animation: crit 0.55s ease-in-out infinite alternate;
+}
+.fa.st-crit .fa-fill {
+  animation-duration: 0.3s;
+}
+.fa.st-pumped .fa-pct,
+.fa.st-crit .fa-pct {
+  color: var(--c-bad-ink);
+}
+.jgu-ui .fa.st-pumped .fa-ic,
+.jgu-ui .fa.st-crit .fa-ic {
+  display: none;
+}
+.jgu-ui .fa.st-pumped .fa-alert,
+.jgu-ui .fa.st-crit .fa-alert {
+  display: block;
+  animation: alert-pop 0.32s var(--ease-spring) both;
 }
 @keyframes crit {
   to {
     opacity: 0.55;
   }
 }
+/* in flight (deadpoint / dyno): the glass and the gauge go pink */
+.is-air .hud-inst {
+  border-color: rgba(238, 107, 121, 0.55);
+  box-shadow: var(--hi), 0 0 0 1px rgba(213, 64, 81, 0.28), 0 8px 26px -10px rgba(213, 64, 81, 0.55);
+}
+.is-air .fa {
+  opacity: 0.6;
+}
 .inst-ten {
   flex: none;
-  width: 84px;
+  width: 72px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2415,6 +2565,13 @@
   color: var(--c-bad);
   animation: crit 0.32s ease-in-out infinite alternate;
 }
+.inst-ten.st-air .tg-val {
+  stroke: var(--c-signal);
+}
+.inst-ten.st-air .tg-state,
+.inst-ten.st-air .tg-lbl {
+  color: var(--c-signal-ink);
+}
 /* Danger is never colour-only: a warning glyph appears next to the critical readout. */
 .jgu-ui .inst-alert {
   display: none;
@@ -2422,16 +2579,6 @@
   height: 12px !important;
   color: var(--c-bad);
   stroke-width: 2.2;
-}
-.inst-pump .inst-alert {
-  margin-left: auto;
-}
-.jgu-ui .inst-pump.st-crit .inst-alert {
-  display: block;
-  animation: alert-pop 0.32s var(--ease-spring) both;
-}
-.inst-pump.st-crit .pump-pct {
-  margin-left: 4px;
 }
 .jgu-ui .inst-ten.st-crit .inst-alert {
   display: block;
@@ -2444,6 +2591,15 @@
     opacity: 0;
     transform: scale(0.4);
   }
+}
+
+/* Pure mode (ROADMAP Phase D, input/pure.ts): no HUD; only a quiet pause button stays. */
+.jgu-ui.is-pure .scr-hud > :not(.hud-top),
+.jgu-ui.is-pure .scr-hud .hud-top > :not(.hud-pause) {
+  display: none;
+}
+.jgu-ui.is-pure .scr-hud .hud-pause {
+  opacity: 0.55;
 }
 
 /* ───────────────────────────── preview ───────────────────────────── */
@@ -5201,6 +5357,13 @@
 }
 
 @container ui (max-width: 370px) {
+  .hud-inst {
+    gap: 8px;
+    padding: 0 10px;
+  }
+  .jgu-ui .fa-bag {
+    display: none;
+  }
   /* narrow phones: the two legal lines stack, centred, instead of running into each other */
   .splash-legal {
     flex-direction: column;
