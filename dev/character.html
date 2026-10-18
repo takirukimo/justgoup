@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <title>CHARACTER dev harness</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;800&family=JetBrains+Mono:wght@500;700&display=swap"
+    />
+    <style>
+      html, body { margin: 0; height: 100%; background: #0d0e10; overflow: hidden; touch-action: none; color: #e9e5dd; }
+      #gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+      #hud { position: fixed; left: 8px; bottom: 8px; font: 500 10px/1.4 'JetBrains Mono', monospace; color: #9ad4de;
+             white-space: pre; pointer-events: none; text-shadow: 0 1px 2px #000; opacity: .85; }
+      #labels { position: fixed; inset: 0; pointer-events: none; font: 700 10px/1 'JetBrains Mono', monospace; letter-spacing: .12em; }
+      #labels div { position: absolute; transform: translate(-50%, 0); color: #8b929c; text-transform: uppercase; }
+      #portraits { position: fixed; inset: 0; display: none; flex-wrap: wrap; gap: 10px; padding: 16px; align-content: flex-start;
+                   background: radial-gradient(circle at 50% 30%, #23272e, #0d0e10); }
+      #portraits figure { margin: 0; width: calc(33% - 8px); text-align: center; font: 700 9px/1.2 'JetBrains Mono', monospace;
+                          letter-spacing: .12em; color: #8b929c; }
+      #portraits img { width: 100%; border-radius: 14px; background: linear-gradient(160deg, #2b2f36, #121418);
+                       border: 1px solid rgba(255,255,255,.08); }
+    </style>
+  </head>
+  <body>
+    <canvas id="gl"></canvas>
+    <div id="labels"></div>
+    <div id="portraits"></div>
+    <div id="hud"></div>
+    <script type="module" src="./character.ts"></script>
+  </body>
+</html>

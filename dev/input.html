@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#0D0E10" />
+    <title>INPUT dev harness</title>
+    <link rel="icon" href="data:," />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
+    />
+    <style>
+      html, body { margin: 0; height: 100%; background: #0d0e10; overflow: hidden; overscroll-behavior: none; }
+      body { -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; touch-action: none; }
+      #app { position: fixed; inset: 0; overflow: hidden; background: #0d0e10; }
+      @media (min-aspect-ratio: 3/4) and (min-width: 700px) {
+        #app { inset: auto; left: 50%; top: 50%; transform: translate(-50%, -50%); height: min(100%, 900px); aspect-ratio: 9 / 19.5;
+               border-radius: 30px; box-shadow: 0 0 0 1px #24272c, 0 0 0 10px #0a0b0c, 0 0 0 11px #2a2d33; }
+      }
+      #gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+      #controls { position: absolute; inset: 0; }
+      #dev { position: absolute; inset: 0; pointer-events: none; font: 500 9.5px/1.45 'JetBrains Mono', ui-monospace, monospace; color: #b9bec5; }
+      .band { position: absolute; left: 0; right: 0; background: rgba(13, 14, 16, 0.55); border: 0 solid rgba(255, 255, 255, 0.08); }
+      .band.top { top: 0; height: calc(env(safe-area-inset-top, 0px) + 76px); border-bottom-width: 1px; }
+      .band.bottom { bottom: 0; height: calc(env(safe-area-inset-bottom, 0px) + 98px); border-top-width: 1px; }
+      .band .t { position: absolute; left: 16px; letter-spacing: 0.18em; color: #8b929c; }
+      .band.top .t { bottom: 12px; }
+      .band.bottom .t { top: 12px; }
+      .band h1 { position: absolute; left: 16px; bottom: 26px; margin: 0; font: 800 22px/1 'Barlow Condensed', sans-serif; letter-spacing: 0.08em; color: #e9e5dd; }
+      .meters { position: absolute; left: 16px; right: 16px; top: 30px; display: grid; grid-template-columns: 1fr 1fr 1.6fr; gap: 14px; }
+      .k { letter-spacing: 0.18em; color: #8b929c; }
+      .bar { height: 3px; margin-top: 5px; background: #23272e; border-radius: 2px; overflow: hidden; }
+      .bar i { display: block; height: 100%; width: 0; background: #4fd18b; }
+      #log { white-space: pre; color: #9ad4de; }
+      #dev.hide { display: none; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="gl"></canvas>
+      <div id="controls"></div>
+      <div id="dev">
+        <div class="band top"><h1 id="name">—</h1><span class="t" id="meta">CHIRAL HQ · INPUT LAB</span></div>
+        <div class="band bottom">
+          <span class="t">DRAG A HANDLE · 1–4 + MOUSE · R RESET · N NEXT</span>
+          <div class="meters">
+            <div><div class="k">TENSION</div><div class="bar"><i id="tension"></i></div></div>
+            <div><div class="k">PUMP</div><div class="bar"><i id="pump"></i></div></div>
+            <div><div class="k">EVENTS</div><div id="log"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="./input.ts"></script>
+  </body>
+</html>

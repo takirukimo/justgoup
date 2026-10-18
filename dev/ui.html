@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#0D0E10" />
+    <title>UI dev harness · Just Go Up</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap"
+    />
+    <style>
+      html, body { margin: 0; height: 100%; background: #0D0E10; overflow: hidden; overscroll-behavior: none; }
+      body { -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; touch-action: none; }
+      #stage { position: fixed; inset: 0; display: grid; place-items: center; background: #0D0E10; }
+      #app { position: relative; width: 100%; height: 100%; overflow: hidden; background: #0D0E10; contain: strict; }
+      @media (min-aspect-ratio: 3/4) and (min-width: 700px) {
+        #app { height: min(100%, 940px); width: auto; aspect-ratio: 9 / 19.5; border-radius: 34px;
+               box-shadow: 0 0 0 1px #24272c, 0 0 0 10px #0a0b0c, 0 0 0 11px #2a2d33, 0 40px 120px rgba(0,0,0,.7); }
+      }
+      #gl, #wall { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+      #controls, #ui { position: absolute; inset: 0; }
+      #ui { pointer-events: none; }
+      #devbar { position: fixed; left: 8px; top: 8px; z-index: 10; display: flex; flex-wrap: wrap; gap: 4px; max-width: 280px;
+                font: 500 10px/1 'JetBrains Mono', monospace; }
+      #devbar a { color: #9AD4DE; background: rgba(0,0,0,.6); padding: 5px 6px; border-radius: 5px; text-decoration: none; }
+      #devbar a.on { background: #FF4F1F; color: #0D0E10; }
+      @media (max-width: 699px) { #devbar { display: none; } }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <div id="app">
+        <canvas id="wall"></canvas>
+        <canvas id="gl"></canvas>
+        <div id="controls"></div>
+        <div id="ui"></div>
+      </div>
+    </div>
+    <nav id="devbar"></nav>
+    <script type="module" src="./ui.ts"></script>
+  </body>
+</html>
