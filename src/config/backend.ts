@@ -14,9 +14,9 @@
 // Leave both strings empty to run without Supabase (Artifact db or OFFLINE fallback).
 
 // ┌──────────────────────── SUPABASE PROJECT ────────────────────────┐
-// │ Replace the two strings below (keep the quotes).                 │
-const FALLBACK_SUPABASE_URL = '';
-const FALLBACK_SUPABASE_ANON_KEY = '';
+// │ CHIRAL / justgoup project (eu-central-2). Publishable key only.  │
+const FALLBACK_SUPABASE_URL = 'https://frgffdkpxmxrfcmazmnk.supabase.co';
+const FALLBACK_SUPABASE_ANON_KEY = 'sb_publishable_uCfF0NXWLgnVYSFjp4iawA_WoyMWLIP';
 // └──────────────────────────────────────────────────────────────────┘
 
 function envString(value: unknown): string {

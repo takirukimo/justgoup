@@ -230,7 +230,7 @@ create or replace function public.score_rank(p_mode text, p_score integer, p_dai
 returns integer
 language plpgsql
 stable
-security definer
+security invoker  -- only counts rows anon can already read
 set search_path = public, pg_temp
 as $$
 declare

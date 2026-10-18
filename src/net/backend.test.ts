@@ -11,6 +11,18 @@ import { OUTBOX_KEY } from './outbox';
 import { resetMemoryStore } from './storage';
 import { SupabaseBackend } from './supabase';
 
+// The shipped config points at the real CHIRAL Supabase project. Tests must never reach it:
+// treat Supabase as unconfigured unless a test passes its own URL/key + fake fetch.
+vi.mock('../config/backend', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../config/backend')>();
+  return {
+    ...actual,
+    SUPABASE_URL: '',
+    SUPABASE_ANON_KEY: '',
+    isSupabaseConfigured: (url = '', key = '') => actual.isSupabaseConfigured(url, key),
+  };
+});
+
 // ───────────────────────────── shims + fakes ─────────────────────────────
 
 class MemoryStorage implements Storage {

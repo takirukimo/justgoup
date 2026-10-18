@@ -371,10 +371,13 @@ export function withFallback(primary: BackendAPI, opts: WithFallbackOptions = {}
 
 function urlPreference(): BackendPreference | null {
   try {
-    const search = (globalThis as { location?: { search?: string } }).location?.search;
-    if (!search) return null;
-    const v = new URLSearchParams(search).get('backend');
-    return v === 'supabase' || v === 'artifact' || v === 'local' || v === 'auto' ? v : null;
+    const g = globalThis as { location?: { search?: string }; navigator?: { webdriver?: boolean } };
+    const v = g.location?.search ? new URLSearchParams(g.location.search).get('backend') : null;
+    if (v === 'supabase' || v === 'artifact' || v === 'local' || v === 'auto') return v;
+    // Automated browsers (Playwright/Selenium QA runs) never write to the real global boards
+    // unless a test opts in explicitly with ?backend=supabase.
+    if (g.navigator?.webdriver) return 'local';
+    return null;
   } catch {
     return null;
   }
