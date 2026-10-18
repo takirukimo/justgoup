@@ -95,6 +95,15 @@ export const HEADS: readonly HeadDef[] = [
     unlock: { kind: 'points', points: 25000 },
     colors: { base: '#3A3A3D', secondary: '#E7A552', accent: '#D8D2C4', eye: '#E04A2A' },
   },
+  {
+    id: 'human',
+    name: 'Human',
+    local: 'Mönsch',
+    blurb: 'No horns, no hooves. Just a CHIRAL SPORTS cap and stubbornness.',
+    unlock: { kind: 'free' },
+    // base = skin, secondary = hair, accent = cap, eye = iris
+    colors: { base: '#C99A78', secondary: '#2B2420', accent: '#141517', eye: '#3B2A20' },
+  },
 ];
 
 export interface ColorwayDef {
@@ -110,10 +119,13 @@ export interface ColorwayDef {
 }
 
 export const COLORWAYS: readonly ColorwayDef[] = [
-  { id: 'basalt', name: 'Basalt', unlock: { kind: 'free' }, top: '#1C1E22', bottom: '#2A2D33', shoe: '#2B2E33', shoeAccent: '#FF4F1F', accent: '#FF4F1F' },
+  // CHIRAL SPORTS tees (assets/reference/tee-*.webp): `accent` is the print colour (chest mark + vertical back wordmark).
+  { id: 'basalt', name: 'CHIRAL Black', unlock: { kind: 'free' }, top: '#141517', bottom: '#1E2024', shoe: '#2B2E33', shoeAccent: '#D54051', accent: '#FFFFFF' },
+  { id: 'white', name: 'CHIRAL White', unlock: { kind: 'free' }, top: '#F2F0EB', bottom: '#1E2024', shoe: '#E9E5DD', shoeAccent: '#D54051', accent: '#D54051' },
+  { id: 'pink', name: 'CHIRAL Pink', unlock: { kind: 'free' }, top: '#D54051', bottom: '#1E2024', shoe: '#1E2024', shoeAccent: '#FFFFFF', accent: '#FFFFFF' },
   { id: 'glacier', name: 'Glacier', unlock: { kind: 'free' }, top: '#9AD4DE', bottom: '#2A2F38', shoe: '#E9E5DD', shoeAccent: '#2F6FEB', accent: '#E9E5DD' },
   { id: 'moss', name: 'Moss', unlock: { kind: 'points', points: 800 }, top: '#5E6B45', bottom: '#2F3328', shoe: '#C9B27A', shoeAccent: '#1E1F1A', accent: '#D8CFA8' },
-  { id: 'ember', name: 'Ember', unlock: { kind: 'points', points: 2500 }, top: '#FF4F1F', bottom: '#1D1F23', shoe: '#1D1F23', shoeAccent: '#FF4F1F', accent: '#F6F4EF' },
+  { id: 'ember', name: 'Oxblood', unlock: { kind: 'points', points: 2500 }, top: '#7A2430', bottom: '#1D1F23', shoe: '#1D1F23', shoeAccent: '#D54051', accent: '#F6F4EF' },
   { id: 'lichen', name: 'Lichen', unlock: { kind: 'flashes', flashes: 5 }, top: '#B9C4A0', bottom: '#4A5240', shoe: '#E3DFD3', shoeAccent: '#5E6B45', accent: '#2B2D31' },
   { id: 'dune', name: 'Dune', unlock: { kind: 'points', points: 6000 }, top: '#D8C7A6', bottom: '#8A7458', shoe: '#5E4C38', shoeAccent: '#F2C230', accent: '#3A2E22' },
   { id: 'alpenglow', name: 'Alpenglow', unlock: { kind: 'clips', clips: 30 }, top: '#E86A6A', bottom: '#2D2A3A', shoe: '#F0B49A', shoeAccent: '#8B5CF6', accent: '#FFE1C8' },
@@ -131,7 +143,7 @@ export const CHALKS: readonly ChalkDef[] = [
   { id: 'classic', name: 'Classic', color: '#F6F4EF', unlock: { kind: 'free' } },
   { id: 'glacier', name: 'Glacier', color: '#B8E6F0', unlock: { kind: 'points', points: 1200 } },
   { id: 'moss', name: 'Moss', color: '#CFE0A8', unlock: { kind: 'points', points: 3000 } },
-  { id: 'ember', name: 'Ember', color: '#FFB08F', unlock: { kind: 'streak', streak: 5 } },
+  { id: 'ember', name: 'Pink Dust', color: '#F2A9B2', unlock: { kind: 'streak', streak: 5 } },
   { id: 'gold', name: 'Gold Dust', color: '#F2D27A', unlock: { kind: 'points', points: 15000 } },
 ];
 

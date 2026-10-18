@@ -26,6 +26,8 @@ const BUILDERS: Record<HeadId, () => THREE.Group> = {
   lynx: buildLynx,
   ram: buildRam,
   vulture: buildVulture,
+  // TEMPORARY: replaced by the real human head (with CHIRAL SPORTS cap) in Phase A.
+  human: () => buildIbex(),
 };
 
 export function createHead(id: HeadId): THREE.Group {

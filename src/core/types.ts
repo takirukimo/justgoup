@@ -87,7 +87,34 @@ export interface BoulderDef {
   createdAt?: number;
   /** Optional authored start foot placement (hold ids). Otherwise the sim picks nearest footholds. */
   startFeet?: { LF?: string; RF?: string };
+  /**
+   * Optional multi-angle wall (Phase B): panels stacked bottom → top along the wall SURFACE.
+   * Wall-local y is the distance along the surface, so a panel spans [y0, next panel's y0).
+   * When absent the wall is one flat panel at `wallAngle`. When present, `wallAngle` is the
+   * angle of the steepest panel the climber meets (for labels / grading).
+   */
+  profile?: WallPanel[];
+  /** Optional route archetype (generator / editor / labels). */
+  style?: RouteStyle;
 }
+
+/** One flat section of a multi-angle wall. */
+export interface WallPanel {
+  /** Distance along the wall surface (m) where this panel starts. The first panel starts at 0. */
+  y0: number;
+  /** Degrees: 0 vertical, + overhang (top toward the climber), − slab. −20..90 (90 = horizontal roof). */
+  angle: number;
+}
+
+export type RouteStyle =
+  | 'vertical'
+  | 'slab'
+  | 'overhang'
+  | 'cave' // steep → roof
+  | 'traverse'
+  | 'dyno'
+  | 'compression' // volumes, squeezing
+  | 'mixed';
 
 // ───────────────────────────── Sim output ─────────────────────────────
 
@@ -177,9 +204,11 @@ export type HeadId =
   | 'eagle'
   | 'lynx'
   | 'ram'
-  | 'vulture';
+  | 'vulture'
+  | 'human'; // a plain human climber in a CHIRAL SPORTS cap
 
-export type ColorwayId = 'basalt' | 'glacier' | 'moss' | 'ember' | 'lichen' | 'dune' | 'alpenglow' | 'aurora';
+/** CHIRAL SPORTS tee variants: basalt = black tee + white logo, white = white tee + pink logo, pink = pink tee + white logo. */
+export type ColorwayId = 'basalt' | 'white' | 'pink' | 'glacier' | 'moss' | 'ember' | 'lichen' | 'dune' | 'alpenglow' | 'aurora';
 
 export type ChalkId = 'classic' | 'glacier' | 'ember' | 'moss' | 'gold';
 
