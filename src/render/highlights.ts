@@ -109,6 +109,8 @@ interface Active {
   pos: THREE.Vector3;
   radius: number;
   phase: number;
+  /** Surface y of the highlighted thing (its panel frame orients the ring). */
+  wallY: number;
 }
 
 function arrowTexture(kind: 'arrow' | 'chevron'): THREE.CanvasTexture {
@@ -169,6 +171,7 @@ export class Highlights {
   private outlineMat: THREE.ShaderMaterial;
   private tmpColor = new THREE.Color();
   private tmpV = new THREE.Vector3();
+  private tmpN = new THREE.Vector3();
 
   /**
    * `resolveExtra` lets non-hold targets be highlighted with the same API (e.g. quickdraw ids
@@ -282,7 +285,7 @@ export class Highlights {
   }
 
   private newActive(): Active {
-    return { holdId: '', kinds: 0, quality: 0, seen: false, ring: null, sprite: null, spriteKind: null, outline: null, pos: new THREE.Vector3(), radius: 0.1, phase: 0 };
+    return { holdId: '', kinds: 0, quality: 0, seen: false, ring: null, sprite: null, spriteKind: null, outline: null, pos: new THREE.Vector3(), radius: 0.1, phase: 0, wallY: 0 };
   }
 
   private place(a: Active): void {
@@ -293,10 +296,12 @@ export class Highlights {
       if (e) {
         this.frame.toWorldXYZ(e.x, e.y, 0.03, a.pos);
         a.radius = e.radius;
+        a.wallY = e.y;
       }
       return;
     }
-    this.frame.toWorldXYZ(h.x, h.y, 0.006, a.pos);
+    a.wallY = h.y;
+    this.frame.toWorldXYZ(h.x, h.y, 0, a.pos).addScaledVector(this.frame.normalAt(h.y, this.tmpN, false), 0.006);
     a.radius = g ? Math.max(g.halfX, g.halfY) * (h.type === 'volume' ? 0.85 : 1.12) + 0.035 : h.size + 0.04;
   }
 
@@ -310,7 +315,7 @@ export class Highlights {
       }
       a.ring.mat.uniforms.uStyle.value = style;
       a.ring.mesh.position.copy(a.pos);
-      a.ring.mesh.quaternion.copy(this.frame.quaternion);
+      this.frame.quaternionAt(a.wallY, a.ring.mesh.quaternion);
     } else if (a.ring) {
       this.group.remove(a.ring.mesh);
       this.ringPool.push(a.ring);
@@ -464,7 +469,8 @@ export class Highlights {
         const s = px / ppm;
         const bounce = arrow ? Math.abs(Math.sin(t * 3.4 + a.phase)) * 14 : (0.5 + 0.5 * Math.sin(t * 4 + a.phase)) * 6;
         const lift = R + (bounce + 6) / ppm;
-        this.tmpV.copy(this.frame.up).multiplyScalar(lift).add(a.pos).addScaledVector(this.frame.normal, 0.08);
+        // above the hold along the wall, off the panel it is bolted to (lifts straight down under a roof)
+        this.frame.upAt(a.wallY, this.tmpV, false).multiplyScalar(lift).add(a.pos).addScaledVector(this.frame.normalAt(a.wallY, this.tmpN, false), 0.08);
         a.sprite.position.copy(this.tmpV);
         a.sprite.scale.set(s, s, 1);
         a.sprite.material.opacity = arrow ? 1 : 0.65 + 0.35 * Math.sin(t * 4 + a.phase);

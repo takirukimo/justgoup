@@ -569,11 +569,14 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 
   return entry;
 }
 
-/** World transform of a hold on the wall. */
+const _pq = new THREE.Quaternion();
+const ONE = new THREE.Vector3(1, 1, 1);
+
+/** World transform of a hold on the wall (bolted to the panel at its y: that panel's sharp frame). */
 export function holdMatrix(h: HoldDef, frame: WallFrame, out: THREE.Matrix4): THREE.Matrix4 {
-  _q.setFromAxisAngle(Z, h.angle + Math.PI / 2).premultiply(frame.quaternion);
-  frame.toWorldXYZ(h.x, h.y, -0.0015, _v);
-  return out.compose(_v, _q, new THREE.Vector3(1, 1, 1));
+  _q.setFromAxisAngle(Z, h.angle + Math.PI / 2).premultiply(frame.quaternionAt(h.y, _pq));
+  frame.toWorldXYZ(h.x, h.y, 0, _v).addScaledVector(frame.normalAt(h.y, _n, false), -0.0015);
+  return out.compose(_v, _q, ONE);
 }
 
 const _hsl = { h: 0, s: 0, l: 0 };
@@ -755,12 +758,12 @@ export class HoldSet {
     for (const h of holds) {
       const g = this.geoms.get(h.id);
       if (!g) continue;
-      q.setFromAxisAngle(Z, h.angle + Math.PI / 2).premultiply(this.frame.quaternion);
+      q.setFromAxisAngle(Z, h.angle + Math.PI / 2).premultiply(this.frame.quaternionAt(h.y, _pq));
       const spread = h.type === 'volume' ? 1.08 : 1.3;
       const pad = h.type === 'volume' ? 0.035 : 0.018;
       ax.set(1, 0, 0).applyQuaternion(q).multiplyScalar(g.halfX * spread + pad);
       ay.set(0, 1, 0).applyQuaternion(q).multiplyScalar(g.halfY * spread + pad);
-      this.frame.toWorldXYZ(h.x, h.y, 0.0012, c);
+      this.frame.toWorldXYZ(h.x, h.y, 0, c).addScaledVector(this.frame.normalAt(h.y, _n, false), 0.0012);
       const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
       for (let i = 0; i < 4; i++) {
         const [sx, sy] = corners[i];
@@ -828,12 +831,18 @@ export class HoldSet {
       const cs = Math.cos(qd.rot);
       const sn = Math.sin(qd.rot);
       const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+      // a label sits flat on the panel under its centre (labels are small: never across a fold)
+      const qn = this.frame.normalAt(qd.cy, new THREE.Vector3(), false);
+      const qu = this.frame.upAt(qd.cy, new THREE.Vector3(), false);
+      const qc = this.frame.toWorldXYZ(qd.cx, qd.cy, 0, new THREE.Vector3()).addScaledVector(qn, 0.0018);
       corners.forEach(([sx, sy], k) => {
         const lx = (sx * qd.w) / 2;
         const ly = (sy * qd.h) / 2;
-        this.frame.toWorldXYZ(qd.cx + lx * cs - ly * sn, qd.cy + lx * sn + ly * cs, 0.0018, p);
+        p.copy(qc)
+          .addScaledVector(this.frame.right, lx * cs - ly * sn)
+          .addScaledVector(qu, lx * sn + ly * cs);
         pos.set([p.x, p.y, p.z], (i * 4 + k) * 3);
-        nrm.set([this.frame.normal.x, this.frame.normal.y, this.frame.normal.z], (i * 4 + k) * 3);
+        nrm.set([qn.x, qn.y, qn.z], (i * 4 + k) * 3);
         uv.set([sx < 0 ? qd.r.u0 : qd.r.u1, sy < 0 ? qd.r.v0 : qd.r.v1], (i * 4 + k) * 2);
       });
       const b = i * 4;

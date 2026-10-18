@@ -9,6 +9,9 @@
 //   hud=0   fixed=1 (fixed dt)   head=<HeadId>  colorway=<ColorwayId>
 //   seq=preview@3,follow@6,title@9   (camera mode changes at t seconds; trajectory in window.__traj)
 //   framing=locker@4   (title ↔ locker framing change at t seconds)   view=px,py,pz,lx,ly,lz[,fov]
+//   style=<RouteStyle> (generator archetype)   profiles=1 (multi-angle walls)   vol=1 (holds on volumes)
+//   preset=<PROFILE_PRESETS id> (fold the inline sample / generated problem onto that profile)
+//   holds=1 (hold gallery: every type × shape × size on the wall)
 
 import { GameRenderer } from '../src/render/renderer';
 import type { BoulderDef, ClimberState, HeadId, ColorwayId, HoldDef, HoldType, LimbId, LimbSnapshot, QualityLevel, QuickdrawDef, Vec2 } from '../src/core/types';
@@ -122,7 +125,12 @@ async function tryGenerator(): Promise<BoulderDef | null> {
     const m = (await loader()) as Record<string, unknown>;
     const fn = (mode === 'rope' ? m.generateRopeRoute : m.generateBoulder) as ((o: object) => BoulderDef) | undefined;
     if (!fn) return null;
-    const b = fn({ seed, grade, mode, wallAngle: angle });
+    const opts: Record<string, unknown> = { seed, grade, mode };
+    if (qs.has('angle')) opts.wallAngle = angle;
+    if (qs.has('style')) opts.style = qs.get('style');
+    if (qs.has('profiles')) opts.profiles = qs.get('profiles') === '1';
+    if (qs.has('vol')) opts.holdsOnVolumes = qs.get('vol') === '1';
+    const b = fn(opts);
     return b && Array.isArray(b.holds) && b.holds.length > 4 ? b : null;
   } catch (e) {
     console.warn('[world] generator unavailable, using inline sample', e);
@@ -200,6 +208,20 @@ async function main(): Promise<void> {
   const r = new GameRenderer(canvas, { quality, toneMapping: qs.get('tm') === 'agx' ? 'agx' : 'aces' });
   await r.init();
   const b = (await tryGenerator()) ?? sampleBoulder();
+  if (qs.has('preset')) {
+    const wp = await import('../src/game/wall-profile');
+    const spec = (wp.PROFILE_PRESETS as Record<string, readonly (readonly [number, number])[]>)[qs.get('preset') as string];
+    if (spec) {
+      const { panels, length } = wp.panelsFromLengths(spec);
+      b.profile = panels;
+      b.wallAngle = wp.steepestAngle(panels);
+      // keep the holds on the new surface length
+      const k = length / b.height;
+      for (const h of b.holds) h.y *= k;
+      if (b.quickdraws) for (const q of b.quickdraws) q.y *= k;
+      b.height = length;
+    }
+  }
   r.loadBoulder(b);
   r.setSkin((qs.get('head') ?? 'ibex') as HeadId, (qs.get('colorway') ?? 'basalt') as ColorwayId, 'classic');
   const sim = await trySim(b);
@@ -207,6 +229,11 @@ async function main(): Promise<void> {
   w.__r = r;
   w.__b = b;
 
+  if (qs.get('env') === '0') {
+    // side-view QA of the wall itself: hide the hall (pads, neighbouring walls)
+    const env = (r as unknown as { env?: { group: { visible: boolean } } }).env;
+    if (env) env.group.visible = false;
+  }
   if (qs.has('view')) {
     // view=px,py,pz,lx,ly,lz[,fov]
     const v = (qs.get('view') as string).split(',').map(Number);

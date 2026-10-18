@@ -155,13 +155,13 @@ export class GameRenderer implements RendererAPI {
     this.governor = new QualityGovernor(level === 'low' ? 'medium' : level);
 
     this.rig = new CameraRig(390 / 844);
-    this.wall = new WallView(this.wallFrame);
+    this.contact = new ContactShadows(this.wallFrame);
+    this.wall = new WallView(this.wallFrame, this.contact.uniforms);
     this.highlights = new Highlights(this.wallFrame, this.wall.holds, (id) => {
       const q = this.boulder?.quickdraws?.find((d) => d.id === id);
       return q ? { ...this.wall.quickdraws.basketLocal(q), radius: 0.085 } : null;
     });
     this.fxSys = new FxSystem(this.wallFrame, QUALITY_PRESETS.high.particles);
-    this.contact = new ContactShadows(this.wallFrame);
 
     this.scene.add(this.wall.group, this.highlights.group, this.fxSys.points, this.contact.mesh);
     this.setupLights();
@@ -394,6 +394,8 @@ export class GameRenderer implements RendererAPI {
 
   updateClimber(state: ClimberState, dt: number): void {
     this.state = state;
+    // folded walls: the body frame (wall up / normal the climber poses against) is the wall where the climber is
+    this.wallFrame.setBodyY((state.pelvis.y + state.chest.y) / 2);
     if (!this.climber) return;
     this.climber.setLookTarget(this.focusHint);
     const t0 = performance.now();
@@ -511,11 +513,9 @@ export class GameRenderer implements RendererAPI {
     const cam = this.rig.camera;
     this.ndc2.set((x / this.cssW) * 2 - 1, -((y / this.cssH) * 2 - 1));
     this.ray.setFromCamera(this.ndc2, cam);
-    this.wallFrame.plane(this.plane);
-    const hit = this.ray.ray.intersectPlane(this.plane, this.v);
-    if (!hit) return null;
-    const d = this.v.sub(this.wallFrame.origin);
-    const p = { x: d.dot(this.wallFrame.right), y: d.dot(this.wallFrame.up) };
+    // across every panel of a folded wall: the nearest panel the ray hits within its own range
+    const p = { x: 0, y: 0 };
+    if (this.wallFrame.raycast(this.ray.ray, p) < 0) return null;
     const b = this.boulder;
     if (b) {
       const m = OFF_WALL_MARGIN;
@@ -560,7 +560,10 @@ export class GameRenderer implements RendererAPI {
     this.time += d;
     const st = this.state ?? this.rest;
 
-    if (!this.state && this.rest && this.climber && this.climberVisible) this.climber.pose(this.rest, this.wallFrame, d);
+    if (!this.state && this.rest && this.climber && this.climberVisible) {
+      this.wallFrame.setBodyY((this.rest.pelvis.y + this.rest.chest.y) / 2);
+      this.climber.pose(this.rest, this.wallFrame, d);
+    }
 
     this.rig.setContinuousShake(this.state ? this.state.shake : 0);
     this.rig.update(d, this.cameraContext());
@@ -648,7 +651,17 @@ export class GameRenderer implements RendererAPI {
     const sx = starts.length ? starts.reduce((a, h) => a + h.x, 0) / starts.length : 0;
     const sy = starts.length ? Math.min(...starts.map((h) => h.y)) : 1.4;
     const sw = this.wallFrame.toWorldXYZ(sx, sy, 0, new THREE.Vector3());
-    const z = Math.max(1.0, sw.z + 0.75);
+    // stand clear of the wall at every height of the body (under a cave roof: out past its lip)
+    let out = sw.z - this.wallFrame.origin.z;
+    for (const sp of this.wallFrame.spans()) {
+      const lo = Math.min(sp.bottom.y, sp.top.y);
+      if (lo > GAME.padHeight + 1.95) continue;
+      // the highest point of this panel the body could touch
+      const hi = Math.max(sp.bottom.y, sp.top.y);
+      const t = hi > lo + 1e-6 ? clamp((GAME.padHeight + 1.95 - sp.bottom.y) / (sp.top.y - sp.bottom.y), 0, 1) : 1;
+      out = Math.max(out, sp.bottom.z + (sp.top.z - sp.bottom.z) * t, sp.bottom.z);
+    }
+    const z = this.wallFrame.origin.z + Math.max(1.0, out + 0.6);
     const pad = GAME.padHeight;
     const toLocal = (x: number, y: number, zz: number) => {
       const r = this.wallFrame.fromWorld(new THREE.Vector3(x, y, zz));

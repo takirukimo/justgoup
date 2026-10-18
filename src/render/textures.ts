@@ -239,6 +239,12 @@ export interface WallTextureOpts {
   anisotropy?: number;
   /** Wall number used in the spec labels. */
   wallNo?: number;
+  /**
+   * Multi-angle wall: the panels (surface y0 + angle, bottom → top) when the wall folds. Plywood
+   * sheets are cut at every fold, the fold lines get seams, inside corners an ambient-occlusion
+   * band and outside corners (lips) a worn, chalky edge; labels carry each panel's angle.
+   */
+  panels?: readonly { y0: number; angle: number }[];
 }
 
 export interface WallTextureSet {
@@ -286,19 +292,34 @@ export function createWallTextures(o: WallTextureOpts): WallTextureSet {
 
   const iMin = Math.floor(-halfW / PANEL_W) - 1;
   const iMax = Math.ceil(halfW / PANEL_W) + 1;
-  const jMin = Math.floor(o.y0 / PANEL_H);
-  const jMax = Math.ceil(o.y1 / PANEL_H);
-  const panels: { x0: number; x1: number; y0: number; y1: number; no: number }[] = [];
-  for (let j = jMin; j < jMax; j++) {
+  // plywood sheet rows: PANEL_H sheets stacked from the floor, re-started at every fold on a
+  // folded wall (each flat section is its own sheeting)
+  const sections = wallSections(o);
+  const rows: { y0: number; y1: number; j: number; angle: number }[] = [];
+  {
+    let j = 0;
+    for (const sec of sections) {
+      for (let y = sec.y0; y < sec.y1 - 0.02; y += PANEL_H) {
+        const y1 = Math.min(sec.y1, y + PANEL_H);
+        // a sliver left at the end of a section joins the sheet below it
+        const last = y1 >= sec.y1 - 0.25;
+        rows.push({ y0: y, y1: last ? sec.y1 : y1, j: j++, angle: sec.angle });
+        if (last) break;
+      }
+    }
+  }
+  const panels: { x0: number; x1: number; y0: number; y1: number; no: number; angle: number }[] = [];
+  for (const row of rows) {
+    if (row.y1 < o.y0 - 0.01 || row.y0 > o.y1 + 0.01) continue;
     for (let i = iMin; i < iMax; i++) {
       const x0 = Math.max(-halfW, i * PANEL_W);
       const x1 = Math.min(halfW, (i + 1) * PANEL_W);
       if (x1 - x0 < 0.02) continue;
-      const y0 = j * PANEL_H;
-      const y1 = Math.min(o.wallHeight, (j + 1) * PANEL_H);
-      const prng = new Rng(hashString(`${o.seed}:${i}:${j}`));
-      const no = (j * 10 + (i - iMin) + 1) % 100;
-      panels.push({ x0, x1, y0, y1, no });
+      const y0 = row.y0;
+      const y1 = Math.min(o.wallHeight, row.y1);
+      const prng = new Rng(hashString(`${o.seed}:${i}:${row.j}`));
+      const no = (row.j * 10 + (i - iMin) + 1) % 100;
+      panels.push({ x0, x1, y0, y1, no, angle: row.angle });
       const t = prng.range(0, 1);
       A.ctx.fillStyle = mixHex(WALL.panel, WALL.panelAlt, t * 0.8);
       A.ctx.fillRect(X(x0), Y(y1), M(x1 - x0), (y1 - y0) * ppmY);
@@ -371,12 +392,48 @@ export function createWallTextures(o: WallTextureOpts): WallTextureSet {
       if (sx <= -halfW + 0.01 || sx >= halfW - 0.01) continue;
       seamLine(L, X(sx), 0, X(sx), H, seamW, true);
     }
-    for (let j = jMin; j <= jMax; j++) {
-      const sy = j * PANEL_H;
-      if (sy <= 0.01 || sy >= o.wallHeight - 0.01) continue;
+    for (const row of rows) {
+      const sy = row.y0;
+      if (sy <= 0.01 || sy >= o.wallHeight - 0.01 || sy < o.y0 - 0.05 || sy > o.y1 + 0.05) continue;
       seamLine(L, 0, Y(sy), W, Y(sy), seamW, false);
     }
     L.ctx.restore();
+  }
+
+  // ── 6b. folds: inside corners collect shadow + old chalk dust, outside corners (lips) are worn
+  //        pale and chalky from every hand that slapped over them ──
+  for (let k = 1; k < sections.length; k++) {
+    const fy = sections[k].y0;
+    if (fy < o.y0 - 0.4 || fy > o.y1 + 0.4) continue;
+    const concave = sections[k].angle > sections[k - 1].angle;
+    const turn = Math.min(1, Math.abs(sections[k].angle - sections[k - 1].angle) / 60);
+    if (concave) {
+      const band = 0.22 + 0.12 * turn;
+      for (const dir of [-1, 1]) {
+        const g = A.ctx.createLinearGradient(0, Y(fy), 0, Y(fy + dir * band));
+        g.addColorStop(0, `rgba(0,0,0,${(0.3 + 0.2 * turn).toFixed(3)})`);
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        A.ctx.fillStyle = g;
+        A.ctx.fillRect(0, Math.min(Y(fy), Y(fy + dir * band)), W, Math.abs(Y(fy + dir * band) - Y(fy)));
+      }
+    } else {
+      // pale worn band on the lip + chalk smears where the moves go over it
+      const band = 0.05 + 0.04 * turn;
+      const g = A.ctx.createLinearGradient(0, Y(fy + band), 0, Y(fy - band));
+      g.addColorStop(0, 'rgba(233,229,221,0)');
+      g.addColorStop(0.5, `rgba(233,229,221,${(0.07 + 0.06 * turn).toFixed(3)})`);
+      g.addColorStop(1, 'rgba(233,229,221,0)');
+      A.ctx.fillStyle = g;
+      A.ctx.fillRect(0, Y(fy + band), W, Y(fy - band) - Y(fy + band));
+      const lrng = new Rng(hashString(`lip${o.seed}:${k}`));
+      const smears = Math.round(o.width * 3);
+      for (let n = 0; n < smears; n++) {
+        const x = lrng.range(-halfW + 0.2, halfW - 0.2);
+        softBlob(A.ctx, X(x), Y(fy + lrng.range(-0.06, 0.1)), M(lrng.range(0.08, 0.22)), PALETTE.chalk, lrng.range(0.04, 0.1), lrng.range(1.6, 2.6));
+      }
+      R.ctx.fillStyle = 'rgba(255,255,255,0.18)';
+      R.ctx.fillRect(0, Y(fy + band), W, Y(fy - band) - Y(fy + band));
+    }
   }
 
   // ── 7. spec labels, ruler, registration marks ──
@@ -385,15 +442,21 @@ export function createWallTextures(o: WallTextureOpts): WallTextureSet {
   // ── 8. T-nut grid (staggered rows) ──
   const rOuter = M(0.0085);
   const rInner = M(0.0048);
-  for (let row = 0; ; row++) {
-    const y = 0.1 + row * TNUT_STEP;
+  const tnutRows: number[] = [];
+  for (const sec of sections) {
+    // every section has its own staggered grid, starting 0.1 m above its bottom edge
+    for (let y = sec.y0 + 0.1; y < sec.y1 - 0.05; y += TNUT_STEP) tnutRows.push(y);
+  }
+  for (let row = 0; row < tnutRows.length; row++) {
+    const y = tnutRows[row];
     if (y > o.wallHeight - 0.05) break;
     if (y < o.y0 - 0.02 || y > o.y1 + 0.02) continue;
     const off = row % 2 === 0 ? 0 : TNUT_STEP / 2;
     for (let x = -Math.floor(halfW / TNUT_STEP) * TNUT_STEP + off - TNUT_STEP; x < halfW; x += TNUT_STEP) {
       if (x < -halfW + 0.05 || x > halfW - 0.05) continue;
       const nearSeamX = Math.abs(x / PANEL_W - Math.round(x / PANEL_W)) * PANEL_W < 0.035;
-      const nearSeamY = Math.abs(y / PANEL_H - Math.round(y / PANEL_H)) * PANEL_H < 0.035;
+      let nearSeamY = false;
+      for (const r of rows) if (Math.abs(y - r.y0) < 0.035) nearSeamY = true;
       if (nearSeamX || nearSeamY) continue;
       const px = X(x);
       const py = Y(y);
@@ -467,6 +530,19 @@ export function createWallTextures(o: WallTextureOpts): WallTextureSet {
       roughnessMap.dispose();
     },
   };
+}
+
+/** Flat sections of the wall along the surface (one for a flat wall). */
+function wallSections(o: WallTextureOpts): { y0: number; y1: number; angle: number }[] {
+  const ps = o.panels && o.panels.length > 1 ? o.panels : null;
+  if (!ps) return [{ y0: 0, y1: o.wallHeight, angle: o.angleDeg }];
+  const out: { y0: number; y1: number; angle: number }[] = [];
+  for (let i = 0; i < ps.length; i++) {
+    const y0 = Math.max(0, ps[i].y0);
+    const y1 = i + 1 < ps.length ? Math.min(o.wallHeight, ps[i + 1].y0) : o.wallHeight;
+    if (y1 > y0 + 1e-3) out.push({ y0, y1, angle: ps[i].angle });
+  }
+  return out.length ? out : [{ y0: 0, y1: o.wallHeight, angle: o.angleDeg }];
 }
 
 function circle(ctx: CanvasRenderingContext2D, x: number, y: number, r: number): void {
@@ -634,7 +710,23 @@ function drawWallBranding(
   // 'lockup' mark + wordmark (x = left edge). y = TOP edge, size = letter / mark height (m).
   type Art = { kind: 'word' | 'vword' | 'mark' | 'lockup'; x: number; y: number; size: number };
   const arts: Art[] = [];
-  if (o.mode === 'boulder') {
+  const sections = wallSections(o);
+  if (o.mode === 'boulder' && sections.length > 1) {
+    // folded wall: every piece of art sits inside one flat section (never broken over a fold) —
+    // the wordmark high on the longest section, the mark low on the right of the section the start is on
+    const wordW = Math.min(o.width - 0.7, 4.1);
+    const wordH = wordW / BRAND_ASPECT.word;
+    let best = sections[0];
+    for (const sec of sections) if (sec.y1 - sec.y0 > best.y1 - best.y0) best = sec;
+    if (best.y1 - best.y0 > wordH + 0.3) arts.push({ kind: 'word', x: 0, y: best.y1 - Math.min(0.32, (best.y1 - best.y0 - wordH) / 2), size: wordH });
+    const markW = Math.min(1.55, o.width * 0.34);
+    const markH = markW / BRAND_ASPECT.mark;
+    for (const sec of sections) {
+      if (sec === best || sec.y1 - sec.y0 < markH + 0.24) continue;
+      arts.push({ kind: 'mark', x: halfW - 0.32 - markW, y: sec.y0 + (sec.y1 - sec.y0 + markH) / 2, size: markH });
+      break;
+    }
+  } else if (o.mode === 'boulder') {
     // the wordmark spans the upper wall; a large mark sits low on the right, clear of the start
     const wordW = Math.min(o.width - 0.7, 4.1);
     arts.push({ kind: 'word', x: 0, y: Math.min(o.wallHeight - 0.22, 4.3), size: wordW / BRAND_ASPECT.word });
@@ -673,7 +765,7 @@ function drawWallBranding(
 
 function drawSpecDetails(
   o: WallTextureOpts,
-  panels: { x0: number; x1: number; y0: number; y1: number; no: number }[],
+  panels: { x0: number; x1: number; y0: number; y1: number; no: number; angle: number }[],
   A: Layer,
   X: (x: number) => number,
   Y: (y: number) => number,
@@ -690,7 +782,7 @@ function drawSpecDetails(
   ctx.textBaseline = 'alphabetic';
   // per-panel labels + registration crosses
   for (const p of panels) {
-    const label = `${BRAND.name} // PANEL ${String(p.no).padStart(2, '0')} // ${angle}°`;
+    const label = `${BRAND.name} // PANEL ${String(p.no).padStart(2, '0')} // ${Math.round(p.angle)}°`;
     ctx.fillStyle = ink;
     ctx.fillText(label, X(p.x0) + M(0.035), Y(p.y0) - M(0.03));
     // registration cross at the panel's top-right
@@ -748,7 +840,9 @@ function drawSpecDetails(
     const wallNo = String(o.wallNo ?? 1).padStart(2, '0');
     ctx.fillText(`${BRAND.gym} — ${o.mode === 'rope' ? 'LEAD' : 'WALL'} ${wallNo}`, bx + M(0.016), Y(by) - lineH * 2.25);
     ctx.fillStyle = inkDim;
-    ctx.fillText(`ANGLE ${angle >= 0 ? '+' : ''}${angle}°  //  ${o.width.toFixed(2)} × ${o.wallHeight.toFixed(2)} M`, bx + M(0.016), Y(by) - lineH * 1.25);
+    const secs = wallSections(o);
+    const angleText = secs.length > 1 ? `PROFILE ${secs.map((q) => Math.round(q.angle)).join('/')}°` : `ANGLE ${angle >= 0 ? '+' : ''}${angle}°`;
+    ctx.fillText(`${angleText}  //  ${o.width.toFixed(2)} × ${o.wallHeight.toFixed(2)} M`, bx + M(0.016), Y(by) - lineH * 1.25);
     ctx.fillText(`T-NUT ${TNUT_STEP * 1000} MM  //  M10`, bx + M(0.016), Y(by) - lineH * 0.25);
   }
 

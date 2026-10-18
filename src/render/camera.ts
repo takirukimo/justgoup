@@ -176,6 +176,8 @@ export class CameraRig {
   private fTop = new SpringNum(3.2);
   private fX = new SpringNum(0);
   private fYaw = new SpringNum(0);
+  /** follow on folded walls: smoothed panel angle at the climber (drives the 3/4 view under roofs). */
+  private fSteep = new SpringNum(0);
   private followFresh = true;
   private wasDragging = false;
   /** follow: the climber is in the air (falling on the rope): the rig tracks faster. */
@@ -227,7 +229,7 @@ export class CameraRig {
   private pB = new THREE.Vector3();
   private pT = new THREE.Vector3();
   private fit = { dist: 0, h: 0 };
-  private pts: THREE.Vector3[] = Array.from({ length: 8 }, () => new THREE.Vector3());
+  private pts: THREE.Vector3[] = Array.from({ length: 24 }, () => new THREE.Vector3());
   private introPts: THREE.Vector3[] = [];
 
   constructor(aspect = 390 / 844) {
@@ -356,8 +358,14 @@ export class CameraRig {
    * Camera direction (unit, from subject toward camera): horizontal +Z blended toward the wall
    * normal, then yawed about world up and pitched (negative = camera lower, looking up).
    */
-  private viewDir(frame: WallFrame, blend: number, yawDeg: number, pitchDeg: number, out: THREE.Vector3): THREE.Vector3 {
-    out.set(0, 0, 1).lerp(frame.normal, blend).normalize();
+  private viewDir(frame: WallFrame, blend: number, yawDeg: number, pitchDeg: number, out: THREE.Vector3, normal: THREE.Vector3 = frame.normal): THREE.Vector3 {
+    out.set(0, 0, 1).lerp(normal, blend).normalize();
+    // under a roof the wall normal points at the floor: never look up from more than ~32° below
+    if (out.y < -0.53) {
+      const h = Math.hypot(out.x, out.z) || 1;
+      const k = Math.sqrt(1 - 0.53 * 0.53) / h;
+      out.set(out.x * k, -0.53, out.z * k);
+    }
     this.q.setFromAxisAngle(this.WORLD_UP, yawDeg * DEG);
     out.applyQuaternion(this.q);
     this.right.crossVectors(this.WORLD_UP, out).normalize();
@@ -437,6 +445,15 @@ export class CameraRig {
           bot -= m;
         }
         const ins = this.safeInsets();
+        if (frame.folded && state) {
+          // the body in 3D (it may hang under a roof) and the pads under it
+          let n = this.bodyPoints(frame, state, 0);
+          this.pts[n++].copy(this.pts[1]).setY(PAD_Y);
+          this.solveFolded(frame, n, 0.45, 16, -10, ins, 1.9, aspect);
+          this.tUp.copy(this.WORLD_UP);
+          this.tRoll = state.phase === 'falling' ? 2.5 * DEG : 0;
+          break;
+        }
         frame.toWorldXYZ(cx, bot, depth, this.pB);
         frame.toWorldXYZ(cx, top, depth, this.pT);
         this.solveAboveFloor(frame, 0.45, 16, -10, ins, 1.9, aspect);
@@ -457,6 +474,12 @@ export class CameraRig {
         const w = b.maxX - b.minX + m * 2;
         const h = b.maxY - b.minY + m * 2;
         this.tFov = boulder?.mode === 'rope' ? 48 : 42;
+        if (frame.folded) {
+          // a folded wall: frame the route's real 3D shape (a roof comes toward the lens) along the
+          // route's mean wall normal
+          this.previewFolded(frame, boulder, aspect);
+          break;
+        }
         // fit the route into the band the UI leaves free, and centre it in that band
         const ins = this.viewInsets;
         const vis = clamp(1 - ins.top - ins.bottom, 0.4, 1);
@@ -473,8 +496,19 @@ export class CameraRig {
         this.tFov = 24;
         const dist = this.distanceFor(this.editorMeters, this.tFov);
         frame.toWorldXYZ(this.editorCenter.x, this.editorCenter.y, 0, this.tLook);
-        this.tPos.copy(this.tLook).addScaledVector(frame.normal, dist);
-        this.tUp.copy(frame.up);
+        if (frame.folded && boulder) {
+          // zoomed in: square to the panel under the centre; the whole wall: its mean normal
+          const zoom = smoothstep(0.55, 0.9, this.editorMeters / Math.max(1, boulder.height));
+          frame.normalAt(this.editorCenter.y, this.v3, true);
+          this.meanNormal(frame, 0, boulder.height, this.v2);
+          this.v3.lerp(this.v2, zoom).normalize();
+          this.tPos.copy(this.tLook).addScaledVector(this.v3, dist);
+          // up: the wall's up direction square to that view
+          this.tUp.set(0, this.v3.z, -this.v3.y);
+        } else {
+          this.tPos.copy(this.tLook).addScaledVector(frame.normal, dist);
+          this.tUp.copy(frame.up);
+        }
         this.tRoll = 0;
         break;
       }
@@ -621,6 +655,11 @@ export class CameraRig {
     }
     if (top - bot > 4.6) bot = top - 4.6;
 
+    if (frame.folded && state) {
+      const want = frame.angleAt((state.pelvis.y + state.chest.y) / 2, true);
+      if (this.followFresh || this.pendingSnap) this.fSteep.snap(want);
+      else this.fSteep.step(want, 1.2, dt);
+    }
     if (this.followFresh || this.pendingSnap) {
       this.fBot.snap(bot);
       this.fTop.snap(top);
@@ -650,11 +689,133 @@ export class CameraRig {
     const swing = state && !dragging ? clamp(state.velocity.x * 2, -4, 4) : 0;
     this.fYaw.step(swing, airborne ? 0.4 : 1.1, dt);
     const depthB = state ? clamp(state.pelvisDepth * 0.3, 0.05, 0.3) : 0.1;
+    const minW = Math.max(1.5, maxX - minX + 0.5);
+    if (frame.folded) {
+      // The framed stretch of wall follows the folds in 3D (a roof leans toward the lens, a slab
+      // away), so every sample of it — and the hanging body — is fitted, seen from further to the
+      // side the steeper the wall is where the climber is (a 3/4 view under a roof).
+      const steep = smoothstep(35, 80, this.fSteep.value);
+      let n = 0;
+      const pts = this.pts;
+      const y0 = this.fBot.value;
+      const y1 = this.fTop.value;
+      for (let k = 0; k <= 5; k++) frame.toWorldXYZ(this.fX.value, y0 + ((y1 - y0) * k) / 5, k === 0 ? depthB : 0.02, pts[n++]);
+      const ym = (y0 + y1) / 2;
+      frame.toWorldXYZ(this.fX.value - minW / 2, ym, 0.05, pts[n++]);
+      frame.toWorldXYZ(this.fX.value + minW / 2, ym, 0.05, pts[n++]);
+      if (state) n = this.bodyPoints(frame, state, n);
+      const yaw = 12 + 20 * steep + this.fYaw.value;
+      this.solveFolded(frame, n, 0.55 - 0.15 * steep, yaw, -8, this.safeInsets(), 0, aspect);
+      this.tUp.copy(this.WORLD_UP);
+      this.tRoll = 0;
+      return;
+    }
     frame.toWorldXYZ(this.fX.value, this.fBot.value, depthB, this.pB);
     frame.toWorldXYZ(this.fX.value, this.fTop.value, 0, this.pT);
-    this.solveAboveFloor(frame, 0.55, 12 + this.fYaw.value, -8, this.safeInsets(), Math.max(1.5, maxX - minX + 0.5), aspect);
+    this.solveAboveFloor(frame, 0.55, 12 + this.fYaw.value, -8, this.safeInsets(), minW, aspect);
     this.tUp.copy(this.WORLD_UP);
     this.tRoll = 0;
+  }
+
+  /** World points of the climber (head, pelvis, hands, feet) into pts[n..]; returns the new count. */
+  private bodyPoints(frame: WallFrame, s: ClimberState, n: number): number {
+    const pts = this.pts;
+    const d = s.pelvisDepth;
+    frame.toWorldXYZ(s.chest.x, s.chest.y, d, pts[n]);
+    // the head: above the chest in the body's own up (roughly world up when hanging)
+    pts[n++].addScaledVector(this.WORLD_UP, 0.34);
+    frame.toWorldXYZ(s.pelvis.x, s.pelvis.y, d, pts[n++]);
+    for (const id of ['LH', 'RH', 'LF', 'RF'] as const) {
+      const L = s.limbs[id];
+      frame.toWorldXYZ(L.pos.x, L.pos.y, Math.max(0.05, L.depth), pts[n++]);
+    }
+    return n;
+  }
+
+  /** Mean outward normal of the wall between surface heights y0 and y1 (panel normals weighted by length). */
+  private meanNormal(frame: WallFrame, y0: number, y1: number, out: THREE.Vector3): THREE.Vector3 {
+    out.set(0, 0, 0);
+    for (const sp of frame.spans()) {
+      const w = Math.min(y1, sp.y1) - Math.max(y0, sp.y0);
+      if (w <= 0) continue;
+      out.y += sp.normal.y * w;
+      out.z += sp.normal.z * w;
+    }
+    if (out.lengthSq() < 1e-8) return frame.normalAt((y0 + y1) / 2, out);
+    return out.normalize();
+  }
+
+  /** 'preview' on a folded wall: every route hold (and the floor under the start) fitted in 3D. */
+  private previewFolded(frame: WallFrame, boulder: BoulderDef | null, aspect: number): void {
+    const pts = this.pts;
+    const b = this.bbox;
+    let n = 0;
+    // the box corners in surface coords, sampled along the folds (so the shape of the wall counts)
+    const ys = [b.minY, b.maxY];
+    for (const sp of frame.spans()) if (sp.y0 > b.minY && sp.y0 < b.maxY) ys.push(sp.y0);
+    for (const y of ys) {
+      if (n + 2 > pts.length) break;
+      frame.toWorldXYZ(b.minX - 0.35, y, 0.05, pts[n++]);
+      frame.toWorldXYZ(b.maxX + 0.35, y, 0.05, pts[n++]);
+    }
+    if (n < pts.length) pts[n++].set((b.minX + b.maxX) / 2, PAD_Y, frame.origin.z + 0.6);
+    this.meanNormal(frame, b.minY, b.maxY, this.v2);
+    const ins = this.viewInsets;
+    this.solveFolded(frame, n, 0.7, 4, -3, { top: ins.top + 0.02, bottom: ins.bottom + 0.02 }, 0, aspect, this.v2);
+    this.tUp.copy(this.WORLD_UP);
+    this.tRoll = 0;
+    void boulder;
+  }
+
+  /**
+   * Frame pts[0..n) with a view (blend toward `normal`, yaw, pitch): the closest camera that puts
+   * every point inside the screen band between the insets (and ±0.86 NDC across), centred in the
+   * slack. Closed form for a fixed orientation; the view is levelled if it would sit under the pads.
+   */
+  private solveFolded(frame: WallFrame, n: number, blend: number, yaw: number, pitch: number, ins: { top: number; bottom: number }, _minWidth: number, aspect: number, normal: THREE.Vector3 = frame.normal): void {
+    let p = pitch;
+    for (let it = 0; it < 4; it++) {
+      this.viewDir(frame, blend, yaw, p, this.dir, normal);
+      this.basis(this.dir);
+      this.fitPoints(n, ins, aspect);
+      const lack = CAM_MIN_Y - this.tPos.y;
+      if (lack <= 0.005) return;
+      const dist = this.tPos.distanceTo(this.tLook);
+      p += (Math.asin(clamp(lack / Math.max(1, dist), 0, 0.9)) / DEG) * 1.05 + 0.2;
+    }
+  }
+
+  /** For the current basis + tFov: tPos / tLook so that pts[0..n) fit the band (see solveFolded). */
+  private fitPoints(n: number, ins: { top: number; bottom: number }, aspect: number): void {
+    const pts = this.pts;
+    const tanH = Math.tan((this.tFov * DEG) / 2);
+    const a = (1 - 2 * ins.top) * tanH;
+    const b = (-1 + 2 * ins.bottom) * tanH;
+    const m = 0.86 * tanH * aspect;
+    const R = pts[0];
+    let A = -Infinity;
+    let B = Infinity;
+    let XA = -Infinity;
+    let XB = Infinity;
+    let zMin = Infinity;
+    for (let i = 0; i < n; i++) {
+      this.v1.subVectors(pts[i], R);
+      const x = this.v1.dot(this.camRight);
+      const y = this.v1.dot(this.camUp);
+      const z = this.v1.dot(this.fwd);
+      A = Math.max(A, y - a * z);
+      B = Math.min(B, y - b * z);
+      XA = Math.max(XA, x - m * z);
+      XB = Math.min(XB, x + m * z);
+      zMin = Math.min(zMin, z);
+    }
+    // smallest pull-back s (along −fwd from R) with a non-empty vertical and horizontal window
+    const s = Math.max((A - B) / Math.max(1e-6, a - b), (XA - XB) / (2 * m), 1.2 - zMin);
+    const h = (A - a * s + (B - b * s)) / 2;
+    const k = (XA - m * s + (XB + m * s)) / 2;
+    this.tPos.copy(R).addScaledVector(this.fwd, -s).addScaledVector(this.camUp, h).addScaledVector(this.camRight, k);
+    // look along fwd at the depth of the subject
+    this.tLook.copy(this.tPos).addScaledVector(this.fwd, s + Math.max(0, zMin));
   }
 
   /**

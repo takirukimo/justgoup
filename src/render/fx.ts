@@ -83,6 +83,8 @@ export class FxSystem {
   private rng = new Rng(0xf00d);
   private alive = 0;
   private tmp = new THREE.Vector3();
+  private up = new THREE.Vector3();
+  private nrm = new THREE.Vector3();
   private tmpC = new THREE.Color();
   private dynAttrs: THREE.BufferAttribute[] = [];
 
@@ -174,14 +176,17 @@ export class FxSystem {
     const f = this.frame;
     const base = f.toWorldXYZ(p.x, p.y, depth, this.tmp);
     const bx = base.x, by = base.y, bz = base.z;
+    // the wall's frame where the puff is (a puff under a roof blows down, off the panel)
+    const up = f.upAt(p.y, this.up);
+    const nrm = f.normalAt(p.y, this.nrm);
     for (let i = 0; i < count; i++) {
       const a = this.rng.range(0, Math.PI * 2);
       const sp = this.rng.range(0.15, 0.65) * k;
       const out = this.rng.range(0.08, 0.38) * k;
       // velocity: in the wall plane (right/up) + out of the wall
-      const vx = f.right.x * Math.cos(a) * sp + f.up.x * Math.sin(a) * sp + f.normal.x * out;
-      const vy = f.right.y * Math.cos(a) * sp + f.up.y * Math.sin(a) * sp + f.normal.y * out + 0.08;
-      const vz = f.right.z * Math.cos(a) * sp + f.up.z * Math.sin(a) * sp + f.normal.z * out;
+      const vx = f.right.x * Math.cos(a) * sp + up.x * Math.sin(a) * sp + nrm.x * out;
+      const vy = f.right.y * Math.cos(a) * sp + up.y * Math.sin(a) * sp + nrm.y * out + 0.08;
+      const vz = f.right.z * Math.cos(a) * sp + up.z * Math.sin(a) * sp + nrm.z * out;
       this.tmpC.copy(this.chalk).multiplyScalar(this.rng.range(0.9, 1.08));
       this.spawn(
         bx + this.rng.range(-0.03, 0.03), by + this.rng.range(-0.03, 0.03), bz + this.rng.range(-0.01, 0.02),
@@ -218,6 +223,7 @@ export class FxSystem {
     const f = this.frame;
     const w = f.toWorldXYZ(p.x, p.y, 0.12, this.tmp);
     const bx = w.x, by = w.y, bz = w.z;
+    const nrm = f.normalAt(p.y, this.nrm);
     const signal = new THREE.Color(PALETTE.signal);
     const bone = new THREE.Color(PALETTE.bone);
     for (let i = 0; i < 46; i++) {
@@ -226,7 +232,7 @@ export class FxSystem {
       this.tmpC.copy(this.chalk).multiplyScalar(this.rng.range(0.92, 1.05));
       this.spawn(
         bx, by, bz,
-        f.right.x * Math.cos(a) * sp + f.normal.x * 0.8, Math.abs(Math.sin(a)) * sp * 0.8 + 0.4, f.right.z * Math.cos(a) * sp + f.normal.z * this.rng.range(0.4, 1.6),
+        f.right.x * Math.cos(a) * sp + nrm.x * 0.8, Math.abs(Math.sin(a)) * sp * 0.8 + 0.4, f.right.z * Math.cos(a) * sp + nrm.z * this.rng.range(0.4, 1.6),
         this.rng.range(1.2, 2.2), this.rng.range(0.04, 0.07), this.rng.range(0.18, 0.34),
         this.rng.range(0.35, 0.55), 1.9, -0.2, this.tmpC, 0,
       );
@@ -236,7 +242,7 @@ export class FxSystem {
       const sp = this.rng.range(1.4, 3.4);
       this.spawn(
         bx + this.rng.range(-0.05, 0.05), by, bz,
-        f.right.x * Math.cos(a) * sp, Math.sin(a) * sp + 1.2, f.right.z * Math.cos(a) * sp + f.normal.z * this.rng.range(0.6, 2.2),
+        f.right.x * Math.cos(a) * sp, Math.sin(a) * sp + 1.2, f.right.z * Math.cos(a) * sp + nrm.z * this.rng.range(0.6, 2.2),
         this.rng.range(1.8, 3.0), this.rng.range(0.022, 0.034), this.rng.range(0.022, 0.034),
         1, 1.1, -2.6, i % 3 === 0 ? bone : signal, 1,
       );

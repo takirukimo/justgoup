@@ -139,9 +139,10 @@ export class QuickdrawSet {
     const hangerParts: THREE.BufferGeometry[] = [];
     const m = new THREE.Matrix4();
     const p = new THREE.Vector3();
+    const pq = new THREE.Quaternion();
     for (const d of draws) {
       this.frame.toWorldXYZ(d.x, d.y, 0, p);
-      m.compose(p, this.frame.quaternion, new THREE.Vector3(1, 1, 1));
+      m.compose(p, this.frame.quaternionAt(d.y, pq), new THREE.Vector3(1, 1, 1));
       hangerParts.push(proto.clone().applyMatrix4(m));
     }
     if (hangerParts.length) {
@@ -180,10 +181,12 @@ export class QuickdrawSet {
     const p = new THREE.Vector3();
     const q = new THREE.Quaternion();
     const one = new THREE.Vector3(1, 1, 1);
+    // the anchor is bolted to the panel at its height: everything uses that panel's frame
+    const aq = this.frame.quaternionAt(a.y, new THREE.Quaternion());
     for (const side of [-1, 1]) {
       const bx = a.x + side * 0.11;
       this.frame.toWorldXYZ(bx, a.y, 0, p);
-      m.compose(p, this.frame.quaternion, one);
+      m.compose(p, aq, one);
       parts.push(proto.clone().applyMatrix4(m));
       // chain: links from the eye converging toward the centre
       const links = 5;
@@ -193,14 +196,14 @@ export class QuickdrawSet {
         const ly = a.y + EYE_Y - 0.012 - k * 0.019;
         const link = new THREE.TorusGeometry(0.0085, 0.0024, 6, 12).scale(1, 1.45, 1);
         q.setFromEuler(new THREE.Euler(0, k % 2 === 0 ? Math.PI / 2 : 0, side * 0.35 * (1 - t)));
-        q.premultiply(this.frame.quaternion);
+        q.premultiply(aq);
         this.frame.toWorldXYZ(lx, ly, EYE_Z, p);
         m.compose(p, q, one);
         parts.push(tag(link, '#B5BAC0', STEEL).applyMatrix4(m));
       }
       // lowering ring
       const ring = new THREE.TorusGeometry(0.021, 0.0042, 8, 22);
-      q.setFromEuler(new THREE.Euler(0, 0.45 * side, 0)).premultiply(this.frame.quaternion);
+      q.setFromEuler(new THREE.Euler(0, 0.45 * side, 0)).premultiply(aq);
       this.frame.toWorldXYZ(a.x + side * 0.026, a.y + EYE_Y - 0.012 - links * 0.019 - 0.012, EYE_Z + 0.004, p);
       m.compose(p, q, one);
       parts.push(tag(ring, '#C8CCD1', STEEL).applyMatrix4(m));
@@ -208,7 +211,7 @@ export class QuickdrawSet {
     // CHIRAL pink anchor plate tag between the bolts
     const plate = tag(new THREE.BoxGeometry(0.16, 0.028, 0.002), PALETTE.signal, [0, 0, 0, 0.3]);
     this.frame.toWorldXYZ(a.x, a.y + 0.045, 0.001, p);
-    m.compose(p, this.frame.quaternion, one);
+    m.compose(p, aq, one);
     parts.push(plate.applyMatrix4(m));
     const merged = mergeGeometries(parts, false) as THREE.BufferGeometry;
     for (const g of parts) g.dispose();
@@ -253,15 +256,17 @@ export class QuickdrawSet {
     this.time += dt;
     const q = this.tmp;
     for (const d of this.draws) {
-      // equilibrium: hang along gravity, pulled toward the rope when clipped
+      // equilibrium: hang plumb (out from an overhanging panel by its angle, resting on a slab),
+      // pulled out toward the rope when clipped
+      const lean = (this.frame.angleAt(d.def.y) * Math.PI) / 180;
       let thT = 0;
-      let phT = 0.06;
+      let phT = Math.max(0.05, lean + 0.03);
       if (d.clipped) {
         const px = d.pull.x;
         const py = d.pull.y;
         // angle of (down + pull) relative to straight down
         thT = Math.max(-0.7, Math.min(0.7, -Math.atan2(px, Math.max(0.2, 1 - py))));
-        phT = 0.32;
+        phT = Math.max(phT + 0.12, 0.32);
       }
       const idle = Math.sin(this.time * 0.9 + d.seed) * 0.025 + Math.sin(this.time * 2.3 + d.seed * 2) * 0.01;
       const k = 26;
@@ -273,9 +278,10 @@ export class QuickdrawSet {
       d.ph = Math.max(0, d.ph);
       this.frame.toWorldXYZ(d.def.x, d.def.y + EYE_Y, EYE_Z, q);
       d.swing.position.copy(q);
-      d.swing.quaternion.copy(this.frame.quaternion);
+      this.frame.quaternionAt(d.def.y, d.swing.quaternion);
       d.swing.rotateZ(d.th);
-      d.swing.rotateX(d.ph);
+      // +ph swings the bottom of the draw OUT of the wall (rotation about local x by −ph)
+      d.swing.rotateX(-d.ph);
     }
   }
 
