@@ -12,7 +12,7 @@ import type { BoulderDef, ChalkId, ClimberState, ColorwayId, HeadId, HoldDef, Li
 import { PALETTE } from '../config/brand';
 import { CHALKS } from '../config/skins';
 import { GAME } from '../config/tuning';
-import { clamp } from '../core/math';
+import { clamp, smoothstep } from '../core/math';
 import { WallFrame } from './wall-frame';
 import { WallView } from './wall';
 import { GymEnvironment } from './environment';
@@ -81,6 +81,18 @@ export class GameRenderer implements RendererAPI {
   private keyPos = new THREE.Vector3(1.5, 5.5, 5);
   private keyAim = new THREE.Vector3(0, 1.8, 0);
   private keyReach = 1;
+  /**
+   * Folded walls: roofs and caves face the floor, so the rig's top-down key barely reaches them.
+   * A floodlight low in front aims up into the steep section (like the cave floods in a real gym)
+   * and a soft warm bounce lights every down-facing surface from below. Both always exist (a fixed
+   * light count keeps every shader program stable) and sit at intensity 0 on flat walls.
+   */
+  private caveFlood = new THREE.SpotLight('#ffe0bd', 0, 0, 0.62, 0.85, 2);
+  private caveTarget = new THREE.Object3D();
+  private bounce = new THREE.DirectionalLight('#d9c8b4', 0);
+  private roofness = 0;
+  private caveAim = new THREE.Vector3(0, 2, 1);
+  private caveHome = new THREE.Vector3(0, 2, 1);
 
   private preset: QualityPreset;
   private autoQuality = false;
@@ -314,6 +326,9 @@ export class GameRenderer implements RendererAPI {
     this.fill.position.set(-4, 1.6, 3.2);
     this.rim.position.set(1.2, 3.2, -2.6);
     this.scene.add(this.wash, this.fill, this.rim);
+    this.caveFlood.target = this.caveTarget;
+    this.bounce.position.set(0.4, -1, 0.9);
+    this.scene.add(this.caveFlood, this.caveTarget, this.bounce);
   }
 
   private updateLights(dt: number, st: ClimberState | null): void {
@@ -351,6 +366,43 @@ export class GameRenderer implements RendererAPI {
     this.key.position.copy(this.keyPos);
     this.keyTarget.position.copy(this.keyAim);
     this.keyTarget.updateMatrixWorld();
+
+    // cave flood + floor bounce (folded walls with steep sections)
+    const r = this.roofness;
+    this.bounce.intensity = 0.5 * r;
+    this.caveFlood.intensity = 70 * r * (0.85 + 0.15 * k);
+    if (r > 0) {
+      // aim at the steep section, drifting toward the climber while they are under it
+      this.v.copy(this.caveHome);
+      if (st && this.climberVisible && !overview) {
+        const steep = smoothstep(35, 70, this.wallFrame.angleAt(st.com.y, true));
+        this.wallFrame.toWorldXYZ(st.com.x, st.com.y, 0, this.v2);
+        this.v.lerp(this.v2, steep * 0.7);
+      }
+      this.caveAim.lerp(this.v, aimL * 0.6);
+      this.caveTarget.position.copy(this.caveAim);
+      this.caveTarget.updateMatrixWorld();
+      // low in front of the cave, a little to the camera's right
+      this.caveFlood.position.set(this.caveAim.x + 1.3, this.wallFrame.origin.y + 0.9, this.caveAim.z + 3.6);
+    }
+  }
+
+  /** Steepness of the wall's steepest section (0 flat walls … 1 roofs) + the flood's home aim point. */
+  private configureCaveLights(b: BoulderDef): void {
+    const f = this.wallFrame;
+    let best = -Infinity;
+    let y = 1.5;
+    if (f.folded) {
+      for (const sp of f.spans()) {
+        if (sp.angle > best) {
+          best = sp.angle;
+          y = (sp.y0 + sp.y1) / 2;
+        }
+      }
+    }
+    this.roofness = f.folded ? smoothstep(38, 80, best) : 0;
+    f.toWorldXYZ(0, f.folded ? y : Math.min(b.height * 0.5, 2.4), 0, this.caveHome);
+    this.caveAim.copy(this.caveHome);
   }
 
   // ───────────────────────────── content ─────────────────────────────
@@ -364,6 +416,7 @@ export class GameRenderer implements RendererAPI {
     this.boulder = { ...b, holds: b.holds.slice() };
     this.highlights.clear();
     this.wall.build(this.boulder, this.preset, { gradeText: `V${b.grade}`, name: b.name });
+    this.configureCaveLights(this.boulder);
     this.env?.configure(this.layoutFor(b), this.preset);
     this.state = null;
     this.rest = this.makeRestState(this.boulder);

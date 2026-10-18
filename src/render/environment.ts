@@ -268,11 +268,44 @@ export class GymEnvironment {
       // face frame: T(c) · Ry(yaw) · Rx(tilt); local x along the face, y up the face, z out
       const frameQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, yaw, 0)).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), tilt));
       const base = new THREE.Vector3(cx, 0, cz);
-      const local = (x: number, y: number, z: number, out: THREE.Vector3) => out.set(x, y, z).applyQuaternion(frameQ).add(base);
+      // The two faces flanking the main wall never cross into its column (|x| < half + 0.1) at any
+      // height: their tilt would lean the inner end over the main wall (the main wall folds and
+      // overhangs up to ~8 m out, so anything inside that column would cut through it). Their inner
+      // edge is held on the vertical plane x = ±(half + 0.1): the face becomes a trapezoid, squeezed
+      // linearly toward its outer end, and everything on it moves with the squeeze.
+      const inner = Math.abs(bx + half + 0.1) < 1e-3 ? 1 : Math.abs(ax - half - 0.1) < 1e-3 ? -1 : 0;
+      const sYaw = Math.sin(yaw);
+      const cYaw = Math.cos(yaw);
+      const sT = Math.sin(tilt);
+      const cT = Math.cos(tilt);
+      const xLimit = half + 0.1;
+      const warpU = (u: number, y: number, z: number): number => {
+        if (!inner) return u;
+        const lim = ((inner > 0 ? -xLimit : xLimit) - cx - (y * sT + z * cT) * sYaw) / cYaw;
+        if (inner > 0) {
+          const hi = Math.min(len / 2, lim);
+          return -len / 2 + ((u + len / 2) * (hi + len / 2)) / len;
+        }
+        const lo = Math.max(-len / 2, lim);
+        return lo + ((u + len / 2) * (len / 2 - lo)) / len;
+      };
+      const warpGeo = (g: THREE.BufferGeometry): THREE.BufferGeometry => {
+        if (!inner) return g;
+        const pa = g.getAttribute('position') as THREE.BufferAttribute;
+        for (let i = 0; i < pa.count; i++) pa.setX(i, warpU(pa.getX(i), pa.getY(i), pa.getZ(i)));
+        g.computeVertexNormals();
+        return g;
+      };
+      const local = (x: number, y: number, z: number, out: THREE.Vector3) => out.set(warpU(x, y, z), y, z).applyQuaternion(frameQ).add(base);
       const localMat = (x: number, y: number, z: number, rz: number, out: THREE.Matrix4) => {
         local(x, y, z, v);
         q.setFromAxisAngle(new THREE.Vector3(0, 0, 1), rz).premultiply(frameQ);
         return out.compose(v, q, one);
+      };
+      const faceMat = new THREE.Matrix4().compose(base, frameQ, one);
+      /** A piece of the face's structure, deformed with the face (built in face-local coords). */
+      const structure = (g: THREE.BufferGeometry, x: number, y: number, z: number, color: THREE.ColorRepresentation) => {
+        darkBatch.add(warpGeo(g.translate(x, y, z)), faceMat, color);
       };
 
       // panel surface
@@ -282,15 +315,15 @@ export class GymEnvironment {
       const uv = panel.getAttribute('uv') as THREE.BufferAttribute;
       const pp = panel.getAttribute('position') as THREE.BufferAttribute;
       for (let i = 0; i < uv.count; i++) uv.setXY(i, (pp.getX(i) + len / 2 + f.seed * 0.37) / ply.meters, pp.getY(i) / ply.meters);
+      warpGeo(panel);
       const tint = new THREE.Color(f.tint).multiplyScalar(1 / new THREE.Color(WALL.panel).r);
-      m4.compose(base, frameQ, one);
-      plyBatch.add(panel, m4, tint);
+      plyBatch.add(panel, faceMat, tint);
 
       // shell + trims
-      darkBatch.add(new THREE.BoxGeometry(len, f.height, 0.24), localMat(0, f.height / 2, -0.125, 0, m4), '#111215');
-      darkBatch.add(new RoundedBoxGeometry(len + 0.1, 0.075, 0.07, 2, 0.02), localMat(0, f.height + 0.025, 0, 0, m4), '#1B1D21');
-      darkBatch.add(new THREE.BoxGeometry(len - 0.2, 0.006, 0.004), localMat(0, f.height + 0.0, 0.036, 0, m4), PALETTE.signal);
-      for (const side of [-1, 1]) darkBatch.add(new RoundedBoxGeometry(0.07, f.height, 0.065, 2, 0.02), localMat((side * len) / 2, f.height / 2, 0, 0, m4), '#1B1D21');
+      structure(new THREE.BoxGeometry(len, f.height, 0.24, 4, 1, 1), 0, f.height / 2, -0.125, '#111215');
+      structure(new RoundedBoxGeometry(len + 0.1, 0.075, 0.07, 2, 0.02), 0, f.height + 0.025, 0, '#1B1D21');
+      structure(new THREE.BoxGeometry(len - 0.2, 0.006, 0.004), 0, f.height + 0.0, 0.036, PALETTE.signal);
+      for (const side of [-1, 1]) structure(new RoundedBoxGeometry(0.07, f.height, 0.065, 2, 0.02), (side * len) / 2, f.height / 2, 0, '#1B1D21');
 
       // tone-on-tone branding on the panels: the mark or the wordmark (official proportions)
       const frng = new Rng(f.seed * 977);
