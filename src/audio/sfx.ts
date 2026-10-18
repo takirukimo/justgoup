@@ -5,12 +5,23 @@
 
 import type { SfxId } from '../core/contracts';
 import { Sound } from './sound';
-import { bleat, effort, gasp, strain, whoa, type VoiceProfile } from './voice';
+import { voiceSet } from './species';
+import { bleat, type VoiceProfile } from './voice';
 import { cents, chance, mtof, pick, rand, type NoiseKind } from './util';
 
 export interface SfxKit {
+  /** The climber's voice: its `species` picks the head's voice set (species.ts). */
   voice: VoiceProfile;
 }
+
+/**
+ * App-level one-shots beyond the shared SfxId list (GameAudio.play accepts both):
+ *  exhale  long relieved breath out (shake-out)      gasp   surprised inhale (slips)
+ *  call    the head's signature call (send, locker)  catch  palm slapping onto a hold after a dyno
+ *  tick    tiny rubber tick (a foot technique)       blow   blowing excess chalk off the fingertips
+ */
+export type ExtraSfxId = 'exhale' | 'gasp' | 'call' | 'catch' | 'tick' | 'blow';
+export type AnySfxId = SfxId | ExtraSfxId;
 
 export interface SfxDef {
   /** Base output level. */
@@ -269,26 +280,26 @@ export const SFX: Record<SfxId, SfxDef> = {
 
   slip: {
     gain: 1.2, send: 0.12, max: 2, vary: 0.04,
-    build(s, k) {
+    build(s) {
       const t = s.t, p = s.p;
       scrape(s, t, 0.28, 3800 * p, 900 * p, 2.2, 2.2, 0.75, 0.004);
       burst(s, t, 'white', 'highpass', 5000, 0.7, 0.3, 0.002, 0.06);
       thump(s, t, 260 * p, 140 * p, 0.03, 0.18, 0.04);
-      gasp(s, k.voice, t + 0.07, 0.35);
+      // the climber's gasp is a separate one-shot ('gasp'), voiced only when the exertion cooldown allows
     },
   },
 
   effort: {
     gain: 0.36, send: 0.06, max: 2, vary: 0.03, gap: 0.12,
     build(s, k) {
-      effort(s, k.voice);
+      voiceSet(k.voice).effort(s, k.voice, s.t);
     },
   },
 
   strain: {
     gain: 0.42, send: 0.06, max: 1, vary: 0.03, gap: 0.4,
     build(s, k) {
-      strain(s, k.voice);
+      voiceSet(k.voice).strain(s, k.voice, s.t);
     },
   },
 
@@ -305,7 +316,7 @@ export const SFX: Record<SfxId, SfxDef> = {
       g.gain.linearRampToValueAtTime(1.3, t + 0.28);
       g.gain.setTargetAtTime(0, t + 0.3, 0.14);
       s.chain(n, bp, g, panSweep(s, t, -0.3, 0.3, dur), s.out);
-      whoa(s, k.voice, t + 0.04, 0.32);
+      voiceSet(k.voice).whoa(s, k.voice, t + 0.04, 0.32);
     },
   },
 
@@ -578,3 +589,74 @@ export const SFX: Record<SfxId, SfxDef> = {
 };
 
 export const SFX_IDS = Object.keys(SFX) as SfxId[];
+
+export const EXTRA_SFX: Record<ExtraSfxId, SfxDef> = {
+  exhale: {
+    gain: 0.34, send: 0.06, max: 1, vary: 0.03, gap: 1.5,
+    build(s, k) {
+      voiceSet(k.voice).exhale(s, k.voice, s.t, 0.8);
+    },
+  },
+
+  gasp: {
+    gain: 0.4, send: 0.06, max: 1, vary: 0.04, gap: 0.8,
+    build(s, k) {
+      voiceSet(k.voice).gasp(s, k.voice, s.t, 0.8);
+    },
+  },
+
+  call: {
+    gain: 0.42, send: 0.16, max: 1, vary: 0.02, gap: 0.6,
+    build(s, k) {
+      voiceSet(k.voice).call(s, k.voice, s.t);
+    },
+  },
+
+  catch: {
+    gain: 1.25, send: 0.12, max: 2, vary: 0.04,
+    build(s) {
+      const t = s.t, p = s.p;
+      // the whole body arriving on one hand: deep palm thump, a sharp slap, the hold knocking, chalk
+      thump(s, t, 190 * p, 70 * p, 0.07, 0.34, 0.11);
+      burst(s, t, 'white', 'bandpass', 1350 * p, 0.8, 2.4, 0.001, 0.06);
+      burst(s, t, 'pink', 'lowpass', 3200, 0.7, 0.55, 0.001, 0.09);
+      burst(s, t + 0.001, 'white', 'bandpass', 880 * p, 7, 3.8, 0.001, 0.06);
+      ring(s, t, [[470 * p, 0.1, 0.07], [1220 * p, 0.03, 0.04]]);
+      burst(s, t + 0.01, 'pink', 'bandpass', 5000, 0.6, 0.4, 0.02, 0.3); // chalk cloud
+      burst(s, t + 0.004, 'brown', 'lowpass', 300, 0.7, 0.35, 0.004, 0.12); // body weight
+    },
+  },
+
+  tick: {
+    gain: 0.7, send: 0.04, max: 2, vary: 0.06, gap: 0.2,
+    build(s) {
+      const t = s.t, p = s.p;
+      burst(s, t, 'white', 'bandpass', 2100 * p, 4, 0.9, 0.0008, 0.018);
+      thump(s, t, 260 * p, 180 * p, 0.02, 0.09, 0.03);
+      if (chance(0.5)) squeak(s, t + 0.008, rand(1300, 1700) * p, 0.035, 0.12);
+    },
+  },
+
+  blow: {
+    gain: 0.5, send: 0.05, max: 1, vary: 0.05, gap: 0.8,
+    build(s) {
+      const t = s.t, p = s.p;
+      // "pff" through pursed lips, then the dust drifting off
+      const n = s.noise('pink', t, t + 0.4);
+      const bp = s.filter('bandpass', 1500 * p, 1.4);
+      s.glide(bp.frequency, t, 1700 * p, 1100 * p, 0.25);
+      const g = s.gain(0);
+      s.perc(g.gain, t, 1.6, 0.025, 0.22);
+      s.chain(n, bp, g, s.out);
+      burst(s, t + 0.005, 'white', 'highpass', 2500, 0.7, 0.25, 0.02, 0.16);
+      burst(s, t + 0.08, 'white', 'highpass', 7000, 0.7, 0.05, 0.05, 0.3);
+    },
+  },
+};
+
+export const EXTRA_SFX_IDS = Object.keys(EXTRA_SFX) as ExtraSfxId[];
+
+/** Definition of any one-shot (shared SfxId or app extra). */
+export function sfxDef(id: AnySfxId): SfxDef | undefined {
+  return (SFX as Record<string, SfxDef>)[id] ?? (EXTRA_SFX as Record<string, SfxDef>)[id];
+}

@@ -33,7 +33,7 @@ if (!(await reachable(base + '/dev/audio.html'))) {
   server = await createServer({
     configFile: new URL('../vite.config.ts', import.meta.url).pathname,
     root: new URL('..', import.meta.url).pathname,
-    cacheDir: 'node_modules/.vite-audio',
+    cacheDir: process.env.VITE_CACHE_DIR || 'node_modules/.vite-audio',
     server: { port, strictPort: true, host: '127.0.0.1' },
     logLevel: 'warn',
   });

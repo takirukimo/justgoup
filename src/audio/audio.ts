@@ -6,15 +6,18 @@
 // before that is a safe no-op that only records the wanted state (music, ambience, volumes),
 // which is applied as soon as the context runs.
 
-import type { AudioAPI, SfxId } from '../core/contracts';
+import type { AudioAPI } from '../core/contracts';
+import type { HeadId } from '../core/types';
 import { Ambience } from './ambience';
 import { Clock } from './clock';
+import { ExertionDirector, type ExertMoment } from './exertion';
 import { createMixGraph, setBusLevel, type MixGraph } from './graph';
 import { IntensityLayer } from './intensity';
 import { MusicPlayer, type MusicChoice } from './music';
-import { COUNT_STEP, countBeep, SFX, type SfxKit } from './sfx';
+import { COUNT_STEP, countBeep, SFX, sfxDef, type AnySfxId, type SfxKit } from './sfx';
 import { Sound } from './sound';
-import { DEFAULT_VOICE, type VoiceProfile } from './voice';
+import { VOICE_SETS, voiceFor } from './species';
+import type { VoiceProfile } from './voice';
 import { clamp, db, finite, rand, volumeCurve, warmBank } from './util';
 
 /** Global cap on simultaneous one-shot voices. */
@@ -26,8 +29,25 @@ const AMB_TRIM = 0.55; // relative to the sfx slider
 
 type Ctor = typeof AudioContext;
 
+/** Gestures that grant user activation (and so may resume an AudioContext on iOS). */
+const GESTURE_EVENTS = ['pointerdown', 'pointerup', 'touchend', 'click', 'keydown'] as const;
+
+/** Play one silent sample: unlocks (or re-unlocks after an interruption) the output on iOS. */
+function kickOutput(ctx: AudioContext): void {
+  try {
+    const b = ctx.createBuffer(1, 1, ctx.sampleRate);
+    const src = ctx.createBufferSource();
+    src.buffer = b;
+    src.connect(ctx.destination);
+    src.start(0);
+    src.onended = () => src.disconnect();
+  } catch {
+    /* ignore */
+  }
+}
+
 interface ActiveVoice {
-  id: SfxId;
+  id: AnySfxId;
   sound: Sound;
   t: number;
 }
@@ -42,7 +62,8 @@ export class GameAudio implements AudioAPI {
   private unlockPromise: Promise<void> | null = null;
 
   private readonly voices = new Set<ActiveVoice>();
-  private readonly lastPlay = new Map<SfxId, number>();
+  private readonly lastPlay = new Map<AnySfxId, number>();
+  private readonly exertion = new ExertionDirector();
   private readonly kit: SfxKit;
 
   private sfxVolume = 0.85;
@@ -56,11 +77,15 @@ export class GameAudio implements AudioAPI {
   private userSuspended = false;
   private hidden = false;
 
-  /** The climber's voice for this session (slightly different every launch). */
+  /**
+   * The climber's voice: the equipped head's voice set (setVoice), slightly different every launch.
+   * Mutated in place by setVoice so the breathing layer and the sfx kit follow it.
+   */
   readonly voice: VoiceProfile;
+  private readonly vary = { f0: rand(0.92, 1.07), tract: rand(0.97, 1.03) };
 
   constructor() {
-    this.voice = { f0: DEFAULT_VOICE.f0 * rand(0.9, 1.08), tract: DEFAULT_VOICE.tract * rand(0.96, 1.04) };
+    this.voice = voiceFor('ibex', this.vary);
     this.kit = { voice: this.voice };
   }
 
@@ -79,11 +104,12 @@ export class GameAudio implements AudioAPI {
     return this.unlockPromise;
   }
 
-  play(id: SfxId, opts: { volume?: number; pitch?: number; pan?: number } = {}): void {
+  /** Play a shared SfxId or one of the app extras (sfx.ts ExtraSfxId: exhale, gasp, call, catch, tick, blow). */
+  play(id: AnySfxId, opts: { volume?: number; pitch?: number; pan?: number } = {}): void {
     const ctx = this.ctx;
     const g = this.graph;
     if (!ctx || !g || ctx.state !== 'running') return;
-    const def = SFX[id];
+    const def = sfxDef(id);
     if (!def) return;
     const now = ctx.currentTime;
     const last = this.lastPlay.get(id);
@@ -173,6 +199,61 @@ export class GameAudio implements AudioAPI {
   }
 
   // ═══════════════════════════════ optional extras ═══════════════════════════════
+
+  /**
+   * The equipped head's voice set (species.ts): efforts, strains, gasps, the falling yell, the
+   * breathing and the head's call. Steini's guide blips stay ibex. Unknown heads are ignored.
+   */
+  setVoice(head: HeadId): void {
+    if (!Object.prototype.hasOwnProperty.call(VOICE_SETS, head)) return;
+    Object.assign(this.voice, voiceFor(head, this.vary));
+  }
+
+  /** The head whose voice set is speaking. */
+  get voiceId(): HeadId {
+    return this.voice.species ?? 'human';
+  }
+
+  /**
+   * A hard moment on the wall. The exertion director (exertion.ts) decides whether it is voiced
+   * (randomised 4–8 s cooldowns between vocal efforts, never looped) or only breathed: heavier
+   * breathing for a few seconds, a relieved exhale.
+   */
+  exert(moment: ExertMoment, severity = 0.5, opts: { pan?: number } = {}): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.running) return;
+    const now = ctx.currentTime;
+    const a = this.exertion.decide(now, moment, severity);
+    const pan = clamp(finite(opts.pan, 0), -1, 1) * 0.5;
+    if (a.vocal) this.play(a.vocal, { volume: a.vocal === 'strain' ? 0.7 : 0.85, pan });
+    if (a.breath) {
+      this.play(a.breath, { volume: 0.8, pan });
+      this.intensity?.hold(now + 1.05);
+    } else if (a.vocal) this.intensity?.hold(now + (a.vocal === 'strain' ? 1.3 : 0.45));
+    if (a.breathe > 0 && this.intensity) {
+      this.intensity.excite(a.breathe);
+      this.clock?.add(this.intensityJob);
+    }
+  }
+
+  /** A relieved breath out (shake-out), paced with the breathing layer. */
+  exhale(volume = 0.8): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.running) return;
+    this.play('exhale', { volume });
+    this.intensity?.hold(ctx.currentTime + 1.05);
+  }
+
+  /** A new climb: forget the exertion history and the breathing boost. */
+  resetExertion(): void {
+    this.exertion.reset();
+    if (this.ctx && this.intensity) this.intensity.stop(this.ctx.currentTime);
+  }
+
+  /** Breathing effort 0..1 of the effort layer (QA). */
+  get breathEffort(): number {
+    return this.intensity?.effort ?? 0;
+  }
 
   /** Pause all audio (e.g. app hidden / game paused). Safe to call any time. */
   suspend(): void {
@@ -268,16 +349,7 @@ export class GameAudio implements AudioAPI {
     this.ctx = ctx;
 
     // iOS: play a silent buffer synchronously inside the gesture to unlock output.
-    try {
-      const b = ctx.createBuffer(1, 1, ctx.sampleRate);
-      const src = ctx.createBufferSource();
-      src.buffer = b;
-      src.connect(ctx.destination);
-      src.start(0);
-      src.onended = () => src.disconnect();
-    } catch {
-      /* ignore */
-    }
+    kickOutput(ctx);
     const resumed = ctx.state === 'running' ? Promise.resolve() : ctx.resume().catch(() => undefined);
 
     // Heavy buffers (hall IR, noise bank, wavetables) are built right after the gesture returns.
@@ -299,6 +371,11 @@ export class GameAudio implements AudioAPI {
   private onStateChange(): void {
     const ctx = this.ctx;
     if (!ctx || !this.clock) return;
+    if (ctx.state === 'running' && (this.userSuspended || this.hidden)) {
+      // an interruption ended (iOS resumes on its own) while the game is paused / hidden: stay quiet
+      this.applyRunState();
+      return;
+    }
     if (ctx.state === 'running') {
       this.clock.resume();
       this.setMusic(this.wantMusic);
@@ -333,7 +410,7 @@ export class GameAudio implements AudioAPI {
     setBusLevel(g.amb, volumeCurve(this.sfxVolume) * AMB_TRIM, t, tau);
   }
 
-  private makeRoom(id: SfxId, max: number, now: number): void {
+  private makeRoom(id: AnySfxId, max: number, now: number): void {
     let same = 0;
     let oldestSame: ActiveVoice | null = null;
     let oldest: ActiveVoice | null = null;
@@ -357,7 +434,7 @@ export class GameAudio implements AudioAPI {
     v.sound.kill(now, 0.03);
   }
 
-  private track(id: SfxId, sound: Sound, t: number): void {
+  private track(id: AnySfxId, sound: Sound, t: number): void {
     sound.finish();
     const v: ActiveVoice = { id, sound, t };
     this.voices.add(v);
@@ -375,25 +452,45 @@ export class GameAudio implements AudioAPI {
     this.applyRunState();
   };
 
+  /**
+   * Any user gesture: a context that is not running (iOS 'interrupted' by a call / Siri / another
+   * app's audio, or 'suspended' after it) can only be resumed from inside a gesture on iOS, and the
+   * output sometimes needs the silent-buffer kick again.
+   */
   private readonly onGesture = (): void => {
     const ctx = this.ctx;
     if (!ctx || this.userSuspended || this.hidden) return;
-    if ((ctx.state as string) !== 'running') ctx.resume().catch(() => undefined);
+    const state = ctx.state as string;
+    if (state === 'running' || state === 'closed') return;
+    kickOutput(ctx);
+    ctx.resume().catch(() => undefined);
+  };
+
+  /** Focus / page show: try to resume (works where the browser allows it without a gesture). */
+  private readonly onFocus = (): void => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    this.hidden = false;
+    this.applyRunState();
   };
 
   private addListeners(): void {
     if (typeof document === 'undefined') return;
     document.addEventListener('visibilitychange', this.onVisibility);
-    document.addEventListener('pointerdown', this.onGesture, { passive: true, capture: true });
-    document.addEventListener('touchend', this.onGesture, { passive: true, capture: true });
-    document.addEventListener('keydown', this.onGesture, { capture: true });
+    // activation-granting events (iOS counts touchend / pointerup / click, not pointerdown)
+    for (const t of GESTURE_EVENTS) document.addEventListener(t, this.onGesture, { passive: true, capture: true });
+    if (typeof window !== 'undefined') {
+      window.addEventListener('focus', this.onFocus);
+      window.addEventListener('pageshow', this.onFocus);
+    }
   }
 
   private removeListeners(): void {
     if (typeof document === 'undefined') return;
     document.removeEventListener('visibilitychange', this.onVisibility);
-    document.removeEventListener('pointerdown', this.onGesture, { capture: true });
-    document.removeEventListener('touchend', this.onGesture, { capture: true });
-    document.removeEventListener('keydown', this.onGesture, { capture: true });
+    for (const t of GESTURE_EVENTS) document.removeEventListener(t, this.onGesture, { capture: true });
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('focus', this.onFocus);
+      window.removeEventListener('pageshow', this.onFocus);
+    }
   }
 }

@@ -2,7 +2,9 @@
 // jitter, vibrato and tremolo) plus aspiration noise feed a parallel bank of three formant
 // band-passes whose frequencies can morph over time between vowels. Used for the climber's
 // grunts, strained breaths, gasps and "whoa", the breathing layer, and Steini's goat bleat.
+// The per-head voice sets (species.ts) build on these primitives; the gestures below are the human set.
 
+import type { HeadId } from '../core/types';
 import type { Sound } from './sound';
 import { chance, pick, rand, weighted } from './util';
 
@@ -33,13 +35,15 @@ const MAKEUP = [2.6, 3.4, 3.8] as const;
 
 export type VowelPath = VowelId | readonly (readonly [number, VowelId])[];
 
-/** The climber's voice: base pitch + vocal tract scale. */
+/** The climber's voice: base pitch + vocal tract scale, and which head's voice set speaks (species.ts). */
 export interface VoiceProfile {
   f0: number;
   tract: number;
+  /** Head whose voice set this is (species.ts VOICE_SETS); absent = human. */
+  species?: HeadId;
 }
 
-export const DEFAULT_VOICE: VoiceProfile = { f0: 132, tract: 1 };
+export const DEFAULT_VOICE: VoiceProfile = { f0: 132, tract: 1, species: 'human' };
 
 /**
  * Parallel formant filter: `src` → 3 band-passes (+ a low body path) → returned gain node.

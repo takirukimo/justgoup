@@ -4,16 +4,18 @@
 // Used by dev/audio.html and scripts/audio-check.mjs. Not imported by the game itself.
 
 import type { SfxId } from '../core/contracts';
+import type { HeadId } from '../core/types';
 import { Ambience } from './ambience';
 import { createMixGraph, setBusLevel } from './graph';
 import { IntensityLayer } from './intensity';
 import { MusicPlayer, type TrackId } from './music';
-import { SFX, SFX_IDS } from './sfx';
+import { EXTRA_SFX_IDS, SFX, SFX_IDS, sfxDef, type AnySfxId } from './sfx';
 import { Sound } from './sound';
+import { VOICE_IDS, voiceFor } from './species';
 import { DEFAULT_VOICE } from './voice';
 import { rand } from './util';
 
-export { SFX_IDS };
+export { EXTRA_SFX_IDS, SFX_IDS, VOICE_IDS };
 
 export interface RenderOptions {
   sampleRate?: number;
@@ -21,7 +23,18 @@ export interface RenderOptions {
   dynamics?: boolean;
   pitch?: number;
   volume?: number;
+  /** The head whose voice set speaks (default: the human DEFAULT_VOICE). */
+  voice?: HeadId;
 }
+
+/** The voice the renders use: the head's set with a random per-launch variation, like GameAudio. */
+function renderVoice(o: RenderOptions): typeof DEFAULT_VOICE {
+  if (!o.voice) return { ...DEFAULT_VOICE, f0: DEFAULT_VOICE.f0 * rand(0.9, 1.08), tract: DEFAULT_VOICE.tract * rand(0.96, 1.04) };
+  return voiceFor(o.voice, { f0: rand(0.92, 1.07), tract: rand(0.97, 1.03) });
+}
+
+/** The voice gestures every head's set provides, as the one-shots that play them. */
+export const VOICE_GESTURES: readonly AnySfxId[] = ['effort', 'strain', 'gasp', 'fall', 'exhale', 'call'];
 
 export interface AudioStats {
   /** Rendered buffer length (s). */
@@ -66,13 +79,15 @@ function offline(seconds: number, sampleRate: number): OfflineAudioContext {
 }
 
 /** Render one sound effect exactly as GameAudio.play() builds it (at full sfx volume). */
-export async function renderSfx(id: SfxId, o: RenderOptions = {}): Promise<{ buffer: AudioBuffer; end: number }> {
+export async function renderSfx(id: AnySfxId, o: RenderOptions = {}): Promise<{ buffer: AudioBuffer; end: number }> {
   const sr = o.sampleRate ?? 48000;
-  const def = SFX[id];
+  const def = sfxDef(id);
+  if (!def) throw new Error(`unknown sfx '${id}'`);
+  const voice = renderVoice(o);
   // Probe pass to learn the sound's length, then render with room for the reverb tail.
   const probe = offline(0.1, sr);
   const ps = new Sound(probe, { dry: probe.destination }, 0.01, { pitch: o.pitch ?? 1 });
-  def.build(ps, { voice: DEFAULT_VOICE });
+  def.build(ps, { voice });
   const end = ps.finish();
   ps.dispose();
 
@@ -81,7 +96,7 @@ export async function renderSfx(id: SfxId, o: RenderOptions = {}): Promise<{ buf
   setBusLevel(g.sfx, 1, 0, 0);
   const pitch = (o.pitch ?? 1) * (1 + rand(-def.vary, def.vary));
   const s = new Sound(ctx, g.sfx, 0.01, { gain: def.gain * (o.volume ?? 1), send: def.send, pitch });
-  def.build(s, { voice: { f0: DEFAULT_VOICE.f0 * rand(0.9, 1.08), tract: DEFAULT_VOICE.tract * rand(0.96, 1.04) } });
+  def.build(s, { voice });
   s.finish();
   return { buffer: await ctx.startRendering(), end: end - 0.01 };
 }
@@ -110,14 +125,18 @@ export async function renderAmbience(seconds: number, o: RenderOptions = {}): Pr
   return ctx.startRendering();
 }
 
-/** Render the effort layer at a fixed tension/pump (fades out over the last 2 s). */
-export async function renderIntensity(tension: number, pump: number, seconds: number, o: RenderOptions = {}): Promise<AudioBuffer> {
+/**
+ * Render the effort layer at a fixed tension/pump (fades out over the last 2 s). `excite` adds a hard
+ * moment's extra breathing at the start (the exertion director's push).
+ */
+export async function renderIntensity(tension: number, pump: number, seconds: number, o: RenderOptions & { excite?: number } = {}): Promise<AudioBuffer> {
   const sr = o.sampleRate ?? 44100;
   const ctx = offline(seconds, sr);
   const g = createMixGraph(ctx, { dynamics: o.dynamics ?? false });
   setBusLevel(g.sfx, o.volume ?? 1, 0, 0);
-  const layer = new IntensityLayer(ctx, g.sfx, DEFAULT_VOICE);
+  const layer = new IntensityLayer(ctx, g.sfx, o.voice ? renderVoice(o) : DEFAULT_VOICE);
   layer.set(tension, pump);
+  if (o.excite) layer.excite(o.excite);
   for (let t = 0; t < seconds; t += 0.025) {
     if (t > seconds - 2.5) layer.set(0, 0);
     layer.tick(t);
@@ -291,7 +310,7 @@ export function analyze(buf: AudioBuffer): AudioStats {
 
 export interface CheckRow {
   name: string;
-  kind: 'sfx' | 'music' | 'ambience' | 'intensity' | 'mix';
+  kind: 'sfx' | 'music' | 'ambience' | 'intensity' | 'mix' | 'voice';
   /** Designed length of the sound (s), sfx only. */
   dur: number;
   stats: AudioStats;
@@ -325,24 +344,48 @@ export async function runAudioCheck(o: { variants?: number; musicSeconds?: numbe
   const musicSeconds = o.musicSeconds ?? 40;
   const rows: CheckRow[] = [];
 
-  for (const id of SFX_IDS) {
+  /** Several random variants (+ pitch extremes) of one one-shot: the first's stats, the worst peak. */
+  const sweep = async (id: AnySfxId, voice: HeadId | undefined, n: number): Promise<{ stats: AudioStats; end: number; peakMax: number; quiet: number }> => {
     let first: AudioStats | null = null;
     let end = 0;
     let peakMax = 0;
     let nan = false;
+    let quiet = Infinity;
     const pitches = [1, 1, 0.8, 1.25];
-    for (let v = 0; v < Math.max(variants, 1); v++) {
-      const r = await renderSfx(id, { pitch: pitches[v % pitches.length] });
+    for (let v = 0; v < Math.max(n, 1); v++) {
+      const r = await renderSfx(id, { pitch: pitches[v % pitches.length], voice });
       const st = analyze(r.buffer);
       if (!first) {
         first = st;
         end = r.end;
       }
       peakMax = Math.max(peakMax, st.peak);
+      quiet = Math.min(quiet, st.peak);
       nan = nan || st.nan;
     }
-    const stats = { ...(first as AudioStats), nan };
-    rows.push(judge({ name: id, kind: 'sfx', dur: end, stats, peakMax }, 1e-4));
+    return { stats: { ...(first as AudioStats), nan }, end, peakMax, quiet };
+  };
+
+  for (const id of [...SFX_IDS, ...EXTRA_SFX_IDS]) {
+    const r = await sweep(id, id === 'call' ? 'ibex' : undefined, variants);
+    rows.push(judge({ name: id, kind: 'sfx', dur: r.end, stats: r.stats, peakMax: r.peakMax }, 1e-4));
+  }
+
+  // every head's voice set: each gesture renders non-silent (in EVERY variant) and never clips
+  for (const head of VOICE_IDS) {
+    for (const id of VOICE_GESTURES) {
+      const n = id === 'effort' ? Math.max(variants, 6) : variants; // efforts rotate through 3–4 styles
+      const r = await sweep(id, head, n);
+      const row = judge({ name: `voice:${head}:${id}`, kind: 'voice', dur: r.end, stats: r.stats, peakMax: r.peakMax }, 1e-4);
+      if (r.quiet < 0.005) {
+        row.problems.push('a variant is silent');
+        row.ok = false;
+      }
+      rows.push(row);
+    }
+    const buf = await renderIntensity(1.2, 0.85, 7, { voice: head, excite: 0.9 });
+    const st = analyze(buf);
+    rows.push(judge({ name: `voice:${head}:breathing`, kind: 'voice', dur: 7, stats: st, peakMax: st.peak }, 0.002));
   }
 
   for (const track of ['menu', 'climb'] as const) {
@@ -357,14 +400,15 @@ export async function runAudioCheck(o: { variants?: number; musicSeconds?: numbe
     rows.push(judge({ name: 'ambience', kind: 'ambience', dur: 24, stats: st, peakMax: st.peak }, 0.001));
   }
 
-  for (const [tension, pump] of [
-    [0.4, 0.1],
-    [1.0, 0.6],
-    [1.5, 1.0],
+  // easy climbing breathes barely audibly (owner: heavy breathing only when it is genuinely hard)
+  for (const [tension, pump, minRms] of [
+    [0.4, 0.1, 0.0007],
+    [1.0, 0.6, 0.002],
+    [1.5, 1.0, 0.002],
   ] as const) {
     const buf = await renderIntensity(tension, pump, 9);
     const st = analyze(buf);
-    rows.push(judge({ name: `intensity:${tension}/${pump}`, kind: 'intensity', dur: 9, stats: st, peakMax: st.peak }, 0.002));
+    rows.push(judge({ name: `intensity:${tension}/${pump}`, kind: 'intensity', dur: 9, stats: st, peakMax: st.peak }, minRms));
   }
 
   {
