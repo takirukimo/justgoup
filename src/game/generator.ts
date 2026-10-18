@@ -10,7 +10,7 @@
 
 import type { BoulderDef, HoldDef, HoldRole, HoldType, LimbId, QuickdrawDef } from '../core/types';
 import type { GenerateOptions } from '../core/contracts';
-import { GAME } from '../config/tuning';
+import { GAME, SIM } from '../config/tuning';
 import { ROUTE_COLORS, WALL } from '../config/brand';
 import { hashString, Rng } from '../core/rng';
 import { clamp, lerp } from '../core/math';
@@ -48,6 +48,8 @@ function routeName(rng: Rng): string {
 // ═══════════════════════════════ tables ═══════════════════════════════
 
 const ANGLES = [-8, 0, 5, 10, 15, 20, 25, 30, 35, 40] as const;
+/** Minimum gap (m) between a quickdraw's clip point and the edge of any route hold. */
+const CLIP_CLEARANCE = 0.07;
 
 function pickAngle(grade: number, rope: boolean, rng: Rng): number {
   let w: number[];
@@ -532,9 +534,22 @@ class Builder {
     let y = rng.range(1.9, 2.2);
     let side = rng.chance(0.5) ? -1 : 1;
     let i = 0;
+    // The bolt stays off the holds, and the carabiner (where the hand clips) stays clear of every
+    // route hold, so releasing a hand on a hold never has to choose between grabbing and clipping.
+    const clear = (x: number, y: number): boolean => this.gap(x, y, 0.05) >= 0.05 && this.gap(x, y - SIM.quickdrawDrop, CLIP_CLEARANCE) >= 0;
     while (y < top.y - 0.9) {
-      let x = this.clampX(this.lineX(y) + side * rng.range(0.15, 0.35));
-      if (this.gap(x, y, 0.05) < 0.05) x = this.clampX(x + side * 0.15);
+      const x0 = this.clampX(this.lineX(y) + side * rng.range(0.15, 0.35));
+      let x = x0;
+      if (!clear(x, y)) {
+        x = this.clampX(x0 + side * 0.15);
+        for (const dx of [0.15, 0.3, -0.15, 0.45]) {
+          const cx = this.clampX(x0 + side * dx);
+          if (clear(cx, y)) {
+            x = cx;
+            break;
+          }
+        }
+      }
       this.draws.push({ id: `q${i++}`, x: r3(x), y: r3(y) });
       y += rng.range(1.4, 2.0);
       if (rng.chance(0.7)) side = -side;

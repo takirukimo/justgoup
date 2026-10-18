@@ -185,6 +185,10 @@ const MIN_PELVIS_Y = GAME.padHeight + 0.42;
  * linearly to 0; it never grows), and meanwhile being past the edge doesn't count toward popping off.
  */
 const SOFT_ATTACH = 0.25;
+/** A dragged foot's target turns the torso lean only while it is within this far (m) of reach. */
+const FOOT_LEAN_REACH = 0.15;
+/** Torso leans (rad, within statics.LEAN_MAX) the hip handle's feasibility search may assume. */
+const HIP_LEANS = [0, -0.14, 0.14, -0.28, 0.28, -0.42, 0.42] as const;
 
 function newLimb(): LimbRt {
   return {
@@ -274,6 +278,8 @@ export class ClimberSim implements ClimberSimAPI {
   private Cv = { x: 0, y: 0 };
   private depth = 0.25;
   private depthV = 0;
+  /** Smoothed core torque of the static solution (body weights · m), applied as a spine couple. */
+  private coreTq = 0;
   private yaw = 0;
   private yawV = 0;
   private readonly pose: Pose = { px: 0, py: 1, cx: 0, cy: 1.5 };
@@ -348,6 +354,7 @@ export class ClimberSim implements ClimberSimAPI {
     this.postureHelp = Math.min(1, 1 - (1 - SIM.postureHardFrac) * fade + this.assist);
     this.prm = makeParams(boulder.wallAngle, this.assist, 0);
     this.prmScratch = makeParams(boulder.wallAngle, this.assist, 0);
+    this.hipPrm = makeParams(boulder.wallAngle, this.assist, 0);
     const limbs = {} as Record<LimbId, LimbSnapshot>;
     for (const id of LIMB_IDS) limbs[id] = snapshot(id);
     this.state = {
@@ -491,27 +498,21 @@ export class ClimberSim implements ClimberSimAPI {
     const out: SimEvent[] = [];
     if (this.phase !== 'climbing') return out;
     const p = { x: L.tx, y: L.ty };
-    const hold = this.snapCandidate(limb, p);
+    const intent = this.releaseTarget(limb, p);
+    const hold = intent.hold;
 
-    if (i < 2 && this.isRope) {
-      const q = this.clipCandidate(limb, p);
-      if (q) {
-        const cp = clipPoint(q, { x: 0, y: 0 });
-        let holdD = Infinity;
-        if (hold) holdD = Math.hypot(p.x - hold.x, p.y - hold.y);
-        if (Math.hypot(p.x - cp.x, p.y - cp.y) <= holdD) {
-          L.busy = true;
-          L.busyT = GAME.clipTime;
-          L.busyDraw = q;
-          out.push({ type: 'clip', quickdrawId: q.id });
-          // hold still while the rope goes in: the other three limbs keep the current position
-          this.posture.px = this.P.x;
-          this.posture.py = this.P.y;
-          this.postureOn = true;
-          this.syncState();
-          return out;
-        }
-      }
+    if (intent.clip) {
+      const q = intent.clip;
+      L.busy = true;
+      L.busyT = GAME.clipTime;
+      L.busyDraw = q;
+      out.push({ type: 'clip', quickdrawId: q.id });
+      // hold still while the rope goes in: the other three limbs keep the current position
+      this.posture.px = this.P.x;
+      this.posture.py = this.P.y;
+      this.postureOn = true;
+      this.syncState();
+      return out;
     }
 
     if (hold) {
@@ -571,6 +572,40 @@ export class ClimberSim implements ClimberSimAPI {
       bestD = d;
     }
     return best;
+  }
+
+  private readonly releaseOut: { hold: HoldDef | null; clip: QuickdrawDef | null } = { hold: null, clip: null };
+  private readonly releaseTmp = { x: 0, y: 0 };
+
+  /**
+   * Optional extra (not in ClimberSimAPI): what releasing `limb` at `p` does right now — clip the
+   * quickdraw `clip` (rope, a hand), grab the hold `hold`, or neither (smear / return). At most one
+   * of the two is set. endDrag() acts on exactly this, and the input layer previews it, so the
+   * reticle never says CLIP while the release grabs a hold (or the other way round). With a hold
+   * and a draw both in range, the release point picks the nearer of the hold's grip point (where
+   * the hand closes) and the draw's clip point (where the rope goes in). Returns a reused object.
+   */
+  releaseTarget(limb: LimbId, p: Vec2): { hold: HoldDef | null; clip: QuickdrawDef | null } {
+    const out = this.releaseOut;
+    const i = LIMB_INDEX[limb];
+    const hold = this.snapCandidate(limb, p);
+    out.hold = hold;
+    out.clip = null;
+    if (i >= 2 || !this.isRope) return out;
+    const q = this.clipCandidate(limb, p);
+    if (!q) return out;
+    const cp = clipPoint(q, this.releaseTmp);
+    const clipD = Math.hypot(p.x - cp.x, p.y - cp.y);
+    let holdD = Infinity;
+    if (hold) {
+      const g = contactPoint(hold, i, this.wouldMatch(i, hold), this.releaseTmp);
+      holdD = Math.hypot(p.x - g.x, p.y - g.y);
+    }
+    if (clipD <= holdD) {
+      out.hold = null;
+      out.clip = q;
+    }
+    return out;
   }
 
   clipCandidate(limb: LimbId, p: Vec2): QuickdrawDef | null {
@@ -1059,6 +1094,7 @@ export class ClimberSim implements ClimberSimAPI {
       }
     }
     this.tension = this.ev.tension;
+    this.coreTq = this.ev.feasible ? this.ev.torque : 0;
     this.Pv.x = this.Pv.y = this.Cv.x = this.Cv.y = 0;
     this.events.length = 0;
   }
@@ -1079,13 +1115,17 @@ export class ClimberSim implements ClimberSimAPI {
     }
   }
 
-  /** Pick the spine lean that minimises tension for the current pelvis position. */
+  /**
+   * Pick the spine lean that minimises tension for the current pelvis position, keeping a dragged
+   * limb's target inside its envelope where a lean can: the torso leans into a reaching hand, and
+   * turns the hips so a foot can step to a target that is nearly in range — the same lean the
+   * planner's reach pose uses (statics.optimizePose), so a planned high step is reachable live. A
+   * foot pointed far out of range doesn't tilt the torso over (StaticsParams.reachCap).
+   */
   private updateLean(): void {
     this.buildContacts();
-    // the torso leans into a reaching HAND; a reaching foot doesn't tilt the whole torso over to
-    // fake a higher step (the hips may shift for it, see updateReachPosture)
     let reachLimb = -1;
-    for (let i = 0; i < 2; i++)
+    for (let i = 0; i < 4; i++)
       if (this.limbs[i].dragging) {
         reachLimb = i;
         break;
@@ -1102,8 +1142,10 @@ export class ClimberSim implements ClimberSimAPI {
     for (let i = 0; i < 4; i++) if (this.contacts[i]) any = true;
     if (!any) return;
     prm.reachMargin = reachLimb >= 0 ? SIM.reachComfort : 0;
+    prm.reachCap = reachLimb >= 2 ? FOOT_LEAN_REACH : Infinity;
     bestLean(this.contacts, prm, this.P.x, this.P.y, this.evScratch, this.leanPose, this.lean);
     prm.reachMargin = 0;
+    prm.reachCap = Infinity;
     // rate-limited: the torso turns smoothly (≈2.4 rad/s)
     const maxStep = 2.4 * H * 4;
     this.lean += clamp(LEAN_OUT.lean - this.lean, -maxStep, maxStep);
@@ -1264,6 +1306,7 @@ export class ClimberSim implements ClimberSimAPI {
     let worst = 0;
     for (let i = 0; i < 4; i++) if (this.limbs[i].stress > worst) worst = this.limbs[i].stress;
     if (!ev.feasible && (ev.handsOn || ev.feetOn)) worst = Math.max(worst, 1.2);
+    this.coreTq += ((ev.feasible ? ev.torque : 0) - this.coreTq) * ks;
     const rawT = worst + ev.balancePen + ev.barnPen + ev.stretchPen + ev.corePen + ev.reachPen;
     this.tension += (rawT - this.tension) * k;
     this.balance = ev.balance;
@@ -1322,28 +1365,38 @@ export class ClimberSim implements ClimberSimAPI {
     let acy = -g * this.cth;
 
     // support: feet push with their full static force, hands only pull along the arm, so a
-    // body that hangs off-plumb swings until the arms can hold it.
+    // body that hangs off-plumb swings until the arms can hold it. Each force acts where it really
+    // acts — a hand's pull along the arm through its shoulder, a foot's push at the toe — not at the
+    // node that carries it: the difference is a pure couple on the spine (with the core torque the
+    // statics allowed), so the statically solved pose, torso lean included, is an equilibrium of
+    // the dynamics instead of the torso drooping toward the hands.
+    let couple = this.coreTq;
     for (let i = 0; i < 4; i++) {
       const L = this.limbs[i];
       if (L.sfx === 0 && L.sfy === 0) continue;
       if (i < 2) {
         acx += (L.sfx * g) / MC;
         acy += (L.sfy * g) / MC;
+        couple += (ax[i] - C.x) * L.sfy - (ay[i] - C.y) * L.sfx;
       } else {
         apx += (L.sfx * g) / MP;
         apy += (L.sfy * g) / MP;
+        couple += (L.cx - P.x) * L.sfy - (L.cy - P.y) * L.sfx;
       }
     }
-
-    // upright spine (internal force pair) toward the lean the statics prefer
-    const tcx = P.x + BODY.spine * this.leanUx;
-    const tcy = P.y + BODY.spine * this.leanUy;
-    const fux = SIM.uprightStiffness * (tcx - C.x);
-    const fuy = SIM.uprightStiffness * (tcy - C.y);
-    acx += fux;
-    acy += fuy;
-    apx -= (fux * MC) / MP;
-    apy -= (fuy * MC) / MP;
+    if (couple !== 0 && SIM.supportCouple > 0) {
+      // ±F perpendicular to the spine on chest / pelvis: torque F·spine, no net force
+      const sx = C.x - P.x;
+      const sy = C.y - P.y;
+      const sl2 = sx * sx + sy * sy;
+      if (sl2 > 1e-6) {
+        const f = (couple * g * SIM.supportCouple) / sl2;
+        acx += (-sy * f) / MC;
+        acy += (sx * f) / MC;
+        apx -= (-sy * f) / MP;
+        apy -= (sx * f) / MP;
+      }
+    }
 
     // hip target (player) or autonomic posture
     if (this.phase === 'climbing' || this.phase === 'idle') {
@@ -1411,12 +1464,49 @@ export class ClimberSim implements ClimberSimAPI {
           // targets above the hip line don't pull at all
           const vu = (L.tx - ax[i]) * ux + (L.ty - ay[i]) * uy;
           if (vu > 0.05) continue;
+          // a reaching leg moves the hips (it hangs off the pelvis): pulling the whole body over
+          // would swing the torso toward the foot whenever the hips are held (hip handle), turning
+          // the hip frame so the step gets harder, not easier
+          apx += fx / MP;
+          apy += fy / MP;
+          continue;
         }
         acx += fx;
         acy += fy;
         apx += fx;
         apy += fy;
       }
+    }
+
+    // upright spine (internal force pair) toward the lean the statics prefer. The core also holds
+    // the lean against what the external forces do to it — the legs push the pelvis, the arms pull
+    // the chest — up to SIM.coreHoldMax: that part of the internal torque is fed forward, so a
+    // tilted torso doesn't droop ~10 cm off the posture the statics (and the planner) settled on.
+    {
+      const tcx = P.x + BODY.spine * this.leanUx;
+      const tcy = P.y + BODY.spine * this.leanUy;
+      let fux = SIM.uprightStiffness * (tcx - C.x);
+      let fuy = SIM.uprightStiffness * (tcy - C.y);
+      if (SIM.coreHold > 0) {
+        const sx = C.x - P.x;
+        const sy = C.y - P.y;
+        const sl = Math.hypot(sx, sy);
+        if (sl > 1e-6) {
+          const nx = -sy / sl;
+          const ny = sx / sl;
+          // relative perpendicular acceleration of chest vs pelvis (it turns the spine); the
+          // internal pair changes it by f / MP
+          const rel = (acx - apx) * nx + (acy - apy) * ny;
+          const cap = SIM.coreHoldMax * g * MP;
+          const ff = clamp(-rel * MP * SIM.coreHold, -cap, cap);
+          fux += ff * nx;
+          fuy += ff * ny;
+        }
+      }
+      acx += fux;
+      acy += fuy;
+      apx -= (fux * MC) / MP;
+      apy -= (fuy * MC) / MP;
     }
 
     // integrate
@@ -1448,12 +1538,51 @@ export class ClimberSim implements ClimberSimAPI {
   private readonly hipAx = new Float64Array(4);
   private readonly hipAy = new Float64Array(4);
   private readonly hipPose: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
+  private readonly hipPrm: StaticsParams;
+
+  /**
+   * Can the pelvis sit at (px, py) with every attached limb inside its envelope? First with the
+   * torso moved rigidly (what the constraint projection sees right now), else with any torso lean
+   * the climber can turn to (the lean the statics prefer there is picked by updateLean, which keeps
+   * the limbs inside their envelopes too) — the same pose model as the planner (pelvis + lean), so
+   * a planned weight shift is never refused just because the torso has not turned yet.
+   */
+  private hipFits(px: number, py: number, ox: number, oy: number, ux: number, uy: number): boolean {
+    const q = this.hipPose;
+    for (let k = 0; k <= HIP_LEANS.length; k++) {
+      q.px = px;
+      q.py = py;
+      let vx = ux;
+      let vy = uy;
+      if (k === 0) {
+        q.cx = px + ox;
+        q.cy = py + oy;
+      } else {
+        placeChest(q, this.contacts, this.hipPrm, HIP_LEANS[k - 1]);
+        const l = Math.hypot(q.cx - q.px, q.cy - q.py) || 1;
+        vx = (q.cx - q.px) / l;
+        vy = (q.cy - q.py) / l;
+      }
+      computeAnchors(q, this.hipAx, this.hipAy);
+      let fits = true;
+      for (let i = 0; i < 4 && fits; i++) {
+        const L = this.limbs[i];
+        if (!(L.hold || L.smear) || L.dragging || L.busy) continue;
+        const allow = this.softAllow(L) + 0.004;
+        // conservative excess first (cheap); the exact distance only near the edge
+        if (envEval(i, this.hipAx[i], this.hipAy[i], vx, vy, L.cx, L.cy).excess <= allow) continue;
+        if (envProject(i, this.hipAx[i], this.hipAy[i], vx, vy, L.cx, L.cy) > allow) fits = false;
+      }
+      if (fits) return true;
+    }
+    return false;
+  }
 
   /**
    * Furthest pelvis position on the line from the hip drag's origin toward (tx, ty) at which every
-   * attached limb stays inside its envelope (torso moved rigidly with the pelvis). Written to out.
-   * Searching from a fixed origin (not the moving pelvis) keeps the aim still once it hits the limit,
-   * so other forces can't make the hips creep along the boundary.
+   * attached limb can stay inside its envelope (hipFits). Written to out. Searching from a fixed
+   * origin (not the moving pelvis) keeps the aim still once it hits the limit, so other forces can't
+   * make the hips creep along the boundary.
    */
   private feasibleHip(tx: number, ty: number, out: Vec2): void {
     const P = this.P;
@@ -1464,20 +1593,17 @@ export class ClimberSim implements ClimberSimAPI {
     const ux = ox / ol;
     const uy = oy / ol;
     const O = this.hipOrigin;
-    const ok = (t: number): boolean => {
-      const q = this.hipPose;
-      q.px = O.x + (tx - O.x) * t;
-      q.py = O.y + (ty - O.y) * t;
-      q.cx = q.px + ox;
-      q.cy = q.py + oy;
-      computeAnchors(q, this.hipAx, this.hipAy);
-      for (let i = 0; i < 4; i++) {
-        const L = this.limbs[i];
-        if (!(L.hold || L.smear) || L.dragging || L.busy) continue;
-        if (envProject(i, this.hipAx[i], this.hipAy[i], ux, uy, L.cx, L.cy) > this.softAllow(L) + 0.004) return false;
+    this.buildContacts();
+    // the chest placement the lean search uses (a reaching hand pulls the torso toward its target)
+    const prm = this.hipPrm;
+    prm.reachLimb = -1;
+    for (let i = 0; i < 2; i++)
+      if (this.limbs[i].dragging) {
+        prm.reachLimb = i;
+        prm.reachX = this.limbs[i].tx;
+        prm.reachY = this.reachY(i);
       }
-      return true;
-    };
+    const ok = (t: number): boolean => this.hipFits(O.x + (tx - O.x) * t, O.y + (ty - O.y) * t, ox, oy, ux, uy);
     if (ok(1)) {
       out.x = tx;
       out.y = ty;

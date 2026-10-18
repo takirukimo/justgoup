@@ -175,6 +175,12 @@ interface RendererExtras {
   readonly cameraMode?: CameraMode;
 }
 
+/**
+ * Optional sim extra (ClimberSim.releaseTarget): what a release at p does — grab `hold` or clip
+ * `clip` (at most one set) — so the reticle previews exactly what endDrag() will do.
+ */
+type ReleaseTargetFn = (limb: LimbId, p: Vec2) => { hold: HoldDef | null; clip: QuickdrawDef | null };
+
 export interface LimbControlsOptions {
   /** Extra space (CSS px) kept free of handles beyond the device safe-area insets (HUD bars). */
   reserve?: Partial<typeof RESERVE>;
@@ -988,7 +994,19 @@ export class LimbControls implements LimbControlsAPI {
     const sim = this.sim;
     if (!sim || this.dragIdx < 0 || this.dragIdx > 3) return;
     const limb = IDS[this.dragIdx];
-    const c = sim.snapCandidate(limb, this.target);
+    const rope = this.dragIdx < 2 && sim.boulder.mode === 'rope';
+    const release = (sim as ClimberSimAPI & { releaseTarget?: ReleaseTargetFn }).releaseTarget;
+    let c: HoldDef | null;
+    let q: QuickdrawDef | null = null;
+    if (typeof release === 'function') {
+      // the sim resolves hold vs. quickdraw the same way endDrag() will
+      const r = release.call(sim, limb, this.target);
+      c = r.hold;
+      q = r.clip;
+    } else {
+      c = sim.snapCandidate(limb, this.target);
+      if (rope) q = sim.clipCandidate(limb, this.target);
+    }
     if (force || !this.candKnown || c !== this.cand) {
       this.cand = c;
       this.candKnown = true;
@@ -997,12 +1015,9 @@ export class LimbControls implements LimbControlsAPI {
       this.highlightsDirty = true;
       bus.emit('input:drag-move', { limb, candidateHoldId: c ? c.id : null, quality: this.quality });
     }
-    if (this.dragIdx < 2 && sim.boulder.mode === 'rope') {
-      const q = sim.clipCandidate(limb, this.target);
-      if (q !== this.clip) {
-        this.clip = q;
-        this.highlightsDirty = true;
-      }
+    if (rope && q !== this.clip) {
+      this.clip = q;
+      this.highlightsDirty = true;
     }
   }
 

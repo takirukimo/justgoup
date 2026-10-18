@@ -3,7 +3,7 @@
 // It drives the app through window.__jgu (?debug=1), always on the LOCAL backend (webdriver).
 //
 // usage: node dev/world.qa.mjs [baseUrl] [--out dir] [--tag before] [--q high] [--dpr 1]
-//          [--only title,follow,drag,colors,lead,portraits,perf] [--colors Red,Black] [--draw 1]
+//          [--only title,follow,drag,colors,fall,lead,portraits,perf] [--colors Red,Black] [--draw 1]
 //   baseUrl defaults to http://localhost:5342 (e.g. VITE_CACHE_DIR=node_modules/.vite-3dview
 //   npx vite --config dev/e2e.vite.config.mjs --port 5342 --strictPort)
 import { chromium } from 'playwright-core';
@@ -171,7 +171,7 @@ async function startMode(text) {
   await veilClear();
 }
 
-if (want('follow') || want('drag') || want('colors') || want('perf')) {
+if (want('follow') || want('drag') || want('colors') || want('perf') || want('fall')) {
   await startMode('Send Train');
   await settle(2);
   await shot('preview');
@@ -341,6 +341,18 @@ if (want('follow') || want('drag') || want('colors') || want('perf')) {
   }
 }
 
+if (want('fall') && (await page.evaluate(() => window.__jgu.sim?.getState().phase === 'climbing'))) {
+  // boulder fall: the 'fall' camera keeps the body (and then the pad) inside the HUD-safe band
+  await page.evaluate(() => window.__jgu.sim.forceFall());
+  await page.waitForTimeout(350);
+  await shot('fall');
+  log(`fall framing ${JSON.stringify(await framing())}`);
+  await waitFor(() => window.__jgu.sim?.getState().phase === 'landed', 'landed', 30000).catch(() => null);
+  await page.waitForTimeout(700);
+  await shot('landed');
+  log(`landed framing ${JSON.stringify(await framing())}`);
+}
+
 if (want('lead')) {
   if (!(await page.evaluate(() => document.getElementById('ui')?.dataset.screen === 'title'))) {
     await page.evaluate(() => sessionStorage.removeItem('qa-seeded'));
@@ -358,6 +370,7 @@ if (want('lead')) {
   await settle(3);
   await shot('lead-follow');
   log(`lead framing ${JSON.stringify(await framing())}`);
+  log(`lead stats ${JSON.stringify(await stats())}`);
   // teleport onto holds just above the first draw, clip it, then fall: a catch close to the floor
   const drawIdx = +opt('draw', 1);
   const set = await page.evaluate((drawIdx) => {

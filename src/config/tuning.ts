@@ -59,6 +59,18 @@ export const SIM = {
   supportSmoothing: 22,
   /** Chest → upright spring (1/s²) and how much the spine leans toward the hands (0..1). */
   uprightStiffness: 55,
+  /**
+   * Fraction of the support forces' true-lever couple applied to the spine (hands pull through the
+   * shoulders, feet push at the toes; see ClimberSim.integrateBody). 1 = the static pose is an
+   * equilibrium of the dynamics.
+   */
+  supportCouple: 1,
+  /**
+   * Core strength: the fraction of the external forces' turning effect on the spine the core
+   * cancels outright (feed-forward), and its cap (g), so the torso holds the lean the statics chose.
+   */
+  coreHold: 1,
+  coreHoldMax: 0.8,
   uprightLean: 0.45,
   /** Player hip-target spring (1/s²), its force cap (g) and damping (1/s). */
   hipStiffness: 46,

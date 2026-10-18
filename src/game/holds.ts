@@ -1,10 +1,16 @@
 // Hold rules + grip capacity. Shared by ClimberSim, the static solver, the planner and the generator.
 
 import type { BoulderDef, HoldDef, HoldType, LimbId, QuickdrawDef, Vec2 } from '../core/types';
-import { BODY, GAME, SIM } from '../config/tuning';
-import { clamp, DEG } from '../core/math';
+import { BODY as BODY_, GAME, SIM as SIM_ } from '../config/tuning';
+import { clamp as clamp_, DEG } from '../core/math';
 import { dcos, dsin } from './dmath';
 import { envEval, pointSegDist } from './anatomy';
+
+// Hot path (capacities are evaluated thousands of times per plan): plain module-local bindings
+// (some module runners read imported bindings through a getter on every use).
+const BODY = BODY_;
+const SIM = SIM_;
+const clamp = clamp_;
 
 export const LIMB_IDS: readonly LimbId[] = ['LH', 'RH', 'LF', 'RF'];
 export const LIMB_INDEX: Readonly<Record<LimbId, number>> = { LH: 0, RH: 1, LF: 2, RF: 3 };

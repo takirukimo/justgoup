@@ -23,14 +23,22 @@ function cosPoly(x: number): number {
   return 1 + x2 * (-1 / 2 + x2 * (1 / 24 + x2 * (-1 / 720 + x2 * (1 / 40320 + x2 * (-1 / 3628800 + x2 * (1 / 479001600 + x2 * (-1 / 87178291200 + x2 / 20922789888000)))))));
 }
 
-/** Reduce to r ∈ [−π/4, π/4] and quadrant q (x = q·π/2 + r). */
-function reduce(x: number): { r: number; q: number } {
+/** Reduce to r ∈ [−π/4, π/4] and quadrant q (x = q·π/2 + r), into RED (no allocation). */
+const RED = { r: 0, q: 0 };
+function reduce(x: number): typeof RED {
   const k = Math.round(x / TWO_PI);
   let r = x - k * TWO_PI;
   const q = Math.round(r / HALF_PI);
   r -= q * HALF_PI;
-  return { r, q: ((q % 4) + 4) % 4 };
+  RED.r = r;
+  RED.q = ((q % 4) + 4) % 4;
+  return RED;
 }
+
+/** dsin for |x| < π/4 (no argument reduction; bit-identical to dsin there). */
+export const dsinSmall = sinPoly;
+/** dcos for |x| < π/4 (no argument reduction; bit-identical to dcos there). */
+export const dcosSmall = cosPoly;
 
 export function dsin(x: number): number {
   const { r, q } = reduce(x);

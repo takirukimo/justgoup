@@ -94,6 +94,8 @@ export class GameRenderer implements RendererAPI {
   private pulls = new Map<string, Vec2>();
   private skin: { head: HeadId; colorway: ColorwayId; chalk: ChalkId } = { head: 'ibex', colorway: 'basalt', chalk: 'classic' };
   private focusHint: Vec2 | null = null;
+  /** Smoothed cost of ClimberModel.pose() (ms) for QA. */
+  private poseMs = 0;
   private cssW = 1;
   private cssH = 1;
   private dpr = 1;
@@ -393,7 +395,9 @@ export class GameRenderer implements RendererAPI {
     this.state = state;
     if (!this.climber) return;
     this.climber.setLookTarget(this.focusHint);
+    const t0 = performance.now();
     this.climber.pose(state, this.wallFrame, dt);
+    this.poseMs += (performance.now() - t0 - this.poseMs) * 0.1;
   }
 
   setSkin(head: HeadId, colorway: ColorwayId, chalk: ChalkId): void {
@@ -687,10 +691,10 @@ export class GameRenderer implements RendererAPI {
 
   // ───────────────────────────── diagnostics ─────────────────────────────
 
-  /** Optional: last frame's render stats (draw calls, triangles) for QA. */
-  stats(): { calls: number; triangles: number; textures: number; geometries: number } {
+  /** Optional: last frame's render stats (draw calls, triangles; poseMs = smoothed climber IK cost) for QA. */
+  stats(): { calls: number; triangles: number; textures: number; geometries: number; poseMs: number } {
     const i = this.gl.info;
-    return { calls: i.render.calls, triangles: i.render.triangles, textures: i.memory.textures, geometries: i.memory.geometries };
+    return { calls: i.render.calls, triangles: i.render.triangles, textures: i.memory.textures, geometries: i.memory.geometries, poseMs: Math.round(this.poseMs * 1000) / 1000 };
   }
 
   dispose(): void {

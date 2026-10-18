@@ -7,7 +7,7 @@ import type { BetaMove, ClimberSimAPI, SimEvent } from '../core/contracts';
 import { contactPoint, LIMB_INDEX } from './holds';
 import { planBetaDetailed, SMEAR_ID, type PlanResult, type PlanStep } from './solver';
 
-type BotPhase = 'prep' | 'drag' | 'hold' | 'settle' | 'clip' | 'clipwait' | 'done' | 'failed';
+type BotPhase = 'prep' | 'drag' | 'hold' | 'settle' | 'clip' | 'clipwait' | 'recover' | 'done' | 'failed';
 
 export interface BetaBotOptions {
   /** Seconds to shift the hips before a move (max). */
@@ -87,6 +87,13 @@ export class BetaBot {
     }
     const limb: LimbId = st ? st.move.limb : this.clipLimb;
     this.t += dt;
+    if (this.phase === 'recover') {
+      // a missed move left a hand busy (it clipped a draw instead of grabbing): wait for the rope
+      // to go in and the hand to come back, then re-plan from the stance the climber is really in
+      if (!s.limbs.LH.busy && !s.limbs.RH.busy && this.t > 0.1) this.replan();
+      else if (this.t > 3) this.fail('stuck after a missed move');
+      return;
+    }
     if (!st && this.phase !== 'clip' && this.phase !== 'clipwait') return;
     switch (this.phase) {
       case 'prep': {
@@ -231,6 +238,12 @@ export class BetaBot {
       return;
     }
     this.replans++;
+    this.sim.setHipTarget(null);
+    this.phase = 'recover';
+    this.t = 0;
+  }
+
+  private replan(): void {
     const s = this.sim.getState();
     const ids = (['LH', 'RH', 'LF', 'RF'] as const).map((l) => s.limbs[l].holdId);
     const plan = planBetaDetailed(this.sim.boulder, {

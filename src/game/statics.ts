@@ -16,11 +16,23 @@
 // limb's target) inside its envelope, so the pose search never targets an illegal pose.
 
 import type { HoldDef } from '../core/types';
-import { BODY, GAME, SIM } from '../config/tuning';
-import { clamp, DEG, smoothstep } from '../core/math';
-import { contactPoint, footCapacity, handCapacity, isHandIdx, type GripContext } from './holds';
-import { dcos, dsin } from './dmath';
-import { envEval } from './anatomy';
+import { BODY as BODY_, GAME, SIM as SIM_ } from '../config/tuning';
+import { clamp as clamp_, DEG, smoothstep as smoothstep_ } from '../core/math';
+import { contactPoint, footCapacity as footCapacity_, handCapacity as handCapacity_, isHandIdx as isHandIdx_, type GripContext } from './holds';
+import { dcos, dsin, dcosSmall, dsinSmall } from './dmath';
+import { envEval as envEval_ } from './anatomy';
+
+// Hot path (thousands of stance evaluations per plan): plain module-local bindings. Imported
+// bindings are live, and some module runners (vitest's SSR transform) read them through a getter
+// on every use; these are ordinary loads everywhere.
+const BODY = BODY_;
+const SIM = SIM_;
+const clamp = clamp_;
+const smoothstep = smoothstep_;
+const footCapacity = footCapacity_;
+const handCapacity = handCapacity_;
+const isHandIdx = isHandIdx_;
+const envEval = envEval_;
 
 export interface Pose {
   px: number;
@@ -85,6 +97,12 @@ export interface StaticsParams {
    * hold never sits on the edge of the snap range.
    */
   reachMargin: number;
+  /**
+   * Most of the reaching limb's envelope excess (m) the pose violation counts (Infinity = all of
+   * it). The live climber's torso lean only works toward a dragged FOOT target that is nearly
+   * reachable: a foot pointed far out of range doesn't swing the whole torso over.
+   */
+  reachCap: number;
   /** Cached trig of wallAngle (refreshed automatically when wallAngle changes). */
   trigAngle: number;
   cth: number;
@@ -101,6 +119,7 @@ export function makeParams(wallAngle: number, assist = 0, pump = 0): StaticsPara
     reachY: 0,
     maxPelvisY: Infinity,
     reachMargin: 0,
+    reachCap: Infinity,
     trigAngle: wallAngle,
     cth: dcos(wallAngle * DEG),
     sth: dsin(wallAngle * DEG),
@@ -219,7 +238,9 @@ export function estimateDepth(p: Pose, contacts: Contacts, ax: Float64Array, ay:
   return clamp(0.2 + (nh ? s * Math.max(0, hy / nh - comY) * 0.85 : 0), 0.15, 1.2);
 }
 
+export const __DBG = { evals: 0 };
 export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParams, out: StanceEval): StanceEval {
+  __DBG.evals++;
   if (prm.trigAngle !== prm.wallAngle) {
     prm.trigAngle = prm.wallAngle;
     prm.cth = dcos(prm.wallAngle * DEG);
@@ -597,8 +618,10 @@ export function placeChest(p: Pose, contacts: Contacts, prm: StaticsParams, lean
   }
   // extra lean (radians) from the optimiser
   if (lean !== 0) {
-    const c = dcos(lean);
-    const s = dsin(lean);
+    // |lean| ≤ LEAN_MAX < π/4: the reduction-free polynomials (bit-identical to dcos / dsin there)
+    const small = lean <= 0.78 && lean >= -0.78;
+    const c = small ? dcosSmall(lean) : dcos(lean);
+    const s = small ? dsinSmall(lean) : dsin(lean);
     const rx = ux * c - uy * s;
     const ry = ux * s + uy * c;
     ux = rx;
@@ -628,7 +651,7 @@ export function poseViolation(contacts: Contacts, prm: StaticsParams, ev: Stance
   if (prm.reachLimb >= 0) {
     const i = prm.reachLimb;
     const d = sq(prm.reachX - ev.ax[i], prm.reachY - ev.ay[i]);
-    v += ev.reachExcess + Math.max(0, (isHandIdx(i) ? SIM.armMinPlane : SIM.legMinPlane) + 0.03 - d);
+    v += Math.min(ev.reachExcess, prm.reachCap) + Math.max(0, (isHandIdx(i) ? SIM.armMinPlane : SIM.legMinPlane) + 0.03 - d);
   }
   v += Math.max(0, minPelvisY - py);
   if (py > prm.maxPelvisY) v += py - prm.maxPelvisY;

@@ -4,8 +4,11 @@
 // stance settles under SOLVER.stanceMax. Targets must also be anatomically legal: inside the limb's
 // reach envelope (anatomy.ts, via the pose search) and clear of the other limbs (holds.placementBlocked,
 // checked at the reach pose with a little extra margin so the sim never refuses a planned move).
-// Search budgets are node counts (deterministic, used by the generator) plus an optional wall-clock
-// limit for interactive calls.
+// Search budgets are node counts (deterministic). Interactive calls may add a wall-clock cap, but it
+// never ends a search before SOLVER.minNodes expansions, so a slow phone gets exactly the answer a
+// fast desktop gets for every problem solvable within that many expansions (generated problems
+// need ~35 at the median and < 260 at worst). The search evaluates children lazily (see expand()).
+// Hot-path numbers: ~25 ms median per generated boulder on a desktop core.
 
 import type { BoulderDef, HoldDef, LimbId, QuickdrawDef, Vec2 } from '../core/types';
 import type { BetaMove, ClimberSimAPI } from '../core/contracts';
@@ -37,12 +40,23 @@ export const SOLVER = {
    * (≈5 s at 1.15), so hard moves are possible when done briskly — the climber shakes through them.
    */
   moveMax: 1.12,
+  /**
+   * Three-limb tension allowed while a hand clips a quickdraw. The hand is busy for GAME.clipTime on
+   * top of the reach, so a clip stance keeps a clear margin under the slip threshold (1.05): a few
+   * centimetres of difference between the planned and the live body must not turn it into a slip.
+   */
+  clipMax: 0.9,
   /** Pump assumed while planning (capacity margin). */
   pump: 0.3,
   /** Weighted A*: f = g + heuristicWeight · h. */
   heuristicWeight: 2.4,
   maxNodesBoulder: 700,
   maxNodesRope: 2600,
+  /**
+   * A wall-clock cap (PlanOptions.maxMs) only applies after this many expansions: results are then
+   * device-independent for every problem solvable within it (generated boulders: p99 ≈ 170).
+   */
+  minNodes: 320,
   /** Candidate targets kept per limb per expansion. */
   candidatesPerLimb: 7,
 } as const;
@@ -54,10 +68,16 @@ const PLAN_CLEARANCE_MARGIN = 0.015;
 export const SMEAR_ID = 'smear';
 
 export interface PlanOptions {
-  /** Wall-clock budget (ms). Default 120. Omit together with maxNodes for the default node budget only. */
+  /**
+   * Wall-clock safety cap (ms) for interactive calls; it never stops a search before `minNodes`
+   * expansions, so results stay device-independent. Default: none with an explicit maxNodes,
+   * else 120.
+   */
   maxMs?: number;
-  /** Deterministic expansion budget. */
+  /** Deterministic expansion budget (default SOLVER.maxNodesBoulder / maxNodesRope). */
   maxNodes?: number;
+  /** Expansions guaranteed before maxMs may end the search (default SOLVER.minNodes). */
+  minNodes?: number;
   assist?: number;
   /** Start stance (hold ids per limb, null = free / smear). Defaults to the boulder's start placement. */
   start?: (string | null)[];
@@ -113,6 +133,23 @@ interface Node {
   parent: Node | null;
   step: PlanStep | null;
   depth: number;
+  /**
+   * Lazy child (deferred evaluation): the move that leads here from `parent`, not yet checked. Its
+   * g / f are optimistic lower bounds until the search pops it and evaluates the reach + stance.
+   */
+  move: LazyMove | null;
+}
+
+interface LazyMove {
+  li: number;
+  hold: HoldDef | null;
+  /** Target contact point. */
+  tx: number;
+  ty: number;
+  /** Where the limb comes from (distance of the move). */
+  fromX: number;
+  fromY: number;
+  reachKey: string;
 }
 
 class Heap {
@@ -278,7 +315,7 @@ class Planner {
     const cy = cp.y;
     for (let li = 0; li < 2; li++) {
       const r = this.reach(n, li, cx, cy, `${n.key}>clip${li}`);
-      if (r.ok) return true;
+      if (r.ok && r.tension <= SOLVER.clipMax) return true;
     }
     return false;
   }
@@ -289,8 +326,7 @@ class Planner {
     const st = this.stance(tmp, seed);
     if (st.violation > 0.004 || st.tension > SOLVER.stanceMax) return null;
     const mt = step ? step.moveTension : 0;
-    // tension is costly, and strenuous moves much more so: prefer the smooth beta when one exists
-    const g = parent ? parent.g + 1 + 0.8 * st.tension + 0.6 * mt + 5 * Math.max(0, mt - 0.68) + 5 * Math.max(0, st.tension - 0.58) : 0;
+    const g = parent ? parent.g + this.moveCost(st.tension, mt) : 0;
     return {
       slots,
       sx,
@@ -303,7 +339,46 @@ class Planner {
       parent,
       step,
       depth: parent ? parent.depth + 1 : 0,
+      move: null,
     };
+  }
+
+  /** Cost of a move + the stance it ends in (the g increment of a child). */
+  moveCost(stanceT: number, moveT: number): number {
+    // tension is costly, and strenuous moves much more so: prefer the smooth beta when one exists
+    return 1 + 0.8 * stanceT + 0.6 * moveT + 5 * Math.max(0, moveT - 0.68) + 5 * Math.max(0, stanceT - 0.58);
+  }
+
+  /**
+   * Evaluate a lazy child in place: can its limb reach the target while the other three hold, and
+   * does the new stance settle? Fills pose / tension / step / g / f; false when the move is illegal.
+   */
+  evaluate(n: Node): boolean {
+    const m = n.move!;
+    const parent = n.parent!;
+    n.move = null;
+    const r = this.reach(parent, m.li, m.tx, m.ty, m.reachKey);
+    if (!r.ok) return false;
+    // the sim checks self-clipping where the limb is released, i.e. around the reach pose
+    if (!this.clearAt(r.pose, parent, m.li, m.hold, m.tx, m.ty)) return false;
+    const st = this.stance(n, r.pose);
+    if (st.violation > 0.004 || st.tension > SOLVER.stanceMax) return false;
+    const step: PlanStep = {
+      move: { limb: LIMB_IDS[m.li], holdId: m.hold ? m.hold.id : SMEAR_ID },
+      moveTension: r.tension,
+      tension: st.tension,
+      distance: dhypot(m.tx - m.fromX, m.ty - m.fromY),
+      pose: st.pose,
+      reachPose: r.pose,
+      smear: m.hold ? undefined : { x: n.sx[m.li], y: n.sy[m.li] },
+    };
+    n.pose = st.pose;
+    n.tension = st.tension;
+    n.step = step;
+    n.g = parent.g + this.moveCost(st.tension, r.tension);
+    n.f = n.g + SOLVER.heuristicWeight * this.heuristic(n.slots);
+    STEP_NODE.set(step, n);
+    return true;
   }
 
   /**
@@ -387,17 +462,37 @@ class Planner {
     return out;
   }
 
+  /**
+   * Children of n, one per candidate move, pushed LAZILY: only the cheap geometric checks run here
+   * (envelope + self-clipping at the node pose, in candidates()); the expensive reach / stance pose
+   * searches run when the search pops the child (evaluate()). The child's g is a lower bound
+   * (parent.g + 1), so the search order is that of an eager A*, but most children of a node are
+   * never popped and never cost a pose search.
+   */
   expand(n: Node, push: (c: Node) => void, closed: Set<string>): void {
+    const hBase = n.g + 1;
     for (let li = 0; li < 4; li++) {
       const hand = li < 2;
       if (hand) {
         const other = n.slots[li === 0 ? 1 : 0];
         if (!other || other === 'smear') continue;
       }
-      const subKey = n.slots.map((s, i) => (i === li ? '_' : slotId(s))).join('|');
+      let subKey: string | null = null;
       // anchor of the moving limb in the node pose
       const a = this.anchorOf(n.pose, li);
-      const cands = this.candidates(n, li, a.x, a.y);
+      const ax = a.x;
+      const ay = a.y;
+      const cands = this.candidates(n, li, ax, ay);
+      const prevSlot = n.slots[li];
+      let fromX = ax;
+      let fromY = ay;
+      if (prevSlot && prevSlot !== 'smear') {
+        fromX = prevSlot.x;
+        fromY = prevSlot.y;
+      } else if (prevSlot === 'smear') {
+        fromX = n.sx[li];
+        fromY = n.sy[li];
+      }
       for (const c of cands) {
         const slots = n.slots.slice();
         const sx = n.sx.slice();
@@ -419,35 +514,22 @@ class Planner {
           tx = p.x;
           ty = p.y;
         }
-        const r = this.reach(n, li, tx, ty, `${subKey}>${li}:${c.hold ? c.hold.id : `s${sx[li]},${sy[li]}`}`);
-        if (!r.ok) continue;
-        // the sim checks self-clipping where the limb is released, i.e. around the reach pose
-        if (!this.clearAt(r.pose, n, li, c.hold, tx, ty)) continue;
-        const prevSlot = n.slots[li];
-        let fromX = a.x;
-        let fromY = a.y;
-        if (prevSlot && prevSlot !== 'smear') {
-          fromX = prevSlot.x;
-          fromY = prevSlot.y;
-        } else if (prevSlot === 'smear') {
-          fromX = n.sx[li];
-          fromY = n.sy[li];
-        }
-        const step: PlanStep = {
-          move: { limb: LIMB_IDS[li], holdId: c.hold ? c.hold.id : SMEAR_ID },
-          moveTension: r.tension,
-          tension: 0,
-          distance: dhypot(tx - fromX, ty - fromY),
-          pose: r.pose,
-          reachPose: r.pose,
-          smear: c.hold ? undefined : { x: sx[li], y: sy[li] },
-        };
-        const child = this.makeNode(slots, sx, sy, n, step, r.pose);
-        if (!child) continue;
-        step.tension = child.tension;
-        step.pose = child.pose;
-        STEP_NODE.set(step, child);
-        push(child);
+        if (subKey === null) subKey = n.slots.map((s, i) => (i === li ? '_' : slotId(s))).join('|');
+        const reachKey = `${subKey}>${li}:${c.hold ? c.hold.id : `s${sx[li]},${sy[li]}`}`;
+        push({
+          slots,
+          sx,
+          sy,
+          key,
+          pose: n.pose,
+          tension: n.tension,
+          g: hBase,
+          f: hBase + SOLVER.heuristicWeight * this.heuristic(slots),
+          parent: n,
+          step: null,
+          depth: n.depth + 1,
+          move: { li, hold: c.hold, tx, ty, fromX, fromY, reachKey },
+        });
       }
     }
   }
@@ -520,6 +602,7 @@ export class StanceLab {
       parent: null,
       step: null,
       depth: 0,
+      move: null,
     } as Node;
     if (!this.p.targetOk(node, li, target, tp.x, tp.y, li < 2 ? 0.5 : 0.32)) return { pose, tension: Infinity, ok: false };
     return this.p.reach(node, li, tp.x, tp.y, `lab${this.seq++}`);
@@ -583,7 +666,7 @@ function planClips(planner: Planner, steps: PlanStep[], clipped: readonly string
       const a = planner.anchorOf(n.pose, li);
       if (dhypot(a.x - cp.x, a.y - cp.y) > BODY.armMax + 0.5) continue;
       const r = planner.reach(n, li, cp.x, cp.y, `${n.key}>clip${li}`);
-      if (!r.ok || r.tension > SOLVER.moveMax * 0.92) continue;
+      if (!r.ok || r.tension > SOLVER.clipMax) continue;
       steps[k].clip = { quickdrawId: draws[qi].id, limb: LIMB_IDS[li], reachPose: r.pose, tension: r.tension };
       done = true;
     }
@@ -610,7 +693,7 @@ export function planBetaDetailed(boulder: BoulderDef, opts: PlanOptions & { goal
     const key = st.slots.map(slotId).join('|');
     const s = planner.stance({ ...st, key }, opts.startPose ?? null);
     if (s.violation > 0.02) return null;
-    root = { ...st, key, pose: s.pose, tension: s.tension, g: 0, f: 0, parent: null, step: null, depth: 0 };
+    root = { ...st, key, pose: s.pose, tension: s.tension, g: 0, f: 0, parent: null, step: null, depth: 0, move: null };
   }
   const handY = (n: Node): number => {
     const a = n.slots[0];
@@ -619,15 +702,20 @@ export function planBetaDetailed(boulder: BoulderDef, opts: PlanOptions & { goal
   };
   const rope = boulder.mode === 'rope';
   const totalNodes = opts.maxNodes ?? (rope ? SOLVER.maxNodesRope : SOLVER.maxNodesBoulder);
-  const maxMs = opts.maxMs ?? (opts.maxNodes !== undefined ? Infinity : 120);
+  const clock: Clock = {
+    t0,
+    maxMs: opts.maxMs ?? (opts.maxNodes !== undefined ? Infinity : 120),
+    minNodes: opts.minNodes ?? SOLVER.minNodes,
+    used: 0,
+  };
   // An explicit intermediate goal (hints on tall routes).
   if (opts.goalY !== undefined && opts.goalY < planner.topY - 0.3) {
     planner.goalY = opts.goalY;
-    return searchFrom(planner, root, totalNodes, maxMs, t0, root);
+    return searchFrom(planner, root, totalNodes, clock, root);
   }
   // Short problems: one search to the top. Tall routes: stages of STAGE metres.
   if (planner.topY - handY(root) <= STAGE + 1.4) {
-    const r = searchFrom(planner, root, totalNodes, maxMs, t0, root);
+    const r = searchFrom(planner, root, totalNodes, clock, root);
     if (r && rope) r.clipsPlanned = planClips(planner, r.steps, opts.clipped);
     return r;
   }
@@ -640,7 +728,7 @@ export function planBetaDetailed(boulder: BoulderDef, opts: PlanOptions & { goal
     planner.goalY = final ? null : stageY;
     const budget = Math.min(STAGE_NODES * (final ? 1.6 : 1), totalNodes - nodes);
     if (budget <= 0) return null;
-    const r = searchFrom(planner, cur, budget, maxMs, t0, root);
+    const r = searchFrom(planner, cur, budget, clock, root);
     if (!r) return null;
     nodes += r.nodes;
     steps.push(...r.steps);
@@ -651,12 +739,22 @@ export function planBetaDetailed(boulder: BoulderDef, opts: PlanOptions & { goal
     // continue from the stage's final stance
     const last = r.steps[r.steps.length - 1];
     const goalNode = r.goal!;
-    cur = { ...goalNode, parent: null, step: null, depth: 0, g: 0, f: 0, pose: last ? last.pose : goalNode.pose };
+    cur = { ...goalNode, parent: null, step: null, depth: 0, g: 0, f: 0, pose: last ? last.pose : goalNode.pose, move: null };
   }
   return null;
 }
 
-function searchFrom(planner: Planner, root: Node, maxNodes: number, maxMs: number, t0: number, origin: Node): (PlanResult & { goal?: Node }) | null {
+/** Wall-clock cap of one plan (shared by its stages): binds only after `minNodes` expansions. */
+interface Clock {
+  t0: number;
+  maxMs: number;
+  minNodes: number;
+  /** Expansions so far (all stages). */
+  used: number;
+}
+
+function searchFrom(planner: Planner, root: Node, maxNodes: number, clock: Clock, origin: Node): (PlanResult & { goal?: Node }) | null {
+  const t0 = clock.t0;
   const open = new Heap();
   const closed = new Set<string>();
   const best = new Map<string, number>();
@@ -667,21 +765,31 @@ function searchFrom(planner: Planner, root: Node, maxNodes: number, maxMs: numbe
   while (open.size) {
     const n = open.pop()!;
     if (closed.has(n.key)) continue;
+    if (n.move) {
+      // deferred evaluation: check the move now, then queue the child at its true cost
+      if (!planner.evaluate(n)) continue;
+      const prev = best.get(n.key);
+      if (prev !== undefined && prev <= n.g) continue;
+      best.set(n.key, n.g);
+      open.push(n);
+      continue;
+    }
     closed.add(n.key);
     if (planner.isGoal(n)) {
       goal = n;
       break;
     }
     nodes++;
+    clock.used++;
     if (nodes > maxNodes) break;
-    if ((nodes & 7) === 0 && now() - t0 > maxMs) break;
+    if (clock.used > clock.minNodes && (nodes & 7) === 0 && now() - t0 > clock.maxMs) break;
     if (n.depth > 80) continue;
     planner.expand(
       n,
       (c) => {
+        // a lazy child's g is a lower bound: skip it only when a cheaper path is already known
         const prev = best.get(c.key);
         if (prev !== undefined && prev <= c.g) return;
-        best.set(c.key, c.g);
         open.push(c);
       },
       closed,
@@ -703,10 +811,14 @@ function searchFrom(planner: Planner, root: Node, maxNodes: number, maxMs: numbe
 }
 
 /** A sequence of limb moves from the start holds to matching the top, or null if none was found. */
-export function planBeta(boulder: BoulderDef, opts?: { maxMs?: number; maxNodes?: number; assist?: number }): BetaMove[] | null {
+export function planBeta(boulder: BoulderDef, opts?: { maxMs?: number; maxNodes?: number; minNodes?: number; assist?: number }): BetaMove[] | null {
   const r = planBetaDetailed(boulder, opts ?? {});
   return r ? r.moves : null;
 }
+
+/** Hint search budget: expansions, and how many always run before the wall-clock cap applies. */
+const HINT_NODES = 700;
+const HINT_MIN_NODES = 160;
 
 /**
  * Next suggested move for a live climb. In rope mode, when the next quickdraw is clippable from the
@@ -747,7 +859,9 @@ export function nextHint(sim: ClimberSimAPI): BetaMove | null {
   const lowHand = Math.min(byId.get(ids[0]!)?.y ?? 0, byId.get(ids[1]!)?.y ?? 0);
   // On tall routes aim for the next couple of metres instead of the far-away top.
   const goalY = b.height > 6 ? lowHand + 1.6 : undefined;
-  const plan = planBetaDetailed(b, { start: ids, startPose: pose, maxMs: 70, goalY });
+  // Deterministic: the same stance gets the same hint on every device. Live stances need ~12
+  // expansions at the median (p99 ≈ 90); the 70 ms cap only cuts off hopeless searches.
+  const plan = planBetaDetailed(b, { start: ids, startPose: pose, goalY, maxNodes: HINT_NODES, minNodes: HINT_MIN_NODES, maxMs: 70 });
   if (plan && plan.moves.length) return plan.moves[0];
   // Fallback: the best upward reachable hand hold.
   let best: BetaMove | null = null;
