@@ -319,7 +319,7 @@ export class LeadTowerRun extends BaseRun {
       const b = await this.svc.gen.rope({ seed, grade });
       const run: HudRunInfo = { ...this.baseRun('rope', b), score: this.total, streak: this.tops, lives: this.lives.left, hintsLeft: this.hints.left };
       const restart = this.total > 0 ? { title: 'Start a new run?', body: `This run ends here and its ${this.total.toLocaleString('en-US')} pts go to the leaderboard.`, ok: 'NEW RUN' } : null;
-      const res = await this.climb(b, { run, hints: this.hints, lives: this.lives, tip: randomTip(this.seed + this.index * 3 + 1), restartPrompt: restart });
+      const res = await this.climb(b, { run, hints: this.hints, lives: this.lives, tip: randomTip(this.seed + this.index * 3 + 1, 'rope'), restartPrompt: restart });
       if (res.kind === 'quit') {
         await this.endRun(false);
         return;
