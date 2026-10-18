@@ -264,6 +264,35 @@ describe('brute force stays possible, good technique pumps less (research §2.1,
     expect(campus.getState().pump).toBeGreaterThan(4 * feet.getState().pump + 0.05);
   });
 
+  it('hips in (legs long, close to the wall) pumps less than sitting back with the hips out', () => {
+    const b = makeBoulder(
+      [
+        { ...hold('s1', -0.2, 2.3, 'edge', 0.06, 'start'), edgeDepthMm: 20 },
+        { ...hold('s2', 0.2, 2.3, 'edge', 0.06, 'start'), edgeDepthMm: 20 },
+        hold('f1', -0.22, 0.85, 'jug', 0.08, 'foot'),
+        hold('f2', 0.23, 0.85, 'jug', 0.08, 'foot'),
+        hold('t', 0, 4.1, 'jug', 0.12, 'top'),
+      ],
+      { wallAngle: 15 },
+    );
+    const hang = (dy: number) => {
+      const sim = new ClimberSim(b, { sweat: 0 });
+      sim.start();
+      run(sim, 1);
+      sim.setHipTarget({ x: 0, y: sim.getState().pelvis.y + dy });
+      run(sim, 2);
+      const s = sim.getState();
+      const r = { depth: s.pelvisDepth, hands: handLoad(sim), p0: s.pump };
+      run(sim, 30);
+      return { ...r, pump: sim.getState().pump - r.p0 };
+    };
+    const hipsIn = hang(0);
+    const hipsOut = hang(-0.3);
+    expect(hipsIn.depth).toBeLessThan(hipsOut.depth - 0.15);
+    expect(hipsIn.hands).toBeLessThan(hipsOut.hands - 0.08);
+    expect(hipsIn.pump).toBeLessThan(hipsOut.pump - 0.1);
+  });
+
   it('a deep lock-off pumps more than hanging on straight arms', () => {
     const b = makeBoulder(
       [
