@@ -50,7 +50,9 @@ export function createPreview(ctx: UICtx, props: P): ScreenView<P> {
             ? `${b.quickdraws?.length ?? 0} DRAWS`
             : run.mode === 'boulder'
               ? `BOULDER ${String(run.streak + 1).padStart(2, '0')}`
-              : 'CHIRAL HQ';
+              : run.mode === 'daily'
+                ? 'TODAY'
+                : 'CHIRAL HQ';
     setChildren(
       card,
       el('div', 'pv-row1', label(`${mode} · ${runBits}`, 'pv-kicker'), el('span', 'pv-read', icon('eye'), 'READ THE LINE')),

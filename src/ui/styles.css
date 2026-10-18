@@ -2393,10 +2393,10 @@
 .pv-legend {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   font-family: var(--f-mono);
   font-size: 8.5px;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.1em;
   color: var(--c-fog);
   white-space: nowrap;
 }

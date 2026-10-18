@@ -145,6 +145,13 @@ export class CameraRig {
   }
 
   setMode(mode: CameraMode, opts?: { instant?: boolean; focus?: Vec2 }): void {
+    // A skipped intro must not keep flying over the next scene: any other mode (or an instant
+    // 'title' snap) lands the fly-in right away.
+    if (this.intro && mode !== 'intro' && (mode !== 'title' || opts?.instant)) {
+      const r = this.intro.resolve;
+      this.intro = null;
+      r?.();
+    }
     const changed = mode !== this.mode;
     this.mode = mode;
     this.focusOverride = opts?.focus ?? null;
