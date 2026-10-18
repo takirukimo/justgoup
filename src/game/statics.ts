@@ -103,6 +103,12 @@ export interface StaticsParams {
    * reachable: a foot pointed far out of range doesn't swing the whole torso over.
    */
   reachCap: number;
+  /** Climber strength (× hand capacity, 1 = the default V3–V5 climber). */
+  strength: number;
+  /** Per-hand forearm pump (index 0 LH, 1 RH); null = use `pump` for both (the planner). */
+  handPump: Float64Array | null;
+  /** Per-hand chalk friction 0..1 (1 = fresh); null = fresh chalk on both hands (the planner). */
+  handFric: Float64Array | null;
   /** Cached trig of wallAngle (refreshed automatically when wallAngle changes). */
   trigAngle: number;
   cth: number;
@@ -120,6 +126,9 @@ export function makeParams(wallAngle: number, assist = 0, pump = 0): StaticsPara
     maxPelvisY: Infinity,
     reachMargin: 0,
     reachCap: Infinity,
+    strength: 1,
+    handPump: null,
+    handFric: null,
     trigAngle: wallAngle,
     cth: dcos(wallAngle * DEG),
     sth: dsin(wallAngle * DEG),
@@ -208,7 +217,7 @@ const MU = new Float64Array(4);
 const UX = new Float64Array(4);
 const UY = new Float64Array(4);
 const EXCL = new Uint8Array(4);
-const GRIP: GripContext = { wallAngle: 0, assist: 0, pump: 0, overhang: 0 };
+const GRIP: GripContext = { wallAngle: 0, assist: 0, pump: 0, overhang: 0, friction: 1, strength: 1 };
 const sq = (x: number, y: number): number => Math.sqrt(x * x + y * y);
 
 /** Estimated pelvis distance from the wall for a pose (bent legs push the hips out). */
@@ -349,6 +358,10 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
   GRIP.assist = prm.assist;
   GRIP.pump = prm.pump;
   GRIP.overhang = sth > 0 ? sth : 0;
+  GRIP.strength = prm.strength;
+  GRIP.friction = 1;
+  const hp = prm.handPump;
+  const hf = prm.handFric;
   let handCapSum = 0;
   for (let i = 0; i < 4; i++) {
     const c = contacts[i];
@@ -365,6 +378,8 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
     }
     let cap: number;
     if (isHandIdx(i)) {
+      GRIP.pump = hp ? hp[i] : prm.pump;
+      GRIP.friction = hf ? hf[i] : 1;
       cap = c.hold ? handCapacity(c.hold, c.hx, c.hy, dx, dy, c.matched, GRIP) : 0.02;
       handCapSum += cap;
     } else {

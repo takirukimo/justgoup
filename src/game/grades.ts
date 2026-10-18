@@ -1,6 +1,7 @@
 // Grade labels: V-scale (Hueco) with the Fontainebleau equivalent, plus UI chip colours.
 
-const FONT = ['4', '5', '5+', '6A+', '6B+', '6C+', '7A', '7A+', '7B+', '7C', '7C+', '8A', '8A+'] as const;
+/** Fontainebleau equivalents per V-grade (research §3.7 reference row: V3 6A, V4 6B, V5 6C, V8 7B). */
+const FONT = ['4', '5', '5+', '6A', '6B', '6C', '7A', '7A+', '7B', '7C', '7C+', '8A', '8A+'] as const;
 
 /** Grade chip colours: calm greens/blues for the easy end, the signal orange around V6–V7, violet at the top. */
 const COLORS = [
@@ -26,7 +27,7 @@ export function gradeLabel(g: number): string {
   return `V${norm(g)}`;
 }
 
-/** Fontainebleau equivalent: '4', '5', '5+', '6A+', … '8A+'. */
+/** Fontainebleau equivalent: '4', '5', '5+', '6A', … '8A+'. */
 export function fontGrade(g: number): string {
   return FONT[norm(g)];
 }

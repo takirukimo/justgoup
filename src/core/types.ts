@@ -55,7 +55,32 @@ export interface HoldDef {
   color: string;
   /** Seed for procedural geometry variation. */
   seed: number;
+  /**
+   * Optional (Phase B grip model): usable depth (mm) of an edge / crimp / pocket. Drives hand
+   * capacity strongly (research: a 10 mm edge gives ≈0.7×, a 40 mm edge ≈1.15× a 20 mm edge).
+   * When absent the sim derives it from `type` + `size` (edges ≈18–32 mm, crimps ≈7–13 mm).
+   */
+  edgeDepthMm?: number;
+  /**
+   * Optional: lip angle (degrees) of the gripping surface. Negative = slopey (slopers ≈ −20…−40),
+   * positive = incut. Slopers use it for their effective slope (lip + wall angle); when absent a
+   * sloper is −35°, every other type 0.
+   */
+  lipAngle?: number;
+  /** Optional: fingers a pocket takes (1 = mono … 4 = deep pocket). Absent = 3. */
+  fingers?: 1 | 2 | 3 | 4;
 }
+
+/**
+ * How a foot is used (sim → renderer / IK), inferred by the sim from where the foot was put:
+ *  edge  — standing on a hold (the default),
+ *  smear — rubber on blank wall,
+ *  heel  — heel hook: a hold at/above hip height to the side on steep terrain; the leg PULLS,
+ *  toe   — toe hook: the toe pulls on the far side of a feature / under a roof lip,
+ *  flag  — no hold: the leg is out to the side (or crossed behind) as a counterweight,
+ *  drop  — drop knee: foot on a sidepull-like foothold, knee turned in, hips close to the wall.
+ */
+export type FootMode = 'edge' | 'smear' | 'heel' | 'toe' | 'flag' | 'drop';
 
 export interface QuickdrawDef {
   id: string;
@@ -153,6 +178,35 @@ export interface LimbSnapshot {
   layer?: number;
   /** Optional: `layer > 0` — this limb crosses in front of at least one other limb. */
   front?: boolean;
+  // ── Phase B body model (all optional; hands / feet only as noted) ──
+  /** Hands: forearm pump 0..1 (1 − remaining W′ of this forearm). ClimberState.pump is the max of both. */
+  pump?: number;
+  /** Hands: chalk / skin friction 0..1 (1 = fresh chalk, 0 = sweaty). */
+  friction?: number;
+  /** Hands: hanging by the side, shaking the forearm out (faster recovery). Animate an arm shake. */
+  shakingOut?: boolean;
+  /** Hands: dipping into the chalk bag (busy ≈1 s; pos is at the bag behind the hips). */
+  chalking?: boolean;
+  /** Hands: reaching through a dyno / deadpoint flight toward `flightTarget`. */
+  flying?: boolean;
+  /** Hands while `flying`: the target hold. */
+  flightTarget?: string | null;
+  /** Feet: how the foot is used (see FootMode); undefined while dangling / dragged. */
+  footMode?: FootMode;
+}
+
+/** Optional ClimberState.flight: a dyno / deadpoint in progress. */
+export interface FlightInfo {
+  /** 'deadpoint': one hand moves, the other stays on; 'dyno': both hands (and the feet) leave. */
+  kind: 'deadpoint' | 'dyno';
+  limbs: LimbId[];
+  holdId: string;
+  /** Seconds since the launch. */
+  t: number;
+  /** Seconds until the predicted apex (negative once past it). */
+  apexIn: number;
+  /** Launch power relative to the ideal throw (1 = apex just past the hold). */
+  power: number;
 }
 
 export type ClimberPhase =
@@ -191,6 +245,10 @@ export interface ClimberState {
   time: number;
   /** Rope mode: currently clipped quickdraw ids (in order). */
   clipped: string[];
+  /** Optional (Phase B): true while the body flies through a dyno / deadpoint (phase stays 'climbing'). */
+  airborne?: boolean;
+  /** Optional (Phase B): the flight in progress, or null. */
+  flight?: FlightInfo | null;
 }
 
 // ───────────────────────────── Meta ─────────────────────────────

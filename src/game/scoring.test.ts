@@ -73,7 +73,8 @@ describe('grades', () => {
     expect(gradeLabel(12)).toBe('V12');
     expect(gradeLabel(15)).toBe('V12');
     expect(fontGrade(0)).toBe('4');
-    expect(fontGrade(3)).toBe('6A+');
+    // research §3.7 reference row (the old table picked the upper half grade at V3–V5 and V8)
+    expect([3, 4, 5, 8].map(fontGrade)).toEqual(['6A', '6B', '6C', '7B']);
     expect(fontGrade(6)).toBe('7A');
     expect(fontGrade(11)).toBe('8A');
     expect(gradeColor(5)).toMatch(/^#[0-9A-F]{6}$/i);

@@ -33,8 +33,13 @@ export const GAME = {
   simHz: 120,
   /** Snap radius (m) added to hold size when dropping a limb near a hold. */
   snapRadius: 0.11,
-  /** Seconds both hands must stay matched on the top hold. */
-  topHold: 0.7,
+  /**
+   * Seconds both hands must stay matched on the top hold. Research §3.4: MoonBoard holds the finish for
+   * 2 s, IFSC asks for a "stable position", 1–2 s recommended. 1.2 s proves control (a pumped climber
+   * can still fail on the top) without dragging out every send on a phone, where there is no judge's
+   * nod to read; it sits at the short end of the recommended band on purpose.
+   */
+  topHold: 1.2,
   /** Hand busy time while clipping a quickdraw (rope). */
   clipTime: 0.75,
   /** Quickdraw clip radius (m). */
@@ -125,8 +130,70 @@ export const SIM = {
   /** Minimum vertical lever (m) between hands and feet for the out-of-plane balance. */
   minLever: 0.35,
 
-  /** Hand capacity per hold type (fraction of body weight), before size/angle factors. */
-  handCap: { jug: 0.75, edge: 0.55, pinch: 0.45, pocket: 0.45, crimp: 0.38, sloper: 0.32, volume: 0.3, foot: 0.05 },
+  /**
+   * Hand capacity per hold type (fraction of body weight), before size/angle factors, for a fresh
+   * climber of strength 1 (≈ a V3–V5 climber, research §2.4). jug, pinch, volume and foot use it
+   * directly (× sizeFactor); edge, crimp, sloper and pocket come from the research grip model below
+   * (edge depth, effective slope, fingers) and their entries here are the typical generated values.
+   */
+  handCap: { jug: 0.75, edge: 0.556, pinch: 0.42, pocket: 0.42, crimp: 0.39, sloper: 0.39, volume: 0.3, foot: 0.05 },
+
+  // ── Grip model (docs/climbing-research.md §2.4, §6.3) ──
+  /** One-hand capacity on a 20 mm edge (half crimp): the reference grip (research V3–V5: 0.55–0.70, bottom of the band). */
+  edge20: 0.52,
+  /**
+   * Edge-depth multiplier knots [depth mm, × the 20 mm edge], piecewise linear (Bourne 2011 [22]:
+   * 10 mm ≈ 0.70, 40 mm ≈ 1.15, i.e. a 1 cm edge gives 0.61× a 4 cm edge; micros 4–10 mm ≈ 0.3–0.7).
+   */
+  edgeDepthCurve: [
+    [3, 0.25],
+    [4, 0.31],
+    [6, 0.46],
+    [8, 0.59],
+    [10, 0.7],
+    [12, 0.78],
+    [15, 0.88],
+    [20, 1.0],
+    [25, 1.07],
+    [30, 1.11],
+    [40, 1.15],
+    [60, 1.17],
+  ] as readonly (readonly [number, number])[],
+  /** Edge depth (mm) of a hold without edgeDepthMm, from its size (radius m): [size lo, size hi, mm lo, mm hi]. */
+  edgeDepthBySize: { edge: [0.05, 0.08, 18, 32], crimp: [0.028, 0.045, 7, 13], pocket: [0.04, 0.06, 15, 30] } as const,
+  /** Incut (+) / slopey (−) lip on edges and crimps: capacity × (1 + edgeLipGain · lip°), lip clamped to ±30°. */
+  edgeLipGain: 0.004,
+  /** Sloper capacity at a shallow effective slope (≈0.9 × the 20 mm edge up to 20–30° of slope, Amca 2012 [29]). */
+  sloperBase: 0.47,
+  /** Lip angle (°) of a sloper without lipAngle (research: −20 … −40). */
+  sloperLip: -35,
+  /**
+   * Sloper multiplier over the EFFECTIVE slope = −lip + wall angle (°) [29]; extrapolated gently past 40°.
+   * This replaces overhangLoss for slopers: slopers die on steep walls.
+   */
+  sloperSlopeCurve: [
+    [0, 1],
+    [20, 1],
+    [30, 0.95],
+    [40, 0.72],
+    [50, 0.56],
+    [60, 0.44],
+    [70, 0.34],
+    [80, 0.26],
+    [90, 0.2],
+  ] as readonly (readonly [number, number])[],
+  /** Pocket grip by fingers, × the 20 mm edge (index = fingers − 1: mono, 2, 3, 4 fingers). */
+  pocketFingers: [0.3, 0.55, 0.8, 0.95] as const,
+  /**
+   * Chalk / sweat: capacity × (1 − frictionSense·(1 − friction)/3), friction 0..1 (1 = fresh chalk ≙ φ 1.2,
+   * 0 = sweaty ≙ φ 0.8, research §2.7 / §6.5). Slopers lose most, jugs least.
+   */
+  frictionSense: { jug: 0.2, edge: 0.6, crimp: 0.6, pinch: 0.6, pocket: 0.4, sloper: 1.0, volume: 0.8, foot: 0.6 },
+  /**
+   * Foot capacity lost per unit sin(overhang) on holds: on steep walls the feet stay on only by toe-pull
+   * (research §2.1: the hands' share was ≈0.07 BW below the band at 30–60°).
+   */
+  steepFootLoss: 0.6,
   /** Foot capacity per hold type. */
   footCap: { jug: 1.5, edge: 1.3, volume: 1.35, pocket: 1.0, pinch: 0.9, crimp: 0.95, sloper: 0.8, foot: 1.0 },
   /** Typical size per type (m) and the ± range that maps to ±15 % capacity. */
@@ -203,20 +270,22 @@ export const SIM = {
   /** A hand is never placed lower than this (m) above every attached foot. */
   handAboveFeet: 0.1,
 
-  // ── Pump ──
-  /** Base creep per second, strain-driven rate, campus extra, recovery in a good rest. */
+  // ── Pump (per forearm; see src/game/forearm.ts) ──
+  /**
+   * Pumped capacity: hand capacity × (1 − pumpCapLoss·pump⁴), i.e. a fully pumped forearm bottoms out at
+   * 60 % of its fresh force (research [49]: 50–65 %), the loss concentrated in the last third of W′.
+   */
+  pumpCapLoss: 0.4,
+  /** Invincible mode caps pump here. */
+  pumpInvincibleCap: 0.85,
+  // legacy global pump (replaced by forearm.ts in the next step)
   pumpBase: 1 / 320,
   pumpStrain: 0.036,
   pumpCampus: 0.02,
   pumpRecover: 0.022,
   pumpShakeOut: 0.032,
-  /** Hand capacity × (1 − pumpCapLoss·pump²). */
-  pumpCapLoss: 0.32,
-  /** Lead routes are long: base creep and strain pump scale down, rests count for more. */
   ropePumpScale: 0.6,
   ropeRecoverScale: 1.4,
-  /** Invincible mode caps pump here. */
-  pumpInvincibleCap: 0.85,
 
   // ── Falling + rope ──
   /** Rope: soft catch stiffness (1/s²) per metre of rope out, and damping. */

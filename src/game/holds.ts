@@ -188,26 +188,114 @@ function sizeFactor(t: HoldType, size: number): number {
   return 1 + SIM.sizeEffect * clamp((size - ref) / range, -1, 1);
 }
 
+/** Piecewise-linear lookup in [x, y] knots (clamped at the ends). Plain arithmetic: deterministic. */
+function knots(table: readonly (readonly [number, number])[], x: number): number {
+  if (x <= table[0][0]) return table[0][1];
+  const n = table.length;
+  for (let i = 1; i < n; i++) {
+    const b = table[i];
+    if (x <= b[0]) {
+      const a = table[i - 1];
+      return a[1] + ((b[1] - a[1]) * (x - a[0])) / (b[0] - a[0]);
+    }
+  }
+  return table[n - 1][1];
+}
+
+/**
+ * Usable edge depth (mm) of an edge / crimp / pocket: HoldDef.edgeDepthMm, else derived from the
+ * hold's size (generated edges ≈18–32 mm, crimps ≈7–13 mm, pockets ≈15–30 mm deep).
+ */
+export function edgeDepthMm(h: HoldDef): number {
+  if (h.edgeDepthMm !== undefined && Number.isFinite(h.edgeDepthMm)) return clamp(h.edgeDepthMm, 2, 80);
+  const m = h.type === 'crimp' ? SIM.edgeDepthBySize.crimp : h.type === 'pocket' ? SIM.edgeDepthBySize.pocket : SIM.edgeDepthBySize.edge;
+  const t = (h.size - m[0]) / (m[1] - m[0]);
+  return clamp(m[2] + (m[3] - m[2]) * t, 3, 60);
+}
+
+/** Edge-depth multiplier relative to the 20 mm reference edge (research [22]). */
+export function edgeDepthFactor(depthMm: number): number {
+  return knots(SIM.edgeDepthCurve, depthMm);
+}
+
+/** Lip angle (°) of a hold: HoldDef.lipAngle, else −35° for slopers and 0 for everything else. */
+export function lipAngleOf(h: HoldDef): number {
+  if (h.lipAngle !== undefined && Number.isFinite(h.lipAngle)) return clamp(h.lipAngle, -80, 60);
+  return h.type === 'sloper' ? SIM.sloperLip : 0;
+}
+
+/** Sloper multiplier over the effective slope (−lip + wall angle, degrees; research [29]). */
+export function sloperSlopeFactor(slopeDeg: number): number {
+  return knots(SIM.sloperSlopeCurve, slopeDeg);
+}
+
+/**
+ * Pumped-forearm capacity factor: 1 − pumpCapLoss·pump⁴ (fresh 1 → fully pumped 0.6, research [49]).
+ * `pump` is 1 − the forearm's remaining W′ fraction (forearm.ts).
+ */
+export function pumpCapFactor(pump: number): number {
+  const p = pump <= 0 ? 0 : pump >= 1 ? 1 : pump;
+  const p2 = p * p;
+  return 1 - SIM.pumpCapLoss * p2 * p2;
+}
+
+/** Chalk / sweat capacity factor for a hold type: friction 1 (fresh chalk) → 1, 0 (sweaty) → 1 − sense/3. */
+export function frictionCapFactor(t: HoldType, friction: number): number {
+  const f = friction <= 0 ? 0 : friction >= 1 ? 1 : friction;
+  return 1 - (SIM.frictionSense[t] * (1 - f)) / 3;
+}
+
+/**
+ * Best-direction hand capacity of a hold for a fresh climber of strength 1 with fresh chalk (no pull
+ * cone, no match / pump / assist): the research grip model (§2.4) —
+ *  • edge, crimp: the 20 mm edge × the edge-depth curve × the lip (incut / slopey) × overhangLoss,
+ *  • sloper: sloperBase × size × the effective-slope curve (−lip + wall angle), no overhangLoss,
+ *  • pocket: the 20 mm edge × fingers (mono 0.3 … 4 fingers 0.95) × size × overhangLoss,
+ *  • jug, pinch, volume, foot: the handCap table × size × overhangLoss.
+ * `overhang` is max(0, sin(wallAngle)).
+ */
+export function handGripBase(h: HoldDef, wallAngle: number, overhang: number): number {
+  const t = h.type;
+  if (t === 'sloper') return SIM.sloperBase * sizeFactor(t, h.size) * sloperSlopeFactor(wallAngle - lipAngleOf(h));
+  let cap: number;
+  if (t === 'edge' || t === 'crimp') {
+    const lip = clamp(lipAngleOf(h), -30, 30);
+    cap = SIM.edge20 * edgeDepthFactor(edgeDepthMm(h)) * (1 + SIM.edgeLipGain * lip);
+  } else if (t === 'pocket') {
+    const f = h.fingers !== undefined ? clamp(Math.round(h.fingers), 1, 4) : 3;
+    cap = SIM.edge20 * SIM.pocketFingers[f - 1] * sizeFactor(t, h.size);
+  } else cap = SIM.handCap[t] * sizeFactor(t, h.size);
+  if (overhang > 0) cap *= 1 - SIM.overhangLoss[t] * overhang;
+  return cap;
+}
+
 export interface GripContext {
   wallAngle: number; // degrees
   assist: number;
+  /** Forearm pump 0..1 of the gripping hand (1 − remaining W′). */
   pump: number;
   /** max(0, sin(wallAngle)) */
   overhang: number;
+  /** Chalk / skin friction 0..1 of the gripping hand (1 = fresh chalk). Optional: absent = 1. */
+  friction?: number;
+  /** Climber strength (× hand capacity; 1 = the default V3–V5 climber). Optional: absent = 1. */
+  strength?: number;
 }
 
 /**
  * Hand capacity (fraction of body weight) on `h`. (hx, hy) is the hold's good direction
  * (cos/sin of h.angle); (dx, dy) the unit direction from the grip point to the shoulder.
- * hold type × size × pull-angle quality × overhang factor × match × pump × assist.
+ * grip base (type, edge depth, slope, fingers, size, overhang) × pull-angle quality × match × pump
+ * × chalk friction × strength × assist.
  */
 export function handCapacity(h: HoldDef, hx: number, hy: number, dx: number, dy: number, matched: boolean, ctx: GripContext): number {
   const t = h.type;
-  let cap = SIM.handCap[t] * sizeFactor(t, h.size);
+  let cap = handGripBase(h, ctx.wallAngle, ctx.overhang);
   cap *= coneQ(dx * hx + dy * hy, HAND_CONES[t]);
-  if (ctx.overhang > 0) cap *= 1 - SIM.overhangLoss[t] * ctx.overhang;
   if (matched) cap *= SIM.matchFactor;
-  cap *= 1 - SIM.pumpCapLoss * ctx.pump * ctx.pump;
+  cap *= pumpCapFactor(ctx.pump);
+  if (ctx.friction !== undefined && ctx.friction < 1) cap *= frictionCapFactor(t, ctx.friction);
+  if (ctx.strength !== undefined) cap *= ctx.strength;
   cap *= 1 + SIM.assistCap * ctx.assist;
   return cap;
 }
@@ -215,7 +303,8 @@ export function handCapacity(h: HoldDef, hx: number, hy: number, dx: number, dy:
 /**
  * Foot capacity on `h` (or a smear when h is null). (dx, dy) is the unit direction from the toe to
  * the hip; feet want the body on the opposite side of the hold's hand direction.
- * `normalPerFoot` < 0 means the feet must toe-pull (overhangs), which costs capacity.
+ * `normalPerFoot` < 0 means the feet must toe-pull (overhangs), which costs capacity; on steep walls a
+ * foothold also loses capacity with sin(overhang) (SIM.steepFootLoss).
  */
 export function footCapacity(h: HoldDef | null, hx: number, hy: number, dx: number, dy: number, normalPerFoot: number, ctx: GripContext): number {
   let cap: number;
@@ -224,6 +313,7 @@ export function footCapacity(h: HoldDef | null, hx: number, hy: number, dx: numb
     cap = SIM.footCap[t] * sizeFactor(t, h.size);
     cap *= coneQ(-(dx * hx + dy * hy), FOOT_CONES[t]);
     if (normalPerFoot < 0) cap *= Math.max(SIM.toeMin, 1 + normalPerFoot / SIM.toeScale[t]);
+    if (ctx.overhang > 0) cap *= 1 - SIM.steepFootLoss * ctx.overhang;
   } else {
     const fric = clamp(1 - ctx.wallAngle / 14, 0.2, 1.25);
     cap = SIM.smearCap * fric * coneQ(dy, SMEAR_CONE);
@@ -236,10 +326,7 @@ export function footCapacity(h: HoldDef | null, hx: number, hy: number, dx: numb
 /** Ideal (best-direction) capacity of a hold for a limb kind, ignoring body position. */
 export function nominalCapacity(h: HoldDef, hand: boolean, wallAngle: number): number {
   const t = h.type;
-  if (hand) {
-    const s = Math.max(0, dsin(wallAngle * DEG));
-    return SIM.handCap[t] * sizeFactor(t, h.size) * (1 - SIM.overhangLoss[t] * s);
-  }
+  if (hand) return handGripBase(h, wallAngle, Math.max(0, dsin(wallAngle * DEG)));
   return SIM.footCap[t] * sizeFactor(t, h.size);
 }
 

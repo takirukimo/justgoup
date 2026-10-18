@@ -40,7 +40,37 @@ export type SimEvent =
   | { type: 'top-touch'; limb: LimbId } // a hand reached the top hold
   | { type: 'top' } // matched top long enough → SENT
   | { type: 'clip'; quickdrawId: string }
-  | { type: 'clip-done'; quickdrawId: string; limb: LimbId };
+  | { type: 'clip-done'; quickdrawId: string; limb: LimbId }
+  // ── Phase B body model (additive) ──
+  | { type: 'chalk-start'; limb: LimbId } // the hand let go and dips into the chalk bag (busy ≈1 s)
+  | { type: 'chalk-done'; limb: LimbId } // friction restored; a 'return' follows when it is back on its hold
+  | { type: 'shake-out-start'; limb: LimbId } // a free hand hangs by the side and shakes the forearm out
+  | { type: 'shake-out-end'; limb: LimbId }
+  | { type: 'pump-warning'; limb: LimbId; pump: number } // this forearm crossed SIM.pumpWarn (deep pump)
+  | { type: 'technique'; limb: LimbId; technique: 'heel' | 'toe' | 'flag' | 'drop' } // a foot technique began
+  | { type: 'dyno-start'; limbs: LimbId[]; holdId: string; kind: 'deadpoint' | 'dyno'; power: number }
+  | { type: 'dyno-catch'; limbs: LimbId[]; holdId: string; quality: number; timing: number } // timing: s vs the apex (− = rising)
+  | { type: 'dyno-miss'; limbs: LimbId[]; holdId: string; reason: 'short' | 'ripped' };
+
+/** Optional second argument of endDrag (Phase B): how the finger left the screen. */
+export interface ReleaseOptions {
+  /**
+   * Finger velocity at release, wall-local m/s. A hand dragged beyond its static reach toward a hold
+   * and flicked toward it (≥ SIM.dynoMinFlick along the line to the hold) throws a deadpoint / dyno.
+   */
+  velocity?: Vec2;
+}
+
+/** What a committed release (flick) of a hand at a point would throw to (input preview). */
+export interface DynoPreview {
+  holdId: string;
+  /** 'deadpoint' (the other hand stays on) or 'dyno' (both hands go). */
+  kind: 'deadpoint' | 'dyno';
+  /** Body rise (m) the throw needs beyond the static reach. */
+  rise: number;
+  /** False when the climber can't throw that far from this stance (the throw would fall short). */
+  feasible: boolean;
+}
 
 export interface SimOptions {
   /** 0 = normal, 1 = very forgiving (tutorial / assist). Scales capacities up and pump down. */
@@ -64,8 +94,12 @@ export interface ClimberSimAPI {
   beginDrag(limb: LimbId): boolean;
   /** Desired endpoint for the dragged limb (wall-local). The sim clamps it to reach. */
   dragTo(limb: LimbId, p: Vec2): void;
-  /** Drop the limb: grabs the snap candidate, clips a quickdraw (hands, rope mode), smears (feet), or returns. */
-  endDrag(limb: LimbId): SimEvent[];
+  /**
+   * Drop the limb: grabs the snap candidate, clips a quickdraw (hands, rope mode), smears (feet), or returns.
+   * Phase B: a foot dropped far out to the side flags; a hand dropped down beside the body shakes out, at the
+   * hips it chalks up; with `opts.velocity` a committed flick toward an out-of-reach hold throws a dyno.
+   */
+  endDrag(limb: LimbId, opts?: ReleaseOptions): SimEvent[];
   /** Weight-shift input: pull the hips toward p (wall-local). null releases. */
   setHipTarget(p: Vec2 | null): void;
 
@@ -89,6 +123,16 @@ export interface ClimberSimAPI {
   respawn(placement: Partial<Record<LimbId, string>>): void;
 
   forceFall(): void;
+
+  // ── Phase B (optional; ClimberSim implements all of them) ──
+  /** Take a hand off and dip it into the chalk bag (≈ SIM.chalkTime); false if not allowed right now. */
+  chalkUp?(hand: 'LH' | 'RH'): boolean;
+  /** Let go with a hand and shake it out by the side (the other hand must hold); false if not allowed. */
+  shakeOut?(hand: 'LH' | 'RH'): boolean;
+  /** Throw a deadpoint ('LH' / 'RH') or a double-hand dyno ('both') at a hold; power 1 = ideal. */
+  dyno?(limb: 'LH' | 'RH' | 'both', holdId: string, power?: number): SimEvent[];
+  /** What a committed flick of the dragged hand released at p would throw to, or null. */
+  dynoCandidate?(limb: LimbId, p: Vec2): DynoPreview | null;
 }
 
 export interface BetaMove {

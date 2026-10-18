@@ -46,8 +46,11 @@ export const SOLVER = {
    * centimetres of difference between the planned and the live body must not turn it into a slip.
    */
   clipMax: 0.9,
-  /** Pump assumed while planning (capacity margin). */
-  pump: 0.3,
+  /**
+   * Forearm pump assumed while planning (capacity margin): pumpCapFactor(0.52) ≈ 0.971, the same
+   * margin the planner had before the per-forearm model (1 − 0.32·0.3²).
+   */
+  pump: 0.52,
   /** Weighted A*: f = g + heuristicWeight · h. */
   heuristicWeight: 2.4,
   maxNodesBoulder: 700,
