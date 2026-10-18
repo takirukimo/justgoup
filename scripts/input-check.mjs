@@ -32,6 +32,8 @@ const ok = (cond, msg) => {
   if (!cond) failures++;
 };
 
+let vclock = 0;
+
 async function open(query) {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true });
   const logs = [];
@@ -42,13 +44,13 @@ async function open(query) {
   await page.waitForFunction(() => window.__ready === true, null, { timeout: 180000 });
   await page.waitForTimeout(800);
   const cdp = await page.context().newCDPSession(page);
+  vclock = 0; // restart the touch clock at "now" for each page (timestamps before its time origin read as 0)
   return { page, cdp, logs };
 }
 
 // Touch events carry explicit timestamps from a virtual clock: under headless SwiftShader a frame can
 // take seconds and real dispatch times would turn every flick into a crawl. `dt` (s) advances the clock;
 // a lift defaults to a finger that rested a moment (no flick) unless the caller says otherwise.
-let vclock = 0;
 const touch = (cdp, type, pts, dt = type === 'touchEnd' ? 0.3 : 0.034) => {
   vclock = vclock ? vclock + dt : Date.now() / 1000;
   return cdp.send('Input.dispatchTouchEvent', { type, timestamp: vclock, touchPoints: pts.map((p) => ({ x: p.x, y: p.y, id: p.id ?? 0, radiusX: 6, radiusY: 6, force: 1 })) });
