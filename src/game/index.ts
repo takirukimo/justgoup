@@ -33,3 +33,31 @@ export { RopeSystem, ROPE } from './rope';
 export { gradeLabel, fontGrade, gradeColor, gradeWord } from './grades';
 export { BetaBot, autoClimb, BOT, type BetaBotOptions } from './bot';
 export { usableByHand, usableByFoot, contactPoint, clipPoint, startPlacement, topHolds } from './holds';
+export {
+  wallProfile,
+  profileOf,
+  makeProfile,
+  panelAt,
+  panelIndexAt,
+  angleAt,
+  smoothAngleAt,
+  surfaceToLocal3D,
+  local3DToSurface,
+  normalAt,
+  tangentAt,
+  worldHeight,
+  wallTopHeight,
+  wallOverhang,
+  panelSpans,
+  panelsFromLengths,
+  reachScale,
+  surfaceDistance3D,
+  steepestAngle,
+  PROFILE_PRESETS,
+  FOLD,
+  type WallProfile,
+  type PanelSpan,
+  type ProfilePresetId,
+  type Vec3,
+  type SurfacePoint,
+} from './wall-profile';

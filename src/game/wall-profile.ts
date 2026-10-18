@@ -57,7 +57,7 @@ export interface SurfacePoint {
 export const FOLD = {
   /** Half-width (m) of the band around a fold over which the off-surface normal turns. */
   blend: 0.3,
-  /** …at most this fraction of either neighbouring panel's length. */
+  /** …at most this fraction of a neighbouring panel's length when that panel has a fold at both ends. */
   blendFrac: 0.45,
   /** Anchor (shoulder / hip) distance off the wall the fold-aware reach metric assumes (m). */
   anchorDepth: 0.3,
@@ -148,9 +148,12 @@ export function makeProfile(panels: readonly WallPanel[] | null | undefined, wal
     if (ang[i] > maxA) maxA = ang[i];
   }
   for (let i = 1; i < n; i++) {
-    const before = y0[i] - y0[i - 1];
-    const after = (i + 1 < n ? y0[i + 1] : length) - y0[i];
-    blend[i] = Math.max(0.02, Math.min(FOLD.blend, FOLD.blendFrac * before, FOLD.blendFrac * after));
+    // a band shares a panel with the next fold's band; the first and the last panel have only one fold, so
+    // a short kicker can give its fold nearly its whole length (a wider band keeps local3DToSurface unique
+    // deeper into the concave corner: the blended normals meet ≈ 2·blend / Δangle off the wall)
+    const before = (y0[i] - y0[i - 1]) * (i === 1 ? 0.98 : FOLD.blendFrac);
+    const after = ((i + 1 < n ? y0[i + 1] : length) - y0[i]) * (i === n - 1 ? 0.98 : FOLD.blendFrac);
+    blend[i] = Math.max(0.02, Math.min(FOLD.blend, before, after));
   }
   return { panels: clean, n, y0, ang, c, s, bh, bz, blend, length, minAngle: minA, maxAngle: maxA, flat: n === 1, convex };
 }
@@ -320,6 +323,39 @@ export function surfaceToLocal3D(p: WallProfile, x: number, y: number, depth = 0
 /** World height (m above the floor) of surface point y at `depth` off the wall. */
 export function worldHeight(p: WallProfile, y: number, depth = 0): number {
   return offsetSide(p, y, depth, SA).h;
+}
+
+/**
+ * Outward unit normal of the wall at surface height y, in wall-local 3D (x = 0). `blended` (default)
+ * turns it smoothly across each fold band — the frame for things OFF the wall (the body, a dangling
+ * limb, the camera); `blended = false` is the sharp normal of the panel at y — the frame for things ON
+ * it (a hold, a volume, a quickdraw bolted to that panel).
+ */
+export function normalAt(p: WallProfile, y: number, out: Vec3 = { x: 0, y: 0, z: 0 }, blended = true): Vec3 {
+  if (blended) normalSide(p, y, SN);
+  else {
+    const i = panelIndexAt(p, y);
+    SN.h = -p.s[i];
+    SN.z = p.c[i];
+  }
+  out.x = 0;
+  out.y = SN.h;
+  out.z = SN.z;
+  return out;
+}
+
+/**
+ * Unit tangent pointing UP the surface (toward larger y) at surface height y, in wall-local 3D (x = 0):
+ * (0, cos φ, sin φ) for the panel angle φ. Perpendicular to normalAt with the same `blended` flag, so
+ * (x̂, tangentAt, normalAt) is a right-handed frame for orienting meshes on the folded wall.
+ */
+export function tangentAt(p: WallProfile, y: number, out: Vec3 = { x: 0, y: 0, z: 0 }, blended = true): Vec3 {
+  normalAt(p, y, out, blended);
+  const nh = out.y;
+  const nz = out.z;
+  out.y = nz;
+  out.z = -nh;
+  return out;
 }
 
 /** g(y) = T_b(y) · (Q − S(y)): zero where Q lies on the blended normal through S(y). */
