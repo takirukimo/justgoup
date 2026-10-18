@@ -18,8 +18,8 @@
 //   • release velocity: the finger's wall-local velocity over the last ~90 ms (VelocityTracker) goes
 //     to sim.endDrag(limb, { velocity }), so a hand flicked toward a hold beyond its static reach
 //     throws a deadpoint / dyno. While the target is such a hold (sim.dynoCandidate) the overlay shows
-//     a throw preview instead of the grip reticle: a pink ballistic arc with a FLICK cue, a segmented
-//     throw reticle on the hold and a "DEADPOINT · +18 CM" tag (grey "TOO FAR" when it can't be thrown);
+//     a throw preview instead of the grip reticle: a pink ballistic arc, a segmented throw reticle on
+//     the hold and a "DEADPOINT +18 CM · FLICK" tag (grey "TOO FAR" when it can't be thrown);
 //   • a dragged hand also shows two subtle release targets that fade in as the finger nears them: the
 //     chalk bag behind the hips (release there → the sim chalks up) and the shake-out lane down beside
 //     the body (release there → shake out), each lighting up with a CHALK UP / SHAKE OUT tag;
@@ -46,7 +46,7 @@
 import type { CameraMode, ClimberSimAPI, DynoPreview, HoldHighlight, LimbControlsAPI, RendererAPI } from '../core/contracts';
 import type { ClimberState, HoldDef, HoldType, LimbId, LimbSnapshot, QuickdrawDef, Vec2 } from '../core/types';
 import { bus } from '../core/events';
-import { FONTS, PALETTE } from '../config/brand';
+import { PALETTE } from '../config/brand';
 import { BODY, GAME, SIM } from '../config/tuning';
 import { clamp, damp } from '../core/math';
 import { canMatch, usableByHand } from '../game/holds';
@@ -183,7 +183,6 @@ const DASH_ANCHOR: number[] = [4, 4];
 const DASH_RING: number[] = [2, 5];
 const DASH_NONE: number[] = [];
 const DASH_THROW: number[] = [7, 5];
-const FLICK_FONT = `700 9.5px ${FONTS.mono}`;
 
 // ───────────────────────────── types ─────────────────────────────
 
@@ -1974,7 +1973,7 @@ export class LimbControls implements LimbControlsAPI {
       const c = this.duo ? this.duoHold : null;
       if (c && this.homo.map(c.x, c.y, this.s0)) {
         const t = throwWord({ kind: 'dyno', rise: this.duoRise, feasible: this.duoFeasible });
-        this.setTagText(this.candTag, t.word, t.type, this.duoFeasible ? C_THROW : PALETTE.mist);
+        this.setTagText(this.candTag, t.word, this.duoFeasible ? `${t.type} · FLICK` : t.type, this.duoFeasible ? C_THROW : PALETTE.mist);
         const rpx = holdRadius(c) * this.homo.scaleAt(c.x, c.y, this.s2, this.s3);
         this.placeTag(this.candTag, this.s0.x, this.s0.y, rpx + 6, hip.x, hip.y);
         this.setTag(this.candTag, true);
@@ -2007,7 +2006,7 @@ export class LimbControls implements LimbControlsAPI {
       tagOn = true;
     } else if (d && dh && this.homo.map(dh.x, dh.y, this.s0)) {
       const t = throwWord(d);
-      this.setTagText(this.candTag, t.word, t.type, d.feasible ? C_THROW : PALETTE.mist);
+      this.setTagText(this.candTag, t.word, d.feasible ? `${t.type} · FLICK` : t.type, d.feasible ? C_THROW : PALETTE.mist);
       const rpx = holdRadius(dh) * this.homo.scaleAt(dh.x, dh.y, this.s2, this.s3);
       this.placeTag(this.candTag, this.s0.x, this.s0.y, rpx + 6, h.x, h.y);
       tagOn = true;
@@ -2361,7 +2360,7 @@ export class LimbControls implements LimbControlsAPI {
                 ? PALETTE.signal
                 : PALETTE.chalk;
     const RR = 11;
-    if (dyno && this.dynoHold) this.drawThrow(L.pos.x, L.pos.y, this.dynoHold, dyno.feasible, true);
+    if (dyno && this.dynoHold) this.drawThrow(L.pos.x, L.pos.y, this.dynoHold, dyno.feasible);
 
     // dashed anchor → target line (stops at the reticle)
     let dx = rx - axs;
@@ -2442,10 +2441,10 @@ export class LimbControls implements LimbControlsAPI {
 
   /**
    * Throw preview: a ballistic arc (wall-local quadratic that bulges upward with the sideways
-   * distance, like the body's flight) from the hand at (sx, sy) to the hold, a FLICK cue at its
-   * middle, and a segmented throw reticle on the hold. Grey and short of the hold when infeasible.
+   * distance, like the body's flight) from the hand at (sx, sy) to the hold and a segmented throw
+   * reticle on the hold (the tag says "… · FLICK"). Grey and short of the hold when infeasible.
    */
-  private drawThrow(sx: number, sy: number, hold: HoldDef, feasible: boolean, cue: boolean): void {
+  private drawThrow(sx: number, sy: number, hold: HoldDef, feasible: boolean): void {
     const ctx = this.ctx;
     const H = this.homo;
     const p = this.s0;
@@ -2467,20 +2466,12 @@ export class LimbControls implements LimbControlsAPI {
     let ly = 0;
     let px = 0;
     let py = 0;
-    let midX = 0;
-    let midY = 0;
-    let midTx = 0;
-    let midTy = 0;
     for (let k = 0; k <= N; k++) {
       const t = (k / N) * tEnd;
       const u = 1 - t;
       const x = u * u * sx + 2 * u * t * cx + t * t * ex;
       const y = u * u * sy + 2 * u * t * cy + t * t * ey;
       if (!H.map(x, y, p)) continue;
-      if (k === N >> 1) {
-        midX = p.x;
-        midY = p.y;
-      }
       // stop where the arc meets the reticle ring
       if (feasible && endOk && t > 0.5 && Math.hypot(p.x - hx, p.y - hy) < stop) break;
       if (!started) {
@@ -2531,31 +2522,6 @@ export class LimbControls implements LimbControlsAPI {
         ctx.globalAlpha = 0.9;
         ctx.stroke();
       }
-    }
-    // FLICK cue at the middle of the arc, offset to its outer side
-    if (cue && feasible && this.assist && midX) {
-      midTx = lx - midX;
-      midTy = ly - midY;
-      const ml = Math.hypot(midTx, midTy) || 1;
-      let nx = -midTy / ml;
-      let ny = midTx / ml;
-      if (ny > 0) {
-        nx = -nx;
-        ny = -ny;
-      }
-      const tx = midX + nx * 14;
-      const ty = midY + ny * 14;
-      ctx.font = FLICK_FONT;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.globalAlpha = 0.85;
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = C_SHADOW;
-      ctx.strokeText('FLICK', tx, ty);
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = C_THROW;
-      ctx.fillText('FLICK', tx, ty);
-      this.grow(tx, ty, 22);
     }
     // throw reticle: four rotating arcs around the hold + inward ticks
     if (!H.map(ex, ey, p)) return;
@@ -2610,8 +2576,8 @@ export class LimbControls implements LimbControlsAPI {
     }
     const LH = state.limbs.LH;
     const RH = state.limbs.RH;
-    this.drawThrow(LH.pos.x, LH.pos.y, c, this.duoFeasible, false);
-    this.drawThrow(RH.pos.x, RH.pos.y, c, this.duoFeasible, true);
+    this.drawThrow(LH.pos.x, LH.pos.y, c, this.duoFeasible);
+    this.drawThrow(RH.pos.x, RH.pos.y, c, this.duoFeasible);
   }
 
   /** Chalk bag + shake-out lane while a hand is dragged: faint until the finger nears them, lit when it would trigger. */
