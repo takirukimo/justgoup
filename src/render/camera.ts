@@ -82,8 +82,11 @@ const BLEND_S: Record<CameraMode, number> = {
 };
 /** Title ↔ locker framing changes (same mode, different shot). */
 const FRAMING_BLEND_S = 1.5;
-/** While a blend runs the eased target does the work; the springs only round it off. */
-const BLEND_SPRING = 0.28;
+/** Long moves (preview 15 m out → follow 3 m) take longer: peak speed ≈ 1.875 × travel / duration. */
+const BLEND_MAX_SPEED = 8.5;
+const BLEND_MAX_ACCEL = 30;
+/** Decay time of the velocity the camera had when a shot changed (s). */
+const BLEND_COAST = 0.45;
 
 /** Title band: the logo lockup ends ≈ 30%, the buttons start ≈ 68% (fractions of the height). */
 const TITLE_BAND = { top: 0.325, bottom: 0.66 };
@@ -134,6 +137,10 @@ class SpringVec3 {
   snap(v: THREE.Vector3): void {
     this.value.copy(v);
     this.vx.v = this.vy.v = this.vz.v = 0;
+  }
+  /** Current velocity (m/s). */
+  velocity(out: THREE.Vector3): THREE.Vector3 {
+    return out.set(this.vx.v, this.vy.v, this.vz.v);
   }
   /** Carry a velocity (m/s) into the spring, e.g. when a scripted move hands over mid-flight. */
   setVelocity(v: THREE.Vector3): void {
@@ -191,8 +198,12 @@ export class CameraRig {
 
   private modeTime = 0;
   private time = 0;
-  /** Shot blend: the pose the camera had when the shot changed, eased toward the live target. */
-  private blend = { t: 0, dur: 0, pos: new THREE.Vector3(), look: new THREE.Vector3(), fov: 42 };
+  /**
+   * Shot blend: the pose the camera had when the shot changed — coasting on with the velocity it
+   * had (decaying over BLEND_COAST s) so a change never stops the camera dead — eased toward the
+   * live target. `measured`: the duration has been stretched to the distance to travel yet.
+   */
+  private blend = { t: 0, dur: 0, pos: new THREE.Vector3(), look: new THREE.Vector3(), fov: 42, vPos: new THREE.Vector3(), vLook: new THREE.Vector3(), measured: true };
   /** After an instant cut to an overview shot, start a hair wide and push in. */
   private settle = false;
   private focusHint: Vec2 | null = null;
@@ -270,6 +281,7 @@ export class CameraRig {
       }
       r?.();
     }
+    const carry = aborted && !opts?.instant;
     const changed = mode !== this.mode;
     this.mode = mode;
     this.focusOverride = opts?.focus ?? null;
@@ -283,7 +295,7 @@ export class CameraRig {
       this.settle = mode === 'preview' || mode === 'title';
       this.blend.dur = 0;
     } else if (changed || aborted) {
-      this.startBlend(BLEND_S[mode]);
+      this.startBlend(BLEND_S[mode], carry ? this.introVel : undefined, carry ? this.introLookVel : undefined);
     }
     if (mode === 'intro' && !this.intro) this.startIntro(DEFAULT_INTRO_S);
   }
@@ -291,16 +303,22 @@ export class CameraRig {
   private pendingSnap = false;
 
   /** Start easing from the camera's current pose onto whatever the target becomes. */
-  private startBlend(dur: number): void {
+  private startBlend(dur: number, vPos?: THREE.Vector3, vLook?: THREE.Vector3): void {
     if (!this.initialized || dur <= 0) {
       this.blend.dur = 0;
       return;
     }
-    this.blend.t = 0;
-    this.blend.dur = dur;
-    this.blend.pos.copy(this.pos.value);
-    this.blend.look.copy(this.look.value);
-    this.blend.fov = this.fov.value;
+    const b = this.blend;
+    b.t = 0;
+    b.dur = dur;
+    b.measured = false;
+    b.pos.copy(this.pos.value);
+    b.look.copy(this.look.value);
+    b.fov = this.fov.value;
+    if (vPos) b.vPos.copy(vPos);
+    else this.pos.velocity(b.vPos);
+    if (vLook) b.vLook.copy(vLook);
+    else this.look.velocity(b.vLook);
   }
 
   /**
@@ -1051,27 +1069,50 @@ export class CameraRig {
     } else {
       const tune = TUNING[this.mode];
       const b = this.blend;
-      let blending = false;
       if (b.dur > 0) {
+        if (!b.measured) {
+          // stretch long moves so neither the speed nor the acceleration ever reads as a cut
+          const travel = Math.max(this.tPos.distanceTo(b.pos), this.tLook.distanceTo(b.look) * 0.8);
+          b.dur = Math.max(b.dur, (1.875 * travel) / BLEND_MAX_SPEED, Math.sqrt((5.77 * travel) / BLEND_MAX_ACCEL));
+          b.measured = true;
+        }
         b.t += d;
         const w = smootherstep01(b.t / b.dur);
-        this.tPos.lerpVectors(b.pos, this.tPos, w);
-        this.tLook.lerpVectors(b.look, this.tLook, w);
+        // the old shot coasts on with the camera's velocity at the change, then the ease takes over
+        const coast = BLEND_COAST * (1 - Math.exp(-b.t / BLEND_COAST));
+        this.v2.copy(b.pos).addScaledVector(b.vPos, coast);
+        this.v3.copy(b.look).addScaledVector(b.vLook, coast);
+        this.tPos.lerpVectors(this.v2, this.tPos, w);
+        this.tLook.lerpVectors(this.v3, this.tLook, w);
         this.tFov = b.fov + (this.tFov - b.fov) * w;
-        blending = b.t < b.dur;
-        if (!blending) b.dur = 0;
+        // During a blend the camera rides the eased target itself: it starts on the camera with the
+        // camera's velocity (w and w' are 0 at the change) and ends on the live shot, so position and
+        // velocity stay continuous. The springs pick up the motion (with its velocity) at the end.
+        if (d > 0) {
+          this.v1.subVectors(this.tPos, this.pos.value).divideScalar(d);
+          this.pos.snap(this.tPos);
+          this.pos.setVelocity(this.v1);
+          this.v1.subVectors(this.tLook, this.look.value).divideScalar(d);
+          this.look.snap(this.tLook);
+          this.look.setVelocity(this.v1);
+        }
+        this.fov.snap(this.tFov);
+        this.up.step(this.tUp, 0.4, d);
+        this.roll.step(this.tRoll, 0.6, d);
+        if (b.t >= b.dur) b.dur = 0;
+      } else {
+        let sp = tune.pos;
+        let sl = tune.look;
+        if (this.mode === 'follow' && this.followAir) {
+          sp *= 0.5;
+          sl *= 0.5;
+        }
+        this.pos.step(this.tPos, sp, d);
+        this.look.step(this.tLook, sl, d);
+        this.up.step(this.tUp, 0.4, d);
+        this.fov.step(this.tFov, tune.fov, d);
+        this.roll.step(this.tRoll, 0.6, d);
       }
-      let sp = blending ? Math.min(tune.pos, BLEND_SPRING) : tune.pos;
-      let sl = blending ? Math.min(tune.pos, BLEND_SPRING) : tune.look;
-      if (this.mode === 'follow' && this.followAir) {
-        sp *= 0.5;
-        sl *= 0.5;
-      }
-      this.pos.step(this.tPos, sp, d);
-      this.look.step(this.tLook, sl, d);
-      this.up.step(this.tUp, 0.4, d);
-      this.fov.step(this.tFov, blending ? BLEND_SPRING : tune.fov, d);
-      this.roll.step(this.tRoll, 0.6, d);
     }
 
     // weighted sag (catch jolt): an underdamped spring on the view height

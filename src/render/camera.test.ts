@@ -184,10 +184,20 @@ describe('title composition (home scene)', () => {
   }
 });
 
-/** Steps the rig at 30 fps and returns the peak camera speed (m/s) and acceleration (m/s²). */
-function motion(rig: CameraRig, ctx: CameraContext, sec: number, dt = 1 / 30): { vMax: number; aMax: number; jump: number } {
-  let prev = rig.camera.position.clone();
-  let pv = new THREE.Vector3();
+/** Camera motion carried between motion() calls (so a measurement can start mid-flight). */
+interface Track {
+  prev: THREE.Vector3;
+  pv: THREE.Vector3;
+}
+
+/**
+ * Steps the rig at 30 fps and returns the peak camera speed (m/s) and acceleration (m/s²). Pass the
+ * same `track` to consecutive calls to measure across a change made between them (otherwise the
+ * camera is assumed to start at rest).
+ */
+function motion(rig: CameraRig, ctx: CameraContext, sec: number, dt = 1 / 30, track?: Track): { vMax: number; aMax: number; jump: number } {
+  let prev = track ? track.prev : rig.camera.position.clone();
+  let pv = track ? track.pv : new THREE.Vector3();
   let vMax = 0;
   let aMax = 0;
   let jump = 0;
@@ -200,6 +210,10 @@ function motion(rig: CameraRig, ctx: CameraContext, sec: number, dt = 1 / 30): {
     jump = Math.max(jump, p.distanceTo(prev));
     prev = p.clone();
     pv = v;
+  }
+  if (track) {
+    track.prev = prev;
+    track.pv = pv;
   }
   return { vMax, aMax, jump };
 }
@@ -284,6 +298,8 @@ describe('intro fly-in pacing', () => {
     void rig.playIntro(8, { hold: 3.5 }).then(() => {
       landed = true;
     });
+    // the fly-in starts at the gym entrance: that first frame is a cut by design (under the splash)
+    rig.update(1 / 30, ctx);
     const r = motion(rig, ctx, 11);
     await Promise.resolve();
     expect(landed).toBe(true);
@@ -298,10 +314,58 @@ describe('intro fly-in pacing', () => {
     rig.setMode('title', { instant: true });
     rig.update(1 / 30, ctx);
     void rig.playIntro(8, { hold: 2 });
-    motion(rig, ctx, 4.5);
+    rig.update(1 / 30, ctx);
+    const track: Track = { prev: rig.camera.position.clone(), pv: new THREE.Vector3() };
+    motion(rig, ctx, 4.5, 1 / 30, track);
     rig.setMode('preview');
-    const r = motion(rig, ctx, 3);
+    const r = motion(rig, ctx, 3, 1 / 30, track);
     expect(r.jump).toBeLessThan(0.45);
     expect(r.aMax).toBeLessThan(60);
+  });
+});
+
+describe('folded walls', () => {
+  /** A cave: kicker, 30° wall, an 85° roof and a 20° lip panel (game/wall-profile PROFILE_PRESETS.CAVE). */
+  function cave(): WallFrame {
+    const frame = new WallFrame(0);
+    frame.setWall({ wallAngle: 85, height: 4.7, profile: [{ y0: 0, angle: 0 }, { y0: 0.3, angle: 30 }, { y0: 1.9, angle: 85 }, { y0: 4.1, angle: 20 }] });
+    return frame;
+  }
+
+  it('frames a climber hanging under the roof: body + the next holds inside the HUD-safe band, lens above the pads', () => {
+    const frame = cave();
+    const rig = new CameraRig(W / H);
+    rig.viewInsets = { top: 0.1, bottom: 0.13 };
+    const st = climber(2.7);
+    st.pelvisDepth = 0.75;
+    const ctx: CameraContext = { frame, boulder: null, state: st, ceiling: 7.4, guide: null };
+    rig.setMode('follow', { instant: true });
+    settle(rig, ctx);
+    expect(rig.camera.position.y).toBeGreaterThan(0.7);
+    const handTop = Math.max(st.limbs.LH.pos.y, st.limbs.RH.pos.y);
+    const pts = [st.limbs.LH.pos, st.limbs.RH.pos, st.limbs.LF.pos, st.limbs.RF.pos, { x: 0, y: handTop + 0.6 }].map((p) => project(rig, frame, p, 0.03));
+    pts.push(project(rig, frame, st.pelvis, st.pelvisDepth));
+    for (const p of pts) {
+      expect(p.x).toBeGreaterThan(0);
+      expect(p.x).toBeLessThan(W);
+      expect(p.y).toBeGreaterThan(76);
+      expect(p.y).toBeLessThan(H - 98);
+    }
+  });
+
+  it('screen ↔ wall round trip lands on the right panel', () => {
+    const frame = cave();
+    const rig = new CameraRig(W / H);
+    const ctx: CameraContext = { frame, boulder: null, state: climber(2.4), ceiling: 7.4, guide: null };
+    rig.setMode('follow', { instant: true });
+    settle(rig, ctx, 2);
+    const ray = new THREE.Raycaster();
+    for (const p of [{ x: -0.4, y: 1.2 }, { x: 0.3, y: 2.6 }, { x: 0.1, y: 3.6 }]) {
+      const s = project(rig, frame, p);
+      ray.setFromCamera(new THREE.Vector2((s.x / W) * 2 - 1, -((s.y / H) * 2 - 1)), rig.camera);
+      const out = { x: 0, y: 0 };
+      expect(frame.raycast(ray.ray, out)).toBeGreaterThan(0);
+      expect(Math.hypot(out.x - p.x, out.y - p.y)).toBeLessThan(1e-3);
+    }
   });
 });
