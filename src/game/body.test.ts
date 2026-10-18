@@ -10,6 +10,9 @@ import { Forearm } from './forearm';
 import { edgeDepthFactor, frictionCapFactor, handGripBase, pumpCapFactor } from './holds';
 import { evaluateStance, FOOT_HEEL, FOOT_PUSH, makeParams, newContact, setContact, StanceEval, type Contacts, type Pose } from './statics';
 import { hold, makeBoulder, moveLimb, run } from './test-helpers';
+import { autoClimb, BetaBot, BOT } from './bot';
+import { generateRopeRoute, tutorialBoulder } from './generator';
+import { RopeSystem } from './rope';
 
 const grip = (h: HoldDef, wallAngle = 0): number => handGripBase(h, wallAngle, Math.max(0, Math.sin((wallAngle * Math.PI) / 180)));
 const withDepth = (mm: number, type: 'edge' | 'crimp' = 'edge'): HoldDef => ({ ...hold('e', 0, 0, type, 0.06, 'hand'), edgeDepthMm: mm });
@@ -788,5 +791,51 @@ describe('deadpoints and dynos (research §2.5, §6.6)', () => {
     expect(pv?.holdId).toBe('far');
     expect(pv?.feasible).toBe(false);
     expect(sim.dynoCandidate('RH', { x: 0.2, y: 1.9 })).toBeNull(); // in static reach: just grab it
+  });
+});
+
+// ═══════════════════════════════ the bot manages its body ═══════════════════════════════
+
+describe('BetaBot chalks and shakes out like a climber', () => {
+  it('shakes out a pumped forearm on a good stance, re-grips and still sends', { timeout: 60_000 }, () => {
+    const climb = (manageBody: boolean) => {
+      const sim = new ClimberSim(tutorialBoulder(), { sweat: 0 });
+      sim.start();
+      run(sim, 0.5);
+      sim.forearm('LH').spend(0.7); // arrive at the problem with a pumped left forearm
+      const r = autoClimb(sim, { maxTime: 120, manageBody });
+      expect(r.sent, r.bot.log.join('; ')).toBe(true);
+      return { shakes: r.bot.shakes, pump: sim.getState().limbs.LH.pump! };
+    };
+    const managed = climb(true);
+    const plain = climb(false);
+    expect(managed.shakes).toBeGreaterThanOrEqual(1);
+    expect(plain.shakes).toBe(0);
+    expect(managed.pump).toBeLessThan(plain.pump - 0.15);
+  });
+
+  it('chalks on lead as the chalk wears off and sends the route', { timeout: 120_000 }, () => {
+    const b = generateRopeRoute({ seed: 4242, grade: 4 });
+    const sim = new ClimberSim(b);
+    const rope = new RopeSystem(b);
+    const bot = new BetaBot(sim);
+    sim.start();
+    let events: SimEvent[] = [];
+    let minFric = 1;
+    for (let t = 0; t < 400 && !bot.done && !bot.failed; t += 1 / 60) {
+      bot.update(1 / 60, events);
+      events = sim.step(1 / 60);
+      for (const e of events) if (e.type === 'clip-done') rope.clip(e.quickdrawId);
+      const s = sim.getState();
+      minFric = Math.min(minFric, s.limbs.LH.friction!, s.limbs.RH.friction!);
+      if (s.phase === 'climbing') {
+        const c = rope.catchParams(s.pelvis);
+        sim.setRope(c.anchor, c.length);
+      }
+    }
+    expect(sim.getState().phase, bot.log.join('; ')).toBe('topped');
+    expect(bot.chalks).toBeGreaterThan(4);
+    expect(sim.getStats().chalkUps).toBe(bot.chalks);
+    expect(minFric).toBeLessThan(BOT.chalkBelow);
   });
 });

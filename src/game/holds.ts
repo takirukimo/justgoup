@@ -213,9 +213,32 @@ export function edgeDepthMm(h: HoldDef): number {
   return clamp(m[2] + (m[3] - m[2]) * t, 3, 60);
 }
 
+/**
+ * Hot-path tables: a knot curve sampled at its integer x (every knot sits on an integer, so linear
+ * interpolation between samples reproduces the piecewise-linear curve exactly). Plain arithmetic.
+ */
+function sampled(table: readonly (readonly [number, number])[]): { x0: number; ys: Float64Array } {
+  const x0 = table[0][0];
+  const x1 = table[table.length - 1][0];
+  const ys = new Float64Array(x1 - x0 + 1);
+  for (let i = 0; i < ys.length; i++) ys[i] = knots(table, x0 + i);
+  return { x0, ys };
+}
+function lookup(t: { x0: number; ys: Float64Array }, x: number): number {
+  const f = x - t.x0;
+  const ys = t.ys;
+  if (f <= 0) return ys[0];
+  const last = ys.length - 1;
+  if (f >= last) return ys[last];
+  const i = f | 0;
+  return ys[i] + (ys[i + 1] - ys[i]) * (f - i);
+}
+const DEPTH_T = sampled(SIM.edgeDepthCurve);
+const SLOPE_T = sampled(SIM.sloperSlopeCurve);
+
 /** Edge-depth multiplier relative to the 20 mm reference edge (research [22]). */
 export function edgeDepthFactor(depthMm: number): number {
-  return knots(SIM.edgeDepthCurve, depthMm);
+  return lookup(DEPTH_T, depthMm);
 }
 
 /** Lip angle (°) of a hold: HoldDef.lipAngle, else −35° for slopers and 0 for everything else. */
@@ -226,7 +249,7 @@ export function lipAngleOf(h: HoldDef): number {
 
 /** Sloper multiplier over the effective slope (−lip + wall angle, degrees; research [29]). */
 export function sloperSlopeFactor(slopeDeg: number): number {
-  return knots(SIM.sloperSlopeCurve, slopeDeg);
+  return lookup(SLOPE_T, slopeDeg);
 }
 
 /**

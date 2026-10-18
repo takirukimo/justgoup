@@ -1,13 +1,29 @@
 // BetaBot: an autopilot that climbs a planned beta through the sim's public input API, exactly like a
 // player would (shift the hips, drag a limb to the hold, release when it snaps). Used by the tests to
 // prove that planned betas are executable, and usable as an attract-mode / demo climber.
+// It manages its body like a climber (Phase B): before a hand move it chalks that hand when the chalk
+// has worn off (lead routes, ≈ every 4–5 moves) and, when a forearm is pumped, it lets go with it and
+// shakes it out by the side (the other hand holding) before re-gripping and going on.
 
 import type { HoldDef, LimbId, Vec2 } from '../core/types';
 import type { BetaMove, ClimberSimAPI, SimEvent } from '../core/contracts';
 import { contactPoint, LIMB_INDEX } from './holds';
 import { planBetaDetailed, SMEAR_ID, type PlanResult, type PlanStep } from './solver';
 
-type BotPhase = 'prep' | 'drag' | 'hold' | 'settle' | 'clip' | 'clipwait' | 'recover' | 'done' | 'failed';
+type BotPhase = 'prep' | 'drag' | 'hold' | 'settle' | 'clip' | 'clipwait' | 'recover' | 'chalk' | 'shake' | 'regrab' | 'done' | 'failed';
+
+/** Body management thresholds of the bot. */
+export const BOT = {
+  /** Chalk the hand about to move when its friction is below this. */
+  chalkBelow: 0.45,
+  /** Shake a forearm out when its pump is above this … */
+  shakeAbove: 0.55,
+  /** … until it is below this (or shakeMax seconds pass, or the stance gets strenuous). */
+  shakeUntil: 0.22,
+  shakeMax: 20,
+  /** Only from a calm stance. */
+  calmTension: 0.75,
+} as const;
 
 export interface BetaBotOptions {
   /** Seconds to shift the hips before a move (max). */
@@ -20,6 +36,8 @@ export interface BetaBotOptions {
   replan?: boolean;
   /** Use the planner's hip positions (true) or leave the hips to the climber's posture (false). */
   useHips?: boolean;
+  /** Chalk up and shake out like a climber (needs ClimberSimAPI.chalkUp / shakeOut). Default true. */
+  manageBody?: boolean;
 }
 
 export class BetaBot {
@@ -36,6 +54,9 @@ export class BetaBot {
   private replans = 0;
   /** Moves completed. */
   moves = 0;
+  /** Chalk dips and shake-outs the bot made. */
+  chalks = 0;
+  shakes = 0;
   readonly log: string[] = [];
 
   constructor(sim: ClimberSimAPI, plan?: PlanResult | null, opts: BetaBotOptions = {}) {
@@ -48,6 +69,7 @@ export class BetaBot {
       settleTime: opts.settleTime ?? 0.3,
       replan: opts.replan ?? true,
       useHips: opts.useHips ?? true,
+      manageBody: opts.manageBody ?? true,
     };
     if (!this.plan) this.phase = 'failed';
   }
@@ -94,10 +116,15 @@ export class BetaBot {
       else if (this.t > 3) this.fail('stuck after a missed move');
       return;
     }
+    if (this.phase === 'chalk' || this.phase === 'shake' || this.phase === 'regrab') {
+      this.bodyStep(s);
+      return;
+    }
     if (!st && this.phase !== 'clip' && this.phase !== 'clipwait') return;
     switch (this.phase) {
       case 'prep': {
         if (!st) break;
+        if (this.t < dt * 1.5 && this.opts.manageBody && this.manage(limb)) return;
         // shift the weight toward the reach position while still on four limbs, then let go
         if (this.opts.useHips) sim.setHipTarget({ x: st.reachPose.px, y: st.reachPose.py });
         if (this.prepTension < 0) this.prepTension = s.tension;
@@ -188,6 +215,100 @@ export class BetaBot {
 
   /** Tension when the current weight shift began (−1 = not shifting). */
   private prepTension = -1;
+  private bodyHand: 'LH' | 'RH' = 'LH';
+  private bodyHold: HoldDef | null = null;
+
+  /**
+   * At the start of a move: chalk the hand that is about to move when its chalk is worn, or shake out
+   * a pumped forearm, from a calm stance with the other hand on. True when it started one.
+   */
+  private manage(limb: LimbId): boolean {
+    const sim = this.sim;
+    const s = sim.getState();
+    if (s.tension > BOT.calmTension) return false;
+    const hand = limb === 'LH' || limb === 'RH' ? limb : null;
+    if (hand && sim.chalkUp && (s.limbs[hand].friction ?? 1) < BOT.chalkBelow && s.limbs[hand].holdId) {
+      const held = s.limbs[hand].holdId;
+      if (sim.chalkUp(hand)) {
+        this.bodyHand = hand;
+        this.bodyHold = held ? this.holds.get(held) ?? null : null;
+        this.chalks++;
+        this.phase = 'chalk';
+        this.t = 0;
+        return true;
+      }
+    }
+    if (sim.shakeOut) {
+      // the more pumped forearm first (the other hand holds meanwhile; the move comes after the re-grip)
+      const order: ('LH' | 'RH')[] = (s.limbs.LH.pump ?? 0) >= (s.limbs.RH.pump ?? 0) ? ['LH', 'RH'] : ['RH', 'LH'];
+      for (const h of order) {
+        if ((s.limbs[h].pump ?? 0) < BOT.shakeAbove) continue;
+        const held = s.limbs[h].holdId;
+        if (!held) continue;
+        if (sim.shakeOut(h)) {
+          this.bodyHand = h;
+          this.bodyHold = this.holds.get(held) ?? null;
+          this.shakes++;
+          this.phase = 'shake';
+          this.t = 0;
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /** Chalking, shaking out and re-gripping after a shake-out. */
+  private bodyStep(s: ReturnType<ClimberSimAPI['getState']>): void {
+    const sim = this.sim;
+    const hand = this.bodyHand;
+    const L = s.limbs[hand];
+    switch (this.phase) {
+      case 'chalk':
+        if (L.busy && this.t < 3) return;
+        if (!L.holdId) {
+          // the hold drifted out of reach while chalking: plan from where the climber is
+          this.replan();
+          return;
+        }
+        this.phase = 'prep';
+        this.t = 0;
+        return;
+      case 'shake': {
+        if ((L.pump ?? 0) > BOT.shakeUntil && this.t < BOT.shakeMax && s.tension < 0.95) return;
+        const h = this.bodyHold;
+        if (!h || !sim.beginDrag(hand)) {
+          this.fail('shake-out: could not re-grip');
+          return;
+        }
+        const pair = hand === 'LH' ? 'RH' : 'LH';
+        this.from = { x: s.limbs[hand].pos.x, y: s.limbs[hand].pos.y };
+        this.target = contactPoint(h, LIMB_INDEX[hand], s.limbs[pair].holdId === h.id, { x: 0, y: 0 });
+        this.phase = 'regrab';
+        this.t = 0;
+        return;
+      }
+      case 'regrab': {
+        const k = Math.min(1, this.t / this.opts.dragTime);
+        const e = k * k * (3 - 2 * k);
+        sim.dragTo(hand, { x: this.from.x + (this.target.x - this.from.x) * e, y: this.from.y + (this.target.y - this.from.y) * e });
+        if (k < 1) return;
+        const h = this.bodyHold;
+        if (h && sim.snapCandidate(hand, this.target)?.id !== h.id && this.t < this.opts.dragTime + 1) return;
+        const ev = sim.endDrag(hand);
+        if (!ev.some((x) => x.type === 'grab' && x.holdId === h?.id)) {
+          this.log.push(`re-grip missed ${hand} (${ev.map((x) => x.type).join(',')})`);
+          this.retry();
+          return;
+        }
+        this.phase = 'prep';
+        this.t = 0;
+        return;
+      }
+      default:
+        return;
+    }
+  }
   private clipLimb: LimbId = 'RH';
   /** Quickdraws clipped by the bot. */
   clips = 0;

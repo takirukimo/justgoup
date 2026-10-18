@@ -1,8 +1,9 @@
 /**
- * ClimberSim: the four-limb climbing simulation behind JUST GO UP.
+ * ClimberSim: the four-limb climbing simulation behind STEIBOCK.
  *
  * Everything is wall-local 2D (metres, x right, y up). The sim is pure TypeScript and
  * deterministic: the same boulder + the same input/dt sequence gives the same result.
+ * The body model follows docs/climbing-research.md (§2 biomechanics, §6 tuning table).
  *
  * ── Skeleton & dynamics ──────────────────────────────────────────────────────────────
  * Two point masses, pelvis P (1 − comT of the mass) and chest C (comT), joined by a rigid spine.
@@ -24,8 +25,8 @@
  *     after it — a hand anywhere, a foot only toward targets below or out to the side (a leg in the
  *     air can't lift the hips),
  * then projects position constraints (PBD): spine length, every attached hand / foot inside its
- * ANATOMICAL REACH ENVELOPE around the shoulder / hip (anatomy.ts: a foot never above ~0.33 m over
- * the hip and never straight up, a hand only a little way across the chest or down past the hips;
+ * ANATOMICAL REACH ENVELOPE around the shoulder / hip (anatomy.ts: a foot at most ~0.17 m over the
+ * hip and never straight up, a hand only a little way across the chest or down past the hips;
  * a contact that would leave it moves the chest / pelvis instead, a fresh grab at the edge of the
  * snap range eases the body in over SOFT_ATTACH), and soft in-plane minimums (SIM.armMinPlane /
  * legMinPlane: shoulders and hips sit off the wall, so a folded limb projects short). Velocities
@@ -33,27 +34,54 @@
  * (The original "legs as rest-length springs" idea was replaced by the statically solved support:
  * radial leg springs push an off-centre body further sideways, an inverted-pendulum runaway.)
  *
- * ── Loads, capacity, stress (statics.ts) ─────────────────────────────────────────────
+ * ── Loads, capacity, stress (statics.ts, holds.ts) ───────────────────────────────────
  * Every step the current pose is solved statically: the weight is distributed over the
  * attached limbs by a capacity-weighted least-squares force balance (force + torque), plus the
  * out-of-plane "keep-in" pull the hands need (more on overhangs, more when crouched or when
  * the feet sit close below the hands). On overhangs the feet must toe-pull, which lowers
  * their capacity; on slabs the feet push harder and smears grip better.
- * capacity = hold type × size × pull-angle quality (direction hold → shoulder/hip vs
- * hold.angle, per-type tolerance cone) × overhang factor × match × pump × assist.
- * stress = load / capacity. Loads are smoothed (weight shifts take ~70 ms).
+ * Hand capacity = the research grip model (edge depth for edges / crimps, effective slope for
+ * slopers, fingers for pockets, size) × pull-angle quality (direction hold → shoulder vs hold.angle,
+ * per-type cone) × overhang factor × match × that FOREARM's pump × that hand's chalk friction ×
+ * strength × assist. stress = load / capacity. Loads are smoothed (weight shifts take ~70 ms).
  *
- * ── Tension, shaking, pump, slips, falls ─────────────────────────────────────────────
+ * ── Tension, shaking, slips, falls ───────────────────────────────────────────────────
  * tension = worst stress + balance (CoM outside the feet) + barn-door (contacts in a narrow
  * column with the CoM off to one side) + overstretch/crouch + core torque + reach strain.
  * Shaking: 'shake-start' above SIM.shakeOn (0.7), 'shake-end' below SIM.shakeOff (0.6).
  * Slip clock per limb: runs while stress > 1.05, at full speed (0.5 s to slip) from stress
  * 1.6; at stress 1.3 a slip takes ≈1.2 s, so shaking warns 1–2 s ahead. It drains when the
  * limb is back under capacity. A slipped limb detaches; if that leaves no hands or fewer
- * than two contacts the climber falls ('slip', or 'barn-door' when the barn-door caused it).
- * Pump creeps up (base + strain + campusing), recovers in good rests and shake-outs,
- * lowers hand capacity as it rises, and pump = 1 is a fall. Zero hands for longer than
- * SIM.noHandsGrace is a fall ('no-hands' / 'no-contact').
+ * than two contacts the climber falls ('pump' when the slipping hand's forearm was spent / pumped,
+ * 'barn-door' when the barn-door caused it, else 'slip'). Zero hands for longer than
+ * SIM.noHandsGrace is a fall ('no-hands' / 'no-contact') — except in a dyno flight.
+ *
+ * ── Pump (forearm.ts), chalk, shake-outs ─────────────────────────────────────────────
+ * Each hand has its own forearm: a critical-force / W′ model on the intensity load / fresh capacity
+ * (+ lock-off and barn-door extras). Below CF it is near-sustainable, above it W′ drains (faster for
+ * unbroken high-force grips: occlusion); free hands recover with a half-time (×1.3 shaking out), a
+ * slow residual lowers CF on long climbs. The spent forearm's hand slips — no global pump meter;
+ * ClimberState.pump is the max of LimbSnapshot.pump. 'pump-warning' when a forearm crosses SIM.pumpWarn.
+ * Chalk: per-hand friction (1 fresh … 0 sweaty) wears with time on the wall and every hand move
+ * (fast on lead, slow when bouldering) and costs capacity (slopers most, jugs least). chalkUp(hand),
+ * or a hand dropped at the hips, dips it into the bag for SIM.chalkTime (busy; 'chalk-start' /
+ * 'chalk-done' + 'return'). Shake-out: shakeOut(hand), or a hand dropped down beside the body while
+ * the other hand holds well: it hangs by the side and recovers faster ('shake-out-start' / -end).
+ *
+ * ── Foot techniques ──────────────────────────────────────────────────────────────────
+ * Inferred from where a foot goes (inferFootMode, re-checked every 0.25 s for rock-overs): heel hook
+ * (at/above hip height out to the side on a steep wall), toe hook (a pull-able hold it can't stand on),
+ * drop knee (a sidepull-like foothold facing away), flag (dropped over blank wall far out to the side,
+ * or crossed behind on steep walls), edge / smear otherwise. The statics pull with hooks, turn the hip
+ * in for a drop knee and use a flag as a counterweight (LimbSnapshot.footMode, 'technique' events).
+ *
+ * ── Deadpoints & dynos ───────────────────────────────────────────────────────────────
+ * dyno(limb | 'both', holdId, power) or endDrag(limb, { velocity }) with a committed flick toward a
+ * hold beyond the static reach: a ballistic flight (phase stays 'climbing', ClimberState.airborne /
+ * flight) aimed to put the apex just past the hold, capped by the legs' remaining extension and the
+ * arms. The hand closes near the apex if the catch's peak stress (static load × (1 + v²/2g·s)) holds;
+ * else it misses — a deadpoint can fall back onto the hold it left, a dyno with no hands falls.
+ * Events 'dyno-start' / 'dyno-catch' / 'dyno-miss'.
  *
  * ── Falling, landing, rope ───────────────────────────────────────────────────────────
  * Falling is ballistic (in-plane g·cosθ, out-of-plane g·sinθ, a little spin). Boulder:
