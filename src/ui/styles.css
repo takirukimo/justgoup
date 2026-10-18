@@ -4992,11 +4992,68 @@
     width: 96px;
     height: 96px;
   }
+  /* Short phones: compact the results so rewards (unlocks, Steini's tip) stay on screen. */
+  .res-hero {
+    gap: 10px;
+    padding-top: 0;
+  }
+  .stamp {
+    padding: 9px 22px;
+  }
   .stamp-txt {
-    font-size: clamp(56px, 19cqw, 88px);
+    font-size: clamp(50px, 16cqw, 76px);
+  }
+  .res-run-over .stamp-txt {
+    font-size: clamp(40px, 13cqw, 60px);
+  }
+  .res-topped-rope .stamp-txt {
+    font-size: clamp(46px, 15cqw, 70px);
+  }
+  .res-burst {
+    top: 44px;
   }
   .res-body {
-    gap: 10px;
+    gap: 8px;
+  }
+  .res-card.bd {
+    padding: 11px 14px 12px;
+  }
+  .bd-row {
+    padding: 3px 0;
+  }
+  .bd-total {
+    padding-top: 8px;
+  }
+  .bd-total-val {
+    font-size: 24px;
+  }
+  .rs {
+    gap: 5px;
+    padding: 9px 12px 10px;
+  }
+  .rs-val {
+    font-size: 19px;
+  }
+  .res-rank {
+    min-height: 46px;
+  }
+  .ul-card {
+    padding: 7px 10px 7px 8px;
+  }
+  .ul-art,
+  .pt-ul {
+    width: 44px;
+    height: 44px;
+  }
+  .ul-art .outfit {
+    transform: scale(0.6);
+  }
+  .ul-art .chalk-sw {
+    width: 30px;
+    height: 30px;
+  }
+  .res-actions {
+    gap: 8px;
   }
 }
 
@@ -5017,7 +5074,8 @@
   .pv-specs {
     gap: 13px;
   }
-  .pv-word {
+  .pv-word,
+  .pv-read {
     display: none;
   }
   .hud-score {
