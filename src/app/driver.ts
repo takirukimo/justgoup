@@ -2,8 +2,13 @@
 // sim event into feel: sound, chalk and dust, camera kicks and haptics. Limb releases from the
 // touch controls reach the bus directly (LimbControls emits endDrag's events), so all reactions
 // hang off the bus and fire exactly once per event, whoever produced it.
+//
+// The climber's voice goes through the audio exertion director (GameAudio.exert): it is voiced
+// only on genuinely hard moments (an overload while moving, a reach at the anatomical edge, a
+// slip, a dyno launch / catch, a deep-pump warning) with randomised cooldowns, and otherwise
+// breathes harder. Nothing here repeats a grunt on a timer.
 
-import type { SimEvent } from '../core/contracts';
+import type { RendererAPI, SimEvent } from '../core/contracts';
 import { bus } from '../core/events';
 import { clamp } from '../core/math';
 import type { ClimberState, HoldDef, LimbId, Vec2 } from '../core/types';
@@ -21,6 +26,24 @@ export interface DriverOptions {
 }
 
 const LOOK_REFRESH = 0.3;
+/** A dragged hand stretched past this fraction of its reach grabs "at the anatomical edge". */
+const REACH_EDGE = 0.95;
+/** Seconds after a limb move that an overload still counts as "while moving". */
+const MOVE_WINDOW = 1.1;
+/** Delay before the chalk-bag puff: the hand has to get to the bag first. */
+const CHALK_PUFF_DELAY = 0.42;
+const LIMB_INDEX: Record<LimbId, number> = { LH: 0, RH: 1, LF: 2, RF: 3 };
+
+/**
+ * Effects the world renderer may offer beyond RendererAPI['fx'] (used when present, otherwise the
+ * driver falls back to chalkPuff / cameraShake).
+ */
+interface FxExtras {
+  /** A hand dipping into the chalk bag (p = the bag). */
+  chalkDip?(p: Vec2, intensity?: number): void;
+  /** The chalk cloud of a hand slapping onto a hold after a dyno. */
+  catchBurst?(p: Vec2, intensity?: number): void;
+}
 
 export class SimDriver {
   readonly sim: ClimberSim;
@@ -37,9 +60,11 @@ export class SimDriver {
   private disposed = false;
 
   // feedback state
-  private lastEffort = -10;
-  private lastStrain = -10;
   private shakePulse = 0;
+  private lastMove = -10;
+  /** Furthest reach ratio of each limb during its current drag. */
+  private readonly dragReach = [0, 0, 0, 0];
+  private readonly pendingPuffs: { at: number; limb: LimbId }[] = [];
   private clock = 0;
   private lookT = LOOK_REFRESH;
   private readonly look: Vec2 = { x: 0, y: 0 };
@@ -105,6 +130,10 @@ export class SimDriver {
     this.svc.renderer.fx.cameraShake(this.svc.profile().settings.reducedMotion ? amount * 0.15 : amount);
   }
 
+  private get fx(): RendererAPI['fx'] & FxExtras {
+    return this.svc.renderer.fx as RendererAPI['fx'] & FxExtras;
+  }
+
   private pan(x: number): number {
     return clamp(x / 2.4, -1, 1) * 0.7;
   }
@@ -116,46 +145,108 @@ export class SimDriver {
     switch (e.type) {
       case 'grab': {
         const L = st.limbs[e.limb];
+        const pan = this.pan(L.pos.x);
         if (isHand(e.limb)) {
           const bad = e.quality < 0.45;
-          audio.play(bad ? 'grab-bad' : 'grab', { pan: this.pan(L.pos.x), volume: 0.75 + 0.25 * e.quality });
+          audio.play(bad ? 'grab-bad' : 'grab', { pan, volume: 0.75 + 0.25 * e.quality });
           renderer.fx.chalkPuff(L.pos, 0.45 + 0.5 * clamp(e.quality, 0, 1));
           audio.haptic(bad ? [8, 40, 8] : 10);
+          // a hand that had to stretch to the very edge of its reach for it
+          const reach = this.dragReach[LIMB_INDEX[e.limb]];
+          if (reach >= REACH_EDGE) audio.exert('reach-edge', clamp((reach - REACH_EDGE) / 0.08, 0, 1) * 0.6 + (1 - clamp(e.quality, 0, 1)) * 0.4, { pan });
         } else {
-          audio.play('foot', { pan: this.pan(L.pos.x) });
+          audio.play('foot', { pan });
           audio.haptic(6);
         }
+        this.moved(e.limb);
         this.lookT = LOOK_REFRESH;
         break;
       }
       case 'release':
         audio.play('release', { pan: this.pan(st.limbs[e.limb].pos.x), volume: 0.45 });
+        this.lastMove = this.clock;
         break;
       case 'return':
         audio.play('grab', { pan: this.pan(st.limbs[e.limb].pos.x), volume: 0.4, pitch: 0.92 });
+        this.moved(e.limb);
         break;
       case 'smear':
         audio.play('smear', { pan: this.pan(st.limbs[e.limb].pos.x) });
         audio.haptic(6);
+        this.moved(e.limb);
         break;
-      case 'slip':
-        audio.play('slip', { pan: this.pan(st.limbs[e.limb].pos.x) });
+      case 'slip': {
+        const pan = this.pan(st.limbs[e.limb].pos.x);
+        audio.play('slip', { pan });
+        audio.exert('slip', 0.7, { pan });
         this.kick(0.38);
         audio.haptic([22, 30, 22]);
         break;
-      case 'overload':
-        if (this.clock - this.lastEffort > 0.9) {
-          this.lastEffort = this.clock;
-          audio.play('effort', { volume: 0.8 });
-        }
+      }
+      case 'overload': {
+        const L = st.limbs[e.limb];
+        const moving = this.isMoving(st);
+        const sev = clamp((L.stress - 1) / 0.6, 0, 1);
+        audio.exert(moving ? 'move-overload' : 'overload', sev, { pan: this.pan(L.pos.x) });
         break;
+      }
       case 'shake-start':
-        if (this.clock - this.lastStrain > 1.2) {
-          this.lastStrain = this.clock;
-          audio.play('strain', { volume: 0.7 });
-        }
+        audio.exert('shake', clamp((st.tension - 0.7) / 0.6, 0, 1));
         audio.haptic(16);
         break;
+      case 'pump-warning':
+        audio.exert('pump-warning', clamp((e.pump - 0.7) / 0.3, 0, 1), { pan: this.pan(st.limbs[e.limb].pos.x) });
+        audio.haptic([8, 70, 8]);
+        break;
+      case 'chalk-start': {
+        const L = st.limbs[e.limb];
+        audio.play('chalk', { pan: this.pan(L.pos.x), volume: 0.85 });
+        this.pendingPuffs.push({ at: this.clock + CHALK_PUFF_DELAY, limb: e.limb });
+        break;
+      }
+      case 'chalk-done': {
+        const L = st.limbs[e.limb];
+        // blow the excess off the fingertips
+        audio.play('blow', { pan: this.pan(L.pos.x), volume: 0.55 });
+        renderer.fx.chalkPuff(L.pos, 0.28);
+        break;
+      }
+      case 'shake-out-start':
+        audio.exhale(0.75);
+        break;
+      case 'technique':
+        audio.play('tick', { pan: this.pan(st.limbs[e.limb].pos.x), volume: 0.45, pitch: e.technique === 'heel' ? 0.85 : e.technique === 'toe' ? 1.1 : 1 });
+        break;
+      case 'dyno-start':
+        audio.play('whoosh', { volume: e.kind === 'dyno' ? 0.4 : 0.26, pitch: 1.35 });
+        audio.exert('dyno-start', clamp(e.power, 0, 1.4) / 1.4);
+        audio.haptic(12);
+        this.kick(e.kind === 'dyno' ? 0.12 : 0.06);
+        for (const l of e.limbs) this.dragReach[LIMB_INDEX[l]] = 0;
+        this.lastMove = this.clock;
+        break;
+      case 'dyno-catch': {
+        const hand = e.limbs[0] ?? 'RH';
+        const L = st.limbs[hand];
+        const q = clamp(e.quality, 0, 1);
+        audio.play('catch', { pan: this.pan(L.pos.x), volume: 0.75 + 0.25 * (1 - q) });
+        if (this.fx.catchBurst) this.fx.catchBurst(L.pos, 0.6 + 0.4 * (1 - q));
+        else renderer.fx.chalkPuff(L.pos, 1.0 + 0.3 * (1 - q));
+        this.kick(0.24 + 0.3 * (1 - q) + (e.limbs.length > 1 ? 0.1 : 0));
+        audio.haptic([18, 24, 34]);
+        audio.exert('dyno-catch', 1 - q, { pan: this.pan(L.pos.x) });
+        break;
+      }
+      case 'dyno-miss': {
+        const hand = e.limbs[0] ?? 'RH';
+        const L = st.limbs[hand];
+        audio.play('grab-bad', { pan: this.pan(L.pos.x), volume: 0.9 });
+        audio.exert('dyno-miss', 1);
+        this.kick(0.22);
+        audio.haptic([20, 30, 20]);
+        // a miss with no hand left falls: the sim's 'fall' event takes the session into the fall flow
+        break;
+      }
       case 'fall':
         audio.play('fall');
         audio.haptic(40);
@@ -192,19 +283,43 @@ export class SimDriver {
     this.opts.onEvent?.(e, st);
   }
 
-  /** Feedback that depends on state, not on events: tremor haptics and a renewed strain. */
+  /** A limb finished a move (grab, smear, return): its drag is over. */
+  private moved(limb: LimbId): void {
+    this.lastMove = this.clock;
+    this.dragReach[LIMB_INDEX[limb]] = 0;
+  }
+
+  /** The player is moving: a limb is dragged, or one just moved. */
+  private isMoving(st: ClimberState): boolean {
+    if (this.clock - this.lastMove < MOVE_WINDOW) return true;
+    for (const l of LIMB_ORDER) if (st.limbs[l].dragging) return true;
+    return false;
+  }
+
+  /** Feedback that depends on state, not on events: tremor haptics, drag reach, the chalk-bag puff. */
   private continuous(dt: number): void {
     const st = this.sim.getState();
+    if (this.pendingPuffs.length) {
+      for (let i = this.pendingPuffs.length - 1; i >= 0; i--) {
+        const p = this.pendingPuffs[i];
+        if (this.clock < p.at) continue;
+        this.pendingPuffs.splice(i, 1);
+        const L = st.limbs[p.limb];
+        if (st.phase !== 'climbing') continue;
+        if (this.fx.chalkDip) this.fx.chalkDip(L.pos, 0.7);
+        else this.svc.renderer.fx.chalkPuff(L.pos, 0.6);
+      }
+    }
     if (st.phase !== 'climbing') return;
+    for (let i = 0; i < 4; i++) {
+      const L = st.limbs[LIMB_ORDER[i]];
+      if (L.dragging && L.reachRatio > this.dragReach[i]) this.dragReach[i] = L.reachRatio;
+    }
     if (st.shake > 0.05) {
       this.shakePulse -= dt;
       if (this.shakePulse <= 0) {
         this.shakePulse = 0.42 - 0.2 * clamp(st.shake, 0, 1);
         this.svc.audio.haptic(Math.round(6 + 10 * clamp(st.shake, 0, 1)));
-      }
-      if (st.tension > 0.95 && this.clock - this.lastStrain > 2.6) {
-        this.lastStrain = this.clock;
-        this.svc.audio.play('strain', { volume: 0.55 + 0.3 * clamp(st.tension - 0.95, 0, 0.5) * 2 });
       }
     } else this.shakePulse = 0;
   }
@@ -262,5 +377,7 @@ export class SimDriver {
     return true;
   }
 }
+
+const LIMB_ORDER: readonly LimbId[] = ['LH', 'RH', 'LF', 'RF'];
 
 export const LIMB_WORD: Record<LimbId, string> = { LH: 'LEFT HAND', RH: 'RIGHT HAND', LF: 'LEFT FOOT', RF: 'RIGHT FOOT' };

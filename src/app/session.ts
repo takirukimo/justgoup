@@ -105,6 +105,7 @@ export class ClimbSession {
   private clipReadyT = 0;
   private pxpm = 120;
   private pxpmT = 1;
+  private dynoKind: 'deadpoint' | 'dyno' | null = null;
 
   constructor(svc: Services, cfg: SessionConfig) {
     this.svc = svc;
@@ -185,6 +186,7 @@ export class ClimbSession {
     audio.countdownStep(0);
 
     this.phase = 'climbing';
+    audio.resetExertion();
     this.sim.start();
     controls.setEnabled(!this.paused);
     bus.emit('game:climb-start', { boulder: b });
@@ -233,6 +235,14 @@ export class ClimbSession {
         break;
       case 'clip-done':
         this.onClipped(e.quickdrawId);
+        break;
+      case 'dyno-start':
+        this.dynoKind = e.kind;
+        break;
+      case 'dyno-catch':
+        // a full double-hand dyno is a moment; deadpoints are everyday moves and stay quiet
+        if (this.dynoKind === 'dyno' && this.phase === 'climbing') this.svc.ui.hud.callout('DYNO!', 'good');
+        this.dynoKind = null;
         break;
       case 'top':
         this.guard(this.rope ? this.onRopeTop() : this.onSend(), 'send');
@@ -302,6 +312,10 @@ export class ClimbSession {
     audio.haptic([20, 40, 20, 40, 90]);
     ui.hud.callout(flash ? 'FLASH!' : 'SENT!', 'good');
     const time = this.state.time;
+    // the head's own victory call, just after the stinger
+    void this.timeline.wait(0.55).then(() => {
+      if (!this.finished) audio.play('call', { volume: 0.8 });
+    });
     await this.timeline.wait(2.6);
     this.finish({
       kind: 'send',
@@ -330,6 +344,9 @@ export class ClimbSession {
     audio.haptic([20, 40, 20, 40, 90]);
     ui.hud.callout('TOPPED!', 'good');
     renderer.setGuide({ x: this.rope!.belayer().x, depth: 1.05, pose: 'cheer', lookAt: { x: p.x, y: p.y } });
+    void this.timeline.wait(0.55).then(() => {
+      if (!this.finished) audio.play('call', { volume: 0.8 });
+    });
     await this.timeline.wait(2.8);
     this.finishRope(true);
   }

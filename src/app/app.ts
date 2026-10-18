@@ -105,6 +105,7 @@ export class App implements RunHost {
     const p = this.prof;
     this.applySettings(p.settings, false);
     this.svc.renderer.setSkin(p.head, p.colorway, p.chalk);
+    this.svc.audio.setVoice(p.head);
     this.title.enter('title');
     void this.title.prepare();
     this.wire();
@@ -409,6 +410,11 @@ export class App implements RunHost {
     }
     this.svc.renderer.setSkin(p.head, p.colorway, p.chalk);
     this.svc.audio.play('ui-confirm', { volume: 0.6 });
+    if (kind === 'head') {
+      // the new head's voice, introduced by its call
+      this.svc.audio.setVoice(p.head);
+      this.svc.audio.play('call', { volume: 0.7 });
+    }
     if (kind === 'chalk') this.svc.renderer.fx.chalkPuff(this.title.state.limbs.RH.pos, 1.2);
     this.svc.save();
     if (this.svc.ui.current === 'locker') this.svc.ui.update('locker', { profile: p });
@@ -437,6 +443,7 @@ export class App implements RunHost {
     fresh.introSeen = true;
     this.prof = fresh;
     this.svc.renderer.setSkin(fresh.head, fresh.colorway, fresh.chalk);
+    this.svc.audio.setVoice(fresh.head);
     saveProfile(fresh);
     flushProfile();
     try {
