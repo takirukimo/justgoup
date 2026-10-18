@@ -116,6 +116,16 @@ export interface LimbSnapshot {
   shake: number;
   /** Rope mode: hand temporarily busy clipping the rope. */
   busy: boolean;
+  /**
+   * Optional depth-order hint (sim → renderer). 0 = normal. > 0: in the wall plane this limb's
+   * segment (shoulder→hand / hip→foot) crosses that many other limbs' segments and passes IN FRONT
+   * of them (further from the wall): a crossover, a backstep / drop-knee, a foot stepping past a
+   * low hand. The limb that moved into the crossing is the one in front; it stays in front until
+   * the segments no longer cross. Absent when the sim doesn't compute it.
+   */
+  layer?: number;
+  /** Optional: `layer > 0` — this limb crosses in front of at least one other limb. */
+  front?: boolean;
 }
 
 export type ClimberPhase =

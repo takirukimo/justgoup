@@ -1,27 +1,33 @@
 // Beta planner: best-first search over limb moves, judged by the same static equilibrium model the
 // sim uses (statics.ts). A move is legal when the three remaining limbs can hold a body position from
 // which the moving limb reaches its target (tension under SOLVER.moveMax) and the new four-limb
-// stance settles under SOLVER.stanceMax. Search budgets are node counts (deterministic, used by the
-// generator) plus an optional wall-clock limit for interactive calls.
+// stance settles under SOLVER.stanceMax. Targets must also be anatomically legal: inside the limb's
+// reach envelope (anatomy.ts, via the pose search) and clear of the other limbs (holds.placementBlocked,
+// checked at the reach pose with a little extra margin so the sim never refuses a planned move).
+// Search budgets are node counts (deterministic, used by the generator) plus an optional wall-clock
+// limit for interactive calls.
 
 import type { BoulderDef, HoldDef, LimbId, QuickdrawDef, Vec2 } from '../core/types';
 import type { BetaMove, ClimberSimAPI } from '../core/contracts';
 import { BODY, SIM } from '../config/tuning';
 import { clamp } from '../core/math';
 import {
+  canMatch,
   clipPoint,
   contactPoint,
   LIMB_IDS,
   LIMB_INDEX,
   maxReachIdx,
   nominalCapacity,
+  placementBlocked,
   startPlacement,
   topHolds,
   usableByFoot,
   usableByHand,
 } from './holds';
-import { initialPose, makeParams, newContact, optimizePose, setContact, setSmear, StanceEval, type Contact, type Contacts, type Pose, type StaticsParams } from './statics';
+import { computeAnchors, initialPose, makeParams, newContact, optimizePose, setContact, setSmear, StanceEval, type Contact, type Contacts, type Pose, type StaticsParams } from './statics';
 import { dhypot } from './dmath';
+import { envEval } from './anatomy';
 
 /** Planner thresholds. The sim slips only above stress 1.05, so these leave a margin. */
 export const SOLVER = {
@@ -40,6 +46,9 @@ export const SOLVER = {
   /** Candidate targets kept per limb per expansion. */
   candidatesPerLimb: 7,
 } as const;
+
+/** Extra clearance (m) the planner keeps beyond the sim's self-clipping limits. */
+const PLAN_CLEARANCE_MARGIN = 0.015;
 
 /** holdId used in a beta for a foot smeared on blank wall. */
 export const SMEAR_ID = 'smear';
@@ -167,6 +176,9 @@ class Planner {
   private readonly reachCache = new Map<string, { pose: Pose; tension: number; ok: boolean }>();
   private readonly tmpPose: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
   private readonly tmpV = { x: 0, y: 0 };
+  private readonly AX = new Float64Array(4);
+  private readonly AY = new Float64Array(4);
+  private readonly tmpC = { x: 0, y: 0 };
 
   constructor(b: BoulderDef, assist: number) {
     this.b = b;
@@ -294,6 +306,34 @@ class Planner {
     };
   }
 
+  /**
+   * Is the target (contact point) of limb li legal from node n as far as anatomy and self-clipping
+   * go: inside the limb's envelope seen from the node pose, grown by `slack` (the body still moves
+   * while reaching), and not on / through another limb (holds.placementBlocked)?
+   */
+  targetOk(n: Node, li: number, hold: HoldDef | null, tx: number, ty: number, slack: number): boolean {
+    const p = n.pose;
+    computeAnchors(p, this.AX, this.AY);
+    let ux = p.cx - p.px;
+    let uy = p.cy - p.py;
+    const l = dhypot(ux, uy) || 1;
+    ux /= l;
+    uy /= l;
+    if (envEval(li, this.AX[li], this.AY[li], ux, uy, tx, ty).excess > slack) return false;
+    const contacts = this.setContacts(n, li);
+    return !placementBlocked(li, tx, ty, hold, contacts, this.AX, this.AY, PLAN_CLEARANCE_MARGIN);
+  }
+
+  /**
+   * Self-clipping check of a placement with the body in `pose` (a little stricter than the sim's,
+   * so a planned move is never refused live because the body sits a few cm elsewhere).
+   */
+  clearAt(pose: Pose, n: { slots: Slot[]; sx: number[]; sy: number[] }, li: number, hold: HoldDef | null, tx: number, ty: number): boolean {
+    computeAnchors(pose, this.AX, this.AY);
+    const contacts = this.setContacts(n, li);
+    return !placementBlocked(li, tx, ty, hold, contacts, this.AX, this.AY, PLAN_CLEARANCE_MARGIN);
+  }
+
   /** Candidate targets for limb li from node n (cheap geometric filter, best first). */
   candidates(n: Node, li: number, anchorX: number, anchorY: number): { hold: HoldDef | null; x: number; y: number; score: number }[] {
     const out: { hold: HoldDef | null; x: number; y: number; score: number }[] = [];
@@ -302,6 +342,8 @@ class Planner {
     const pair = li === 0 ? 1 : li === 1 ? 0 : li === 2 ? 3 : 2;
     const reach = maxReachIdx(li) + (hand ? 0.55 : 0.4);
     const list = hand ? this.handHolds : this.footHolds;
+    // reach slack: the body follows a hand a long way, a foot much less (it can't lift the hips)
+    const slack = hand ? 0.5 : 0.32;
     const curY = cur && cur !== 'smear' ? cur.y : hand ? anchorY : -1;
     let minHandY = Infinity;
     let maxHandY = -Infinity;
@@ -320,21 +362,25 @@ class Planner {
       if (hand) {
         if (h.y < curY - 0.3) continue;
         // matching the other hand's hold is only useful on the top (or a big jug)
-        if (n.slots[pair] === h && !this.topIds.has(h.id) && h.size < 0.09) continue;
+        if (n.slots[pair] === h && !this.topIds.has(h.id) && (h.size < 0.09 || !canMatch(li, h))) continue;
         score = (h.y - curY) * 1.6 + nominalCapacity(h, true, this.b.wallAngle) * 1.2 - d * 0.4;
         if (this.topIds.has(h.id)) score += 2;
       } else {
         if (h.y > n.pose.py - 0.12) continue;
         if (h.y < maxHandY - 2.15) continue;
-        if (n.slots[pair] === h && h.size < 0.05) continue;
+        if (n.slots[pair] === h && (h.size < 0.05 || !canMatch(li, h))) continue;
         const ideal = minHandY - 1.2;
         score = -Math.abs(h.y - ideal) * 1.4 + nominalCapacity(h, false, this.b.wallAngle) * 0.35 + (h.y - curY) * 0.5 - Math.abs(h.x - n.pose.px) * 0.4;
       }
+      const cp = contactPoint(h, li, n.slots[pair] === h, this.tmpC);
+      if (!this.targetOk(n, li, h, cp.x, cp.y, slack)) continue;
       out.push({ hold: h, x: h.x, y: h.y, score });
     }
     if (!hand && this.smearOk) {
       const side = li === 2 ? -1 : 1;
-      out.push({ hold: null, x: n.pose.px + side * 0.16, y: Math.max(0.35, minHandY - 1.25), score: -1.2 });
+      const sx = n.pose.px + side * 0.16;
+      const sy = Math.max(0.35, minHandY - 1.25);
+      if (this.targetOk(n, li, null, sx, sy, slack)) out.push({ hold: null, x: sx, y: sy, score: -1.2 });
     }
     out.sort((a, c) => c.score - a.score);
     if (out.length > SOLVER.candidatesPerLimb) out.length = SOLVER.candidatesPerLimb;
@@ -375,6 +421,8 @@ class Planner {
         }
         const r = this.reach(n, li, tx, ty, `${subKey}>${li}:${c.hold ? c.hold.id : `s${sx[li]},${sy[li]}`}`);
         if (!r.ok) continue;
+        // the sim checks self-clipping where the limb is released, i.e. around the reach pose
+        if (!this.clearAt(r.pose, n, li, c.hold, tx, ty)) continue;
         const prevSlot = n.slots[li];
         let fromX = a.x;
         let fromY = a.y;
@@ -458,6 +506,8 @@ export class StanceLab {
   reach(slots: (HoldDef | null)[], li: number, target: HoldDef, pose: Pose): { pose: Pose; tension: number; ok: boolean } {
     const pair = li === 0 ? 1 : li === 1 ? 0 : li === 2 ? 3 : 2;
     const tp = contactPoint(target, li, slots[pair] === target, { x: 0, y: 0 });
+    // the same anatomy / self-clipping rules the sim applies to a placement
+    if (slots[pair] === target && !canMatch(li, target)) return { pose, tension: Infinity, ok: false };
     const node = {
       slots,
       sx: this.empty,
@@ -471,6 +521,7 @@ export class StanceLab {
       step: null,
       depth: 0,
     } as Node;
+    if (!this.p.targetOk(node, li, target, tp.x, tp.y, li < 2 ? 0.5 : 0.32)) return { pose, tension: Infinity, ok: false };
     return this.p.reach(node, li, tp.x, tp.y, `lab${this.seq++}`);
   }
 
@@ -508,12 +559,17 @@ function startSlots(p: Planner, ids: (string | null)[], b: BoulderDef, pose: Pos
   return { slots, sx, sy };
 }
 
-/** Rope: find, along the beta, a stance from which each quickdraw (in order) can be clipped. */
-function planClips(planner: Planner, steps: PlanStep[]): number {
+/**
+ * Rope: find, along the beta, a stance from which each quickdraw (in order) can be clipped. Draws in
+ * `clipped` are already in (a re-plan from a live climb); returns the number of draws that are
+ * clipped or have a planned clip.
+ */
+function planClips(planner: Planner, steps: PlanStep[], clipped: readonly string[] = []): number {
   const draws = planner.b.mode === 'rope' ? planner.b.quickdraws ?? [] : [];
   if (!draws.length) return 0;
   const cp = { x: 0, y: 0 };
   let qi = 0;
+  while (qi < draws.length && clipped.includes(draws[qi].id)) qi++;
   for (let k = 0; k < steps.length && qi < draws.length; k++) {
     const n = STEP_NODE.get(steps[k]);
     if (!n) continue;
@@ -572,7 +628,7 @@ export function planBetaDetailed(boulder: BoulderDef, opts: PlanOptions & { goal
   // Short problems: one search to the top. Tall routes: stages of STAGE metres.
   if (planner.topY - handY(root) <= STAGE + 1.4) {
     const r = searchFrom(planner, root, totalNodes, maxMs, t0, root);
-    if (r && rope) r.clipsPlanned = planClips(planner, r.steps);
+    if (r && rope) r.clipsPlanned = planClips(planner, r.steps, opts.clipped);
     return r;
   }
   const steps: PlanStep[] = [];
@@ -589,7 +645,7 @@ export function planBetaDetailed(boulder: BoulderDef, opts: PlanOptions & { goal
     nodes += r.nodes;
     steps.push(...r.steps);
     if (final) {
-      const clipsPlanned = planClips(planner, steps);
+      const clipsPlanned = planClips(planner, steps, opts.clipped);
       return { moves: steps.map((s) => s.move), steps, startTension: root.tension, startPose: root.pose, nodes, ms: now() - t0, clipsPlanned };
     }
     // continue from the stage's final stance

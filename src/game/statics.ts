@@ -10,12 +10,17 @@
 // The out-of-plane balance (side view) adds the "keep-in" pull the hands need to stop the body
 // from toppling off the wall: Nₕ = (d·cos θ + sin θ·(y_com − y_feet)) / (y_hands − y_feet).
 // On overhangs the feet must toe-pull (Nf < 0), which lowers their capacity.
+// Anatomy (anatomy.ts): each contact is measured against its limb's reach envelope in the pose's
+// body frame — ratio[] / excess[] — and gets an anatomical strain on top of its stress (awkward
+// edge → harder work, past the edge → pops off). poseViolation() keeps every limb (and a dragged
+// limb's target) inside its envelope, so the pose search never targets an illegal pose.
 
 import type { HoldDef } from '../core/types';
 import { BODY, GAME, SIM } from '../config/tuning';
 import { clamp, DEG, smoothstep } from '../core/math';
-import { contactPoint, footCapacity, handCapacity, isHandIdx, maxReachIdx, type GripContext } from './holds';
+import { contactPoint, footCapacity, handCapacity, isHandIdx, type GripContext } from './holds';
 import { dcos, dsin } from './dmath';
+import { envEval } from './anatomy';
 
 export interface Pose {
   px: number;
@@ -69,6 +74,17 @@ export interface StaticsParams {
   reachLimb: number;
   reachX: number;
   reachY: number;
+  /**
+   * Highest pelvis y the pose search may use (Infinity = free). A dragged foot never lifts the body:
+   * the live sim caps the reach posture at the current pelvis height.
+   */
+  maxPelvisY: number;
+  /**
+   * How far (m) inside its envelope the reaching limb's target should end up. 0 for the planner
+   * (bare anatomical limit); the live climber reaches SIM.reachComfort deeper, so a release over the
+   * hold never sits on the edge of the snap range.
+   */
+  reachMargin: number;
   /** Cached trig of wallAngle (refreshed automatically when wallAngle changes). */
   trigAngle: number;
   cth: number;
@@ -83,6 +99,8 @@ export function makeParams(wallAngle: number, assist = 0, pump = 0): StaticsPara
     reachLimb: -1,
     reachX: 0,
     reachY: 0,
+    maxPelvisY: Infinity,
+    reachMargin: 0,
     trigAngle: wallAngle,
     cth: dcos(wallAngle * DEG),
     sth: dsin(wallAngle * DEG),
@@ -93,7 +111,12 @@ export class StanceEval {
   readonly load = new Float64Array(4);
   readonly cap = new Float64Array(4);
   readonly stress = new Float64Array(4);
+  /** Envelope ratio r / r(φ) per contact (anatomy.ts): ≥ 1 at the anatomical edge. */
   readonly ratio = new Float64Array(4);
+  /** Conservative distance (m) of each contact outside its limb's envelope. */
+  readonly excess = new Float64Array(4);
+  /** Anatomical strain (extra stress) of each contact's limb position. */
+  readonly edge = new Float64Array(4);
   readonly ax = new Float64Array(4);
   readonly ay = new Float64Array(4);
   /** In-plane force each contact applies to the body (body weights), full and axial-only. */
@@ -116,6 +139,11 @@ export class StanceEval {
   torque = 0;
   comX = 0;
   comY = 0;
+  /** Unit body-up (chest − pelvis) of the evaluated pose. */
+  ux = 0;
+  uy = 1;
+  /** Envelope excess (m) of the reach target of the dragged limb (0 when none). */
+  reachExcess = 0;
   depth = 0.25;
   handsOn = 0;
   feetOn = 0;
@@ -206,6 +234,20 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
   const comY = pose.py + BODY.comT * (pose.cy - pose.py);
   out.comX = comX;
   out.comY = comY;
+  let ux = pose.cx - pose.px;
+  let uy = pose.cy - pose.py;
+  {
+    const l = sq(ux, uy);
+    if (l > 1e-9) {
+      ux /= l;
+      uy /= l;
+    } else {
+      ux = 0;
+      uy = 1;
+    }
+  }
+  out.ux = ux;
+  out.uy = uy;
 
   let nh = 0;
   let nf = 0;
@@ -231,11 +273,16 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
     out.fay[i] = 0;
     if (!c) {
       out.ratio[i] = 0;
+      out.excess[i] = 0;
+      out.edge[i] = 0;
       continue;
     }
-    const d = sq(c.x - ax[i], c.y - ay[i]);
-    const r = d / maxReachIdx(i);
+    const en = envEval(i, ax[i], ay[i], ux, uy, c.x, c.y);
+    const d = en.r;
+    const r = en.ratio;
     out.ratio[i] = r;
+    out.excess[i] = en.excess;
+    out.edge[i] = en.edge;
     if (c.x < cMin) cMin = c.x;
     if (c.x > cMax) cMax = c.x;
     cSum += c.x;
@@ -447,7 +494,7 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
       load = sq(load, Nh * share);
     }
     out.load[i] = load;
-    const s = load / out.cap[i];
+    const s = load / out.cap[i] + out.edge[i];
     out.stress[i] = s;
     if (s > worstStress) {
       worstStress = s;
@@ -481,6 +528,13 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
     amt = clamp(amt, 0, 1) * (nAttached >= 4 ? 0.5 : 1);
     out.barn = (lateral >= 0 ? 1 : -1) * amt;
     out.barnPen = SIM.barnPenalty * amt;
+  } else if (nh === 1 && nf === 0) {
+    // hanging off one hand with no feet: the body swings open about the hand (more on overhangs);
+    // with the left hand on, the right side swings away (+), and vice versa
+    const lh = contacts[0] !== null;
+    const amt = clamp(0.7 + 0.4 * (sth > 0 ? sth : 0), 0, 1);
+    out.barn = (lh ? 1 : -1) * amt;
+    out.barnPen = SIM.barnPenalty * 0.25 * amt;
   } else {
     out.barn = 0;
     out.barnPen = 0;
@@ -493,12 +547,18 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
   // ── core torque ──
   out.corePen = SIM.corePenalty * smoothstep(0.06, 0.3, Math.abs(tau));
 
-  // ── reach strain of a dragged limb ──
+  // ── reach strain of a dragged limb (beyond its anatomical envelope) ──
   if (prm.reachLimb >= 0) {
     const i = prm.reachLimb;
-    const r = sq(prm.reachX - ax[i], prm.reachY - ay[i]) / maxReachIdx(i);
-    out.reachPen = SIM.reachStrain * smoothstep(1.0, 1.2, r);
-  } else out.reachPen = 0;
+    const en = envEval(i, ax[i], ay[i], ux, uy, prm.reachX, prm.reachY);
+    const m = prm.reachMargin;
+    out.reachExcess = m > 0 ? (en.over > 0 ? en.excess + m : Math.max(0, en.r - (en.rMax - m))) : en.excess;
+    // a foot pressing against its limit strains less than an arm hauling the body after it
+    out.reachPen = SIM.reachStrain * (isHandIdx(i) ? 1 : 0.5) * smoothstep(1.0, 1.15, en.ratio);
+  } else {
+    out.reachPen = 0;
+    out.reachExcess = 0;
+  }
 
   out.tension = worstStress + out.balancePen + out.barnPen + out.stretchPen + out.corePen + out.reachPen;
   return out;
@@ -551,22 +611,27 @@ export function placeChest(p: Pose, contacts: Contacts, prm: StaticsParams, lean
 
 const minPelvisY = GAME.padHeight + 0.42;
 
-/** Constraint violation (m) of a pose for the given contacts (+ optional reach target). */
+/**
+ * Constraint violation (m) of a pose for the given contacts (+ optional reach target): every limb
+ * inside its anatomical reach envelope (anatomy.ts), folded limbs no shorter than their in-plane
+ * minimum, the pelvis above the pad (and under prm.maxPelvisY).
+ */
 export function poseViolation(contacts: Contacts, prm: StaticsParams, ev: StanceEval, py: number): number {
   let v = 0;
   for (let i = 0; i < 4; i++) {
     const c = contacts[i];
     if (!c) continue;
-    const d = ev.ratio[i] * maxReachIdx(i);
-    if (isHandIdx(i)) v += Math.max(0, d - BODY.armMax) + Math.max(0, SIM.armMinPlane - d);
-    else v += Math.max(0, d - BODY.legMax) + Math.max(0, SIM.legMinPlane - d);
+    v += ev.excess[i];
+    const d = sq(c.x - ev.ax[i], c.y - ev.ay[i]);
+    v += Math.max(0, (isHandIdx(i) ? SIM.armMinPlane : SIM.legMinPlane) - d);
   }
   if (prm.reachLimb >= 0) {
     const i = prm.reachLimb;
     const d = sq(prm.reachX - ev.ax[i], prm.reachY - ev.ay[i]);
-    v += Math.max(0, d - maxReachIdx(i)) + Math.max(0, (isHandIdx(i) ? SIM.armMinPlane : SIM.legMinPlane) + 0.03 - d);
+    v += ev.reachExcess + Math.max(0, (isHandIdx(i) ? SIM.armMinPlane : SIM.legMinPlane) + 0.03 - d);
   }
   v += Math.max(0, minPelvisY - py);
+  if (py > prm.maxPelvisY) v += py - prm.maxPelvisY;
   return v;
 }
 
@@ -589,6 +654,8 @@ const DIRS = [
 ] as const;
 
 function costAt(px: number, py: number, lean: number, contacts: Contacts, prm: StaticsParams, ev: StanceEval, res: OptimizeResult): number {
+  // a hard ceiling (a reaching foot can't lift the hips): the search slides along it
+  if (py > prm.maxPelvisY) py = prm.maxPelvisY;
   TRY.px = px;
   TRY.py = py;
   placeChest(TRY, contacts, prm, lean);

@@ -4,6 +4,7 @@ import type { BoulderDef, HoldDef, HoldType, LimbId, QuickdrawDef, Vec2 } from '
 import { BODY, GAME, SIM } from '../config/tuning';
 import { clamp, DEG } from '../core/math';
 import { dcos, dsin } from './dmath';
+import { envEval, pointSegDist } from './anatomy';
 
 export const LIMB_IDS: readonly LimbId[] = ['LH', 'RH', 'LF', 'RF'];
 export const LIMB_INDEX: Readonly<Record<LimbId, number>> = { LH: 0, RH: 1, LF: 2, RF: 3 };
@@ -23,8 +24,93 @@ export function usableBy(limbIdx: number, h: HoldDef): boolean {
   return isHandIdx(limbIdx) ? usableByHand(h) : usableByFoot(h);
 }
 
+/** Longest reach of a limb in any direction (its envelope's maximum, see anatomy.ts). */
 export function maxReachIdx(limbIdx: number): number {
   return isHandIdx(limbIdx) ? BODY.armMax : BODY.legMax;
+}
+
+/**
+ * Can limb `limbIdx` share `h` with its pair limb (two hands / two feet on one hold)? Matching needs
+ * room: no hand matches on a small edge or a one-finger pocket, no two feet on a tiny chip. The top
+ * hold can always be matched (that's how a problem is sent).
+ */
+export function canMatch(limbIdx: number, h: HoldDef): boolean {
+  if (isHandIdx(limbIdx)) return h.role === 'top' || h.size >= (h.type === 'pocket' ? 0.06 : 0.045);
+  return h.type === 'volume' || h.size >= 0.04;
+}
+
+/** Contact of an attached limb, as far as the self-clipping rules care. */
+export interface LimbContact {
+  x: number;
+  y: number;
+  hold: HoldDef | null;
+}
+
+/** Length (m) of another limb's segment, from its wall end, that a placement must keep clear of. */
+const NEAR_SEGMENT = 0.3;
+
+/**
+ * Self-clipping rule shared by the sim and the planner: can limb `li` be put on contact point (x, y)
+ * of hold `hold` (null = smear) while the other limbs hold `contacts` (null = free) with root joints
+ * (ax, ay)? Blocked when
+ *  • a hand would grab below every attached foot (less than SIM.handAboveFeet above them),
+ *  • the hold is taken by a limb other than the pair limb (hands and feet never share a hold), or by
+ *    the pair limb when the hold is too small to match,
+ *  • the point is within SIM.handFootGap of a foot (for a hand) / of a hand (for a foot),
+ *  • the point lies on another limb's segment near its wall end (within SIM.limbClearance of the last
+ *    0.3 m before its contact): the limb would have to pass through it — e.g. a hand slipping under
+ *    the other forearm, or a foot under the other shin.
+ * Crossing a limb higher up (near its root, away from the wall) is fine: the crossing limb goes in
+ * front. The pair limb matching the same hold is exempt.
+ */
+export function placementBlocked(
+  li: number,
+  x: number,
+  y: number,
+  hold: HoldDef | null,
+  contacts: readonly (LimbContact | null)[],
+  ax: ArrayLike<number>,
+  ay: ArrayLike<number>,
+  /** Extra clearance (m) on top of the SIM limits (the planner keeps a margin). */
+  margin = 0,
+): boolean {
+  const pair = li ^ 1;
+  const hand = isHandIdx(li);
+  const gap = SIM.handFootGap + margin;
+  const clear = SIM.limbClearance + margin;
+  if (hand) {
+    // a hand never grabs below both feet (wall up; a tilted torso doesn't change where "down" is)
+    let feet = 0;
+    let below = 0;
+    for (let k = 2; k < 4; k++) {
+      const c = contacts[k];
+      if (!c) continue;
+      feet++;
+      if (y < c.y + SIM.handAboveFeet + margin) below++;
+    }
+    if (feet > 0 && below === feet) return true;
+  }
+  for (let k = 0; k < 4; k++) {
+    if (k === li) continue;
+    const c = contacts[k];
+    if (!c) continue;
+    if (hold && c.hold === hold) {
+      if (k === pair && canMatch(li, hold)) continue;
+      return true;
+    }
+    const dx = x - c.x;
+    const dy = y - c.y;
+    if (isHandIdx(k) !== hand && dx * dx + dy * dy < gap * gap) return true;
+    let sx = ax[k] - c.x;
+    let sy = ay[k] - c.y;
+    const sl = Math.sqrt(sx * sx + sy * sy);
+    if (sl > NEAR_SEGMENT) {
+      sx *= NEAR_SEGMENT / sl;
+      sy *= NEAR_SEGMENT / sl;
+    }
+    if (pointSegDist(x, y, c.x, c.y, c.x + sx, c.y + sy) < clear) return true;
+  }
+  return false;
 }
 
 /**
@@ -195,6 +281,14 @@ export function startPlacement(b: BoulderDef): (string | null)[] {
   if (sf?.RF && byId.get(sf.RF) && usableByFoot(byId.get(sf.RF)!)) out[3] = sf.RF;
   if (out[2] && out[3]) return out;
 
+  // Feet must sit inside the leg envelopes of a plausible start stance: pelvis below the hands (as
+  // ClimberSim / the planner settle it), upright torso. The pose search adapts the body afterwards,
+  // so a generous tolerance; feet far above the hips or crossed far under the body are skipped.
+  const inLegReach = (h: HoldDef, li: number): boolean => {
+    const hipX = hx + (li === 2 ? -BODY.hipHalf : BODY.hipHalf);
+    const py = Math.max(GAME.padHeight + 0.42, clamp(h.y + 0.62, hy - 1.15, hy - 0.35));
+    return envEval(li, hipX, py, 0, 1, h.x, h.y).excess <= 0.12;
+  };
   const cand = b.holds.filter(
     (h) => usableByFoot(h) && h.y > 0.08 && h.y < hy - 0.55 && h.y > hy - 2.0 && Math.abs(h.x - hx) < 1.0 && h.id !== out[0] && h.id !== out[1],
   );
@@ -208,6 +302,7 @@ export function startPlacement(b: BoulderDef): (string | null)[] {
     let bs = -Infinity;
     for (const h of cand) {
       if (h.id === exclude) continue;
+      if (!inLegReach(h, side < 0 ? 2 : 3)) continue;
       const s = score(h, side);
       if (s > bs) {
         bs = s;
@@ -221,11 +316,11 @@ export function startPlacement(b: BoulderDef): (string | null)[] {
   // A single big foothold can take both feet.
   if (!out[3] && out[2]) {
     const h = byId.get(out[2])!;
-    if (h.size >= 0.05) out[3] = out[2];
+    if (h.size >= 0.05 && canMatch(3, h) && inLegReach(h, 3)) out[3] = out[2];
   }
   if (!out[2] && out[3]) {
     const h = byId.get(out[3])!;
-    if (h.size >= 0.05) out[2] = out[3];
+    if (h.size >= 0.05 && canMatch(2, h) && inLegReach(h, 2)) out[2] = out[3];
   }
   return out;
 }

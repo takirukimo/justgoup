@@ -20,10 +20,16 @@
  *     first), and while a limb is dragged the posture follows the reach. Its strength fades with the
  *     grade (full up to V3, SIM.postureHardFrac at V11+; assist restores it), so hard problems need
  *     deliberate weight shifts with the hip handle,
- *   • a reach pull: a dragged limb reaching beyond 95 % of its range drags the whole body after it,
- * then projects position constraints (PBD): spine length, arms as one-sided ropes (≤ armMax), legs
- * ≤ legMax, and soft in-plane minimums (SIM.armMinPlane / legMinPlane: shoulders and hips sit off
- * the wall, so a folded limb projects short). Velocities come from the projected positions.
+ *   • a reach pull: a dragged limb reaching beyond 95 % of its anatomical range drags the whole body
+ *     after it — a hand anywhere, a foot only toward targets below or out to the side (a leg in the
+ *     air can't lift the hips),
+ * then projects position constraints (PBD): spine length, every attached hand / foot inside its
+ * ANATOMICAL REACH ENVELOPE around the shoulder / hip (anatomy.ts: a foot never above ~0.33 m over
+ * the hip and never straight up, a hand only a little way across the chest or down past the hips;
+ * a contact that would leave it moves the chest / pelvis instead, a fresh grab at the edge of the
+ * snap range eases the body in over SOFT_ATTACH), and soft in-plane minimums (SIM.armMinPlane /
+ * legMinPlane: shoulders and hips sit off the wall, so a folded limb projects short). Velocities
+ * come from the projected positions.
  * (The original "legs as rest-length springs" idea was replaced by the statically solved support:
  * radial leg springs push an off-centre body further sideways, an inverted-pendulum runaway.)
  *
@@ -60,6 +66,16 @@
  * GAME.clipRadius is busy for GAME.clipTime, then 'clip-done' and it returns to its hold;
  * clipping the last quickdraw (the anchor) tops a lead route.
  *
+ * ── Anatomy & self-clipping ──────────────────────────────────────────────────────────
+ * Every reach decision (drag clamp, snapCandidate, reachableHolds, predictGrip, clipCandidate,
+ * returning a limb, start feet) uses the envelopes in the current body frame; the statics add an
+ * anatomical strain to a limb near an awkward edge (deep high step, crossover, hand far down) and a
+ * large one past the edge, so a limb forced beyond it pops off. Placements obey holds.placementBlocked
+ * (hands and feet never share a hold or a spot, no hand below both feet, no limb slipped under another
+ * one near the wall, matching only where there's room). Crossing limb segments get a sticky depth
+ * order (LimbSnapshot.layer / front: the limb that moved into the crossing is in front) for the
+ * renderer. reachEnvelope(limb) gives the input layer the reach boundary to draw.
+ *
  * ── Conventions ──────────────────────────────────────────────────────────────────────
  * bodyYaw > 0: the climber's right side swings away from the wall (body opens to the right,
  * e.g. a barn-door with the contacts on the left). getState() returns the same object every
@@ -71,16 +87,20 @@ import type { ClimberSimAPI, FallReason, SimEvent, SimOptions } from '../core/co
 import { BODY, GAME, SIM } from '../config/tuning';
 import { clamp, clamp01, damp, DEG, smoothstep } from '../core/math';
 import {
+  canMatch,
   clipPoint,
   contactPoint,
   LIMB_IDS,
   LIMB_INDEX,
   maxReachIdx,
+  placementBlocked,
   startPlacement,
+  type LimbContact,
   topHolds,
   usableByFoot,
   usableByHand,
 } from './holds';
+import { anatomicStrain, envClamp, envelopePolygon, envEval, envProject, PROJ_OUT, segmentsCross } from './anatomy';
 import {
   computeAnchors,
   evaluateStance,
@@ -129,12 +149,16 @@ interface LimbRt {
   overloaded: boolean;
   /** Attachment age (s) – fresh grabs ramp their load in. */
   age: number;
+  /** Distance (m) the contact sat outside the envelope when it attached (eased away, see SOFT_ATTACH). */
+  attachGap: number;
   /** Smoothed support force this contact applies to the body (body weights). */
   sfx: number;
   sfy: number;
   /** Good direction of the held hold (cos, sin of its angle); (0, −1) for a smear. */
   hx: number;
   hy: number;
+  /** Move counter value of this limb's last lift / placement (newest crossing limb goes in front). */
+  stamp: number;
 }
 
 export interface SimStats {
@@ -155,6 +179,12 @@ const H = 1 / GAME.simHz;
 const MP = 1 - BODY.comT;
 const MC = BODY.comT;
 const MIN_PELVIS_Y = GAME.padHeight + 0.42;
+/**
+ * A limb grabbed at the edge of its snap range (up to SIM.reachTolerance outside its envelope) eases
+ * the body into reach over this many seconds instead of one hard projection (the allowed gap shrinks
+ * linearly to 0; it never grows), and meanwhile being past the edge doesn't count toward popping off.
+ */
+const SOFT_ATTACH = 0.25;
 
 function newLimb(): LimbRt {
   return {
@@ -183,10 +213,12 @@ function newLimb(): LimbRt {
     slipT: 0,
     overloaded: false,
     age: 0,
+    attachGap: 0,
     sfx: 0,
     sfy: 0,
     hx: 0,
     hy: -1,
+    stamp: 0,
   };
 }
 
@@ -205,8 +237,20 @@ function snapshot(id: LimbId): LimbSnapshot {
     smearing: false,
     shake: 0,
     busy: false,
+    layer: 0,
+    front: false,
   };
 }
+
+/** Limb pairs whose segments are checked for crossings (depth-order hint for the renderer). */
+const CROSS_PAIRS: readonly (readonly [number, number])[] = [
+  [0, 1],
+  [2, 3],
+  [0, 2],
+  [0, 3],
+  [1, 2],
+  [1, 3],
+];
 
 export class ClimberSim implements ClimberSimAPI {
   readonly boulder: BoulderDef;
@@ -266,6 +310,13 @@ export class ClimberSim implements ClimberSimAPI {
   private reachTick = 0;
   private readonly leanPose: Pose = { px: 0, py: 1, cx: 0, cy: 1.5 };
   private readonly clipped: string[] = [];
+  /** Per CROSS_PAIRS entry: 0 = not crossing, 1 = first limb in front, 2 = second limb in front. */
+  private readonly cross = new Int8Array(CROSS_PAIRS.length);
+  private stampSeq = 0;
+  /** Pelvis height when the current foot drag began (the reach posture may not lift above it). */
+  private reachCapY = 0;
+  /** Residual envelope violation (m) of each attached limb after the last PBD projection. */
+  private readonly envResidual = new Float64Array(4);
 
   // falling / rope
   private ropeAnchor: Vec2 | null = null;
@@ -375,6 +426,14 @@ export class ClimberSim implements ClimberSimAPI {
     return this.stats;
   }
 
+  /**
+   * Optional extra: how far (m) each attached limb's contact sits outside its anatomical envelope
+   * after the last constraint projection (≈ 0; > 0 only while contacts conflict). Index 0 LH … 3 RF.
+   */
+  envelopeViolation(): Readonly<Float64Array> {
+    return this.envResidual;
+  }
+
   /** Optional extra: current hold id per limb (null = free / smearing). */
   placement(): Record<LimbId, string | null> {
     return {
@@ -407,6 +466,8 @@ export class ClimberSim implements ClimberSimAPI {
     L.ty = L.py;
     L.slipT = 0;
     L.overloaded = false;
+    L.stamp = ++this.stampSeq;
+    if (i >= 2) this.reachCapY = this.P.y;
     if (held && i < 2) this.refreshMatch();
     if (wasAttached) this.events.push({ type: 'release', limb, holdId: held ? held.id : null });
     this.retarget();
@@ -459,9 +520,8 @@ export class ClimberSim implements ClimberSimAPI {
       this.stats.moves++;
       out.push({ type: 'grab', limb, holdId: hold.id, quality });
       if (i < 2 && this.topIds.has(hold.id)) out.push({ type: 'top-touch', limb });
-    } else if (i >= 2 && this.boulder.wallAngle <= SIM.smearMaxAngle) {
-      const a = this.anchorOf(i);
-      const c = this.clampToReach(p.x, p.y, a.x, a.y, BODY.legMax);
+    } else if (i >= 2 && this.boulder.wallAngle <= SIM.smearMaxAngle && this.smearSpot(i, p.x, p.y)) {
+      const c = this.smearTmp;
       this.attachSmear(i, c.x, c.y);
       this.stats.moves++;
       out.push({ type: 'smear', limb });
@@ -494,16 +554,16 @@ export class ClimberSim implements ClimberSimAPI {
   snapCandidate(limb: LimbId, p: Vec2): HoldDef | null {
     const i = LIMB_INDEX[limb];
     const list = i < 2 ? this.handHolds : this.footHolds;
-    const a = this.anchorOf(i);
-    const reach = maxReachIdx(i) + SIM.reachTolerance;
-    const tmp = { x: 0, y: 0 };
+    this.frameNow();
+    const tmp = this.qTmp;
     let best: HoldDef | null = null;
     let bestD = Infinity;
     for (const h of list) {
       const d = Math.hypot(p.x - h.x, p.y - h.y) - h.size;
       if (d > GAME.snapRadius || d >= bestD) continue;
       contactPoint(h, i, this.wouldMatch(i, h), tmp);
-      if (Math.hypot(tmp.x - a.x, tmp.y - a.y) > reach) continue;
+      if (!this.reachOk(i, tmp.x, tmp.y, SIM.reachTolerance)) continue;
+      if (this.blocked(i, tmp.x, tmp.y, h)) continue;
       best = h;
       bestD = d;
     }
@@ -524,12 +584,13 @@ export class ClimberSim implements ClimberSimAPI {
       }
     let best: QuickdrawDef | null = null;
     let bestD = Infinity;
+    const u = this.frameNow();
     for (const q of this.draws) {
       if (this.clipped.includes(q.id)) continue;
       clipPoint(q, cp);
       const d = Math.hypot(p.x - cp.x, p.y - cp.y);
       if (d > GAME.clipRadius) continue;
-      if (Math.hypot(cp.x - a.x, cp.y - a.y) > BODY.armMax + GAME.clipRadius) continue;
+      if (envEval(i, a.x, a.y, u.x, u.y, cp.x, cp.y).excess > GAME.clipRadius) continue;
       const score = q === next ? d - 0.5 : d;
       if (score < bestD) {
         bestD = score;
@@ -545,18 +606,19 @@ export class ClimberSim implements ClimberSimAPI {
     const i = LIMB_INDEX[limb];
     if (i < 2 ? !usableByHand(h) : !usableByFoot(h)) return 0;
     this.buildContacts();
-    const a = this.anchorOf(i);
+    this.frameNow();
     const c = this.contactObjs[i];
     const saved = this.contacts[i];
     const matched = this.wouldMatch(i, h);
     setContact(c, h, i, matched);
-    if (Math.hypot(c.x - a.x, c.y - a.y) > maxReachIdx(i) + SIM.reachTolerance) {
+    if (!this.reachOk(i, c.x, c.y, SIM.reachTolerance) || this.blocked(i, c.x, c.y, h)) {
       this.contacts[i] = saved;
       return 0;
     }
     this.contacts[i] = c;
     this.prmScratch.pump = this.pump;
     this.prmScratch.reachLimb = -1;
+    this.prmScratch.maxPelvisY = Infinity;
     const ev = evaluateStance(this.pose, this.contacts, this.prmScratch, this.evScratch);
     this.contacts[i] = saved;
     const capRef = i < 2 ? 0.7 : 1.2;
@@ -568,15 +630,26 @@ export class ClimberSim implements ClimberSimAPI {
   reachableHolds(limb: LimbId): string[] {
     const i = LIMB_INDEX[limb];
     const list = i < 2 ? this.handHolds : this.footHolds;
-    const a = this.anchorOf(i);
-    const reach = maxReachIdx(i) + SIM.reachTolerance;
-    const tmp = { x: 0, y: 0 };
+    this.frameNow();
+    const tmp = this.qTmp;
     const out: string[] = [];
     for (const h of list) {
-      contactPoint(h, i, false, tmp);
-      if (Math.hypot(tmp.x - a.x, tmp.y - a.y) <= reach) out.push(h.id);
+      contactPoint(h, i, this.wouldMatch(i, h), tmp);
+      if (this.reachOk(i, tmp.x, tmp.y, SIM.reachTolerance) && !this.blocked(i, tmp.x, tmp.y, h)) out.push(h.id);
     }
     return out;
+  }
+
+  /**
+   * Optional extra (not in ClimberSimAPI): the limb's reach boundary right now, wall-local — its
+   * anatomical envelope (anatomy.ts) around the current shoulder / hip in the current body frame,
+   * grown by the snap tolerance. out[0] is the anchor; the polygon closes back to it. Reuses `out`.
+   */
+  reachEnvelope(limb: LimbId, out: Vec2[] = []): Vec2[] {
+    const i = LIMB_INDEX[limb];
+    const u = this.frameNow();
+    const a = this.anchorOf(i);
+    return envelopePolygon(i, a, u, out, SIM.reachTolerance);
   }
 
   limbAnchor(limb: LimbId): Vec2 {
@@ -654,12 +727,55 @@ export class ClimberSim implements ClimberSimAPI {
     return other.hold === h && !other.dragging;
   }
 
-  private clampToReach(x: number, y: number, ax: number, ay: number, r: number): Vec2 {
-    const dx = x - ax;
-    const dy = y - ay;
-    const d = Math.hypot(dx, dy);
-    if (d <= r || d < 1e-9) return { x, y };
-    return { x: ax + (dx / d) * r, y: ay + (dy / d) * r };
+  private readonly qTmp = { x: 0, y: 0 };
+  private readonly upTmp = { x: 0, y: 1 };
+  /** Body-up unit vector of the current pose (also refreshes this.ax / this.ay). */
+  private frameNow(): Vec2 {
+    this.syncPose();
+    computeAnchors(this.pose, this.ax, this.ay);
+    const dx = this.C.x - this.P.x;
+    const dy = this.C.y - this.P.y;
+    const l = Math.hypot(dx, dy);
+    if (l > 1e-9) {
+      this.upTmp.x = dx / l;
+      this.upTmp.y = dy / l;
+    } else {
+      this.upTmp.x = 0;
+      this.upTmp.y = 1;
+    }
+    return this.upTmp;
+  }
+
+  /** Is (x, y) inside limb i's envelope (grown by tol) in the frame last set by frameNow()? */
+  private reachOk(i: number, x: number, y: number, tol: number): boolean {
+    return envEval(i, this.ax[i], this.ay[i], this.upTmp.x, this.upTmp.y, x, y).excess <= tol;
+  }
+
+  /** Self-clipping: would limb i on (x, y) / hold h overlap another limb? (frame from frameNow()). */
+  private blocked(i: number, x: number, y: number, h: HoldDef | null): boolean {
+    for (let k = 0; k < 4; k++) {
+      const L = this.limbs[k];
+      if (k !== i && (L.hold || L.smear) && !L.dragging && !L.busy) {
+        const c = this.clipObjs[k];
+        c.hold = L.hold;
+        c.x = L.cx;
+        c.y = L.cy;
+        this.clipContacts[k] = c;
+      } else this.clipContacts[k] = null;
+    }
+    return placementBlocked(i, x, y, h, this.clipContacts, this.ax, this.ay);
+  }
+  private readonly clipObjs: LimbContact[] = [0, 1, 2, 3].map(() => ({ x: 0, y: 0, hold: null }));
+  private readonly clipContacts: (LimbContact | null)[] = [null, null, null, null];
+
+  /** Smear point for a foot released at (x, y): clamped into the leg envelope; false if blocked. */
+  private readonly smearTmp = { x: 0, y: 0 };
+  private smearSpot(i: number, x: number, y: number): boolean {
+    const u = this.frameNow();
+    const c = envClamp(i, this.ax[i], this.ay[i], u.x, u.y, x, y, 0);
+    this.smearTmp.x = c.x;
+    this.smearTmp.y = Math.max(c.y, 0.05);
+    return !this.blocked(i, this.smearTmp.x, this.smearTmp.y, null);
   }
 
   private attach(i: number, h: HoldDef): void {
@@ -671,6 +787,7 @@ export class ClimberSim implements ClimberSimAPI {
     L.busy = false;
     L.age = 0;
     L.slipT = 0;
+    L.stamp = ++this.stampSeq;
     this.refreshMatch();
     if (i >= 2) {
       const tmp = { x: 0, y: 0 };
@@ -684,6 +801,7 @@ export class ClimberSim implements ClimberSimAPI {
         o.cy = tmp.y;
       }
     }
+    this.measureGap(i);
   }
 
   private attachSmear(i: number, x: number, y: number): void {
@@ -696,6 +814,34 @@ export class ClimberSim implements ClimberSimAPI {
     L.cy = y;
     L.age = 0;
     L.slipT = 0;
+    L.stamp = ++this.stampSeq;
+    this.measureGap(i);
+  }
+
+  /**
+   * Height the body follows a dragged limb's target to: a hand never reaches below both feet (it
+   * couldn't grab there), so the body doesn't sink after a finger that points that low.
+   */
+  private reachY(i: number): number {
+    const L = this.limbs[i];
+    if (i >= 2) return L.ty;
+    let floor = Infinity;
+    for (let k = 2; k < 4; k++) {
+      const F = this.limbs[k];
+      if ((F.hold || F.smear) && !F.dragging && F.cy < floor) floor = F.cy;
+    }
+    return Number.isFinite(floor) ? Math.max(L.ty, floor + SIM.handAboveFeet) : L.ty;
+  }
+
+  /** How far the fresh contact of limb i sits outside its envelope (eased in by the PBD). */
+  private measureGap(i: number): void {
+    const L = this.limbs[i];
+    const u = this.frameNow();
+    L.attachGap = Math.min(envProject(i, this.ax[i], this.ay[i], u.x, u.y, L.cx, L.cy), SIM.reachTolerance + 0.35);
+  }
+
+  private softAllow(L: LimbRt): number {
+    return L.age < SOFT_ATTACH && L.attachGap > 0 ? L.attachGap * (1 - L.age / SOFT_ATTACH) : 0;
   }
 
   /** Recompute hand contact points (matched hands share the hold). */
@@ -728,19 +874,23 @@ export class ClimberSim implements ClimberSimAPI {
     return best;
   }
 
-  /** Hand/foot let go over nothing → back to the previous hold if still within reach. */
+  /**
+   * Hand/foot let go over nothing → back to the previous hold if it is still (nearly) inside the
+   * limb's envelope and nothing else took it; the PBD then eases the body back into reach.
+   */
   private returnLimb(i: number): string | null {
     const L = this.limbs[i];
-    const a = this.anchorOf(i);
-    const lim = maxReachIdx(i) * 1.15 + SIM.reachTolerance;
+    this.frameNow();
+    // a hand that just let go can still find its hold after the body leaned into the reach
+    const tol = SIM.reachTolerance + (i < 2 ? 0.35 : 0.08);
     if (L.prevHold) {
-      const tmp = { x: 0, y: 0 };
+      const tmp = this.qTmp;
       contactPoint(L.prevHold, i, this.wouldMatch(i, L.prevHold), tmp);
-      if (Math.hypot(tmp.x - a.x, tmp.y - a.y) <= lim) {
+      if (this.reachOk(i, tmp.x, tmp.y, tol) && !this.blocked(i, tmp.x, tmp.y, L.prevHold)) {
         this.attach(i, L.prevHold);
         return L.prevHold.id;
       }
-    } else if (L.prevSmear && i >= 2 && Math.hypot(L.prevX - a.x, L.prevY - a.y) <= lim) {
+    } else if (L.prevSmear && i >= 2 && this.reachOk(i, L.prevX, L.prevY, tol) && !this.blocked(i, L.prevX, L.prevY, null)) {
       this.attachSmear(i, L.prevX, L.prevY);
       return null;
     }
@@ -785,7 +935,30 @@ export class ClimberSim implements ClimberSimAPI {
     const best: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
     this.prm.pump = this.pump;
     this.prm.reachLimb = -1;
-    optimizePose(this.contacts, this.prm, init, best, this.evScratch, 110);
+    this.prm.maxPelvisY = Infinity;
+    let opt = optimizePose(this.contacts, this.prm, init, best, this.evScratch, 110);
+    // A foot that no body position can bring inside its leg envelope (it would have to point above
+    // the hip, or cross far under the body) starts off its hold instead.
+    for (let guard = 0; guard < 2 && opt.violation > 0.01; guard++) {
+      let worst = -1;
+      let wv = 0.01;
+      for (let i = 2; i < 4; i++) if (this.contacts[i] && this.evScratch.excess[i] > wv) {
+        wv = this.evScratch.excess[i];
+        worst = i;
+      }
+      if (worst < 0) break;
+      const L = this.limbs[worst];
+      L.hold = null;
+      L.smear = false;
+      L.prevHold = null;
+      if (this.boulder.wallAngle <= SIM.smearMaxAngle) {
+        this.attachSmear(worst, best.px + (worst === 2 ? -0.2 : 0.2), Math.max(GAME.padHeight + 0.15, best.py - 0.62));
+        L.age = 10;
+      }
+      this.buildContacts();
+      const seed: Pose = { px: best.px, py: best.py, cx: best.cx, cy: best.cy };
+      opt = optimizePose(this.contacts, this.prm, seed, best, this.evScratch, 110);
+    }
     this.P.x = best.px;
     this.P.y = best.py;
     this.C.x = best.cx;
@@ -906,8 +1079,10 @@ export class ClimberSim implements ClimberSimAPI {
   /** Pick the spine lean that minimises tension for the current pelvis position. */
   private updateLean(): void {
     this.buildContacts();
+    // the torso leans into a reaching HAND; a reaching foot doesn't tilt the whole torso over to
+    // fake a higher step (the hips may shift for it, see updateReachPosture)
     let reachLimb = -1;
-    for (let i = 0; i < 4; i++)
+    for (let i = 0; i < 2; i++)
       if (this.limbs[i].dragging) {
         reachLimb = i;
         break;
@@ -915,14 +1090,17 @@ export class ClimberSim implements ClimberSimAPI {
     const prm = this.prmScratch;
     prm.pump = this.pump;
     prm.reachLimb = reachLimb;
+    prm.maxPelvisY = Infinity;
     if (reachLimb >= 0) {
       prm.reachX = this.limbs[reachLimb].tx;
-      prm.reachY = this.limbs[reachLimb].ty;
+      prm.reachY = this.reachY(reachLimb);
     }
     let any = false;
     for (let i = 0; i < 4; i++) if (this.contacts[i]) any = true;
     if (!any) return;
+    prm.reachMargin = reachLimb >= 0 ? SIM.reachComfort : 0;
     bestLean(this.contacts, prm, this.P.x, this.P.y, this.evScratch, this.leanPose, this.lean);
+    prm.reachMargin = 0;
     // rate-limited: the torso turns smoothly (≈2.4 rad/s)
     const maxStep = 2.4 * H * 4;
     this.lean += clamp(LEAN_OUT.lean - this.lean, -maxStep, maxStep);
@@ -955,11 +1133,15 @@ export class ClimberSim implements ClimberSimAPI {
     prm.pump = this.pump;
     prm.reachLimb = li;
     prm.reachX = L.tx;
-    prm.reachY = L.ty;
+    prm.reachY = this.reachY(li);
+    // a reaching foot never lifts the body: the hips may sink or shift for it, not rise
+    prm.maxPelvisY = li >= 2 ? this.reachCapY + 0.02 : Infinity;
+    prm.reachMargin = SIM.reachComfort;
     const seed = this.leanPose;
     seed.px = this.posture.px;
     seed.py = this.posture.py;
     optimizePose(this.contacts, prm, seed, this.posture, this.evScratch, 36, true);
+    prm.reachMargin = 0;
     this.postureOn = true;
   }
 
@@ -980,6 +1162,10 @@ export class ClimberSim implements ClimberSimAPI {
     const prm = this.prmScratch;
     prm.pump = this.pump;
     prm.reachLimb = -1;
+    // while a foot is lifted the climber may settle lower, not climb up on its own
+    let footUp = false;
+    for (let i = 2; i < 4; i++) if (this.limbs[i].dragging) footUp = true;
+    prm.maxPelvisY = footUp ? this.P.y + 0.02 : Infinity;
     const r = optimizePose(this.contacts, prm, this.pose, this.posture, this.evScratch, 60, true);
     if (r.tension > 0.62 || r.violation > 0.01) {
       const alt: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
@@ -991,6 +1177,7 @@ export class ClimberSim implements ClimberSimAPI {
         this.posture.cy = alt.cy;
       }
     }
+    prm.maxPelvisY = Infinity;
     this.postureOn = true;
   }
 
@@ -1043,7 +1230,7 @@ export class ClimberSim implements ClimberSimAPI {
     this.prm.reachLimb = reachLimb;
     if (reachLimb >= 0) {
       this.prm.reachX = this.limbs[reachLimb].tx;
-      this.prm.reachY = this.limbs[reachLimb].ty;
+      this.prm.reachY = this.reachY(reachLimb);
     }
     const ev = evaluateStance(this.pose, this.contacts, this.prm, this.ev);
     const k = 1 - Math.exp(-SIM.loadSmoothing * h);
@@ -1055,7 +1242,9 @@ export class ClimberSim implements ClimberSimAPI {
         L.age += h;
         L.cap = ev.cap[i];
         L.load += (ev.load[i] - L.load) * k;
-        L.stress = L.load / Math.max(L.cap, 0.01);
+        // + anatomical strain: awkward edge of the envelope, or forced beyond it (pops off) — not
+        // while a fresh grab is still easing the body into reach
+        L.stress = L.load / Math.max(L.cap, 0.01) + (L.age < SOFT_ATTACH ? Math.min(ev.edge[i], SIM.edgeStrain) : ev.edge[i]);
         const tx = i < 2 ? ev.fax[i] : ev.fx[i];
         const ty = i < 2 ? ev.fay[i] : ev.fy[i];
         L.sfx += (tx - L.sfx) * ks;
@@ -1186,22 +1375,42 @@ export class ClimberSim implements ClimberSimAPI {
       }
     }
 
-    // reach pull: the whole body follows a limb that reaches beyond its comfortable range
-    for (let i = 0; i < 4; i++) {
-      const L = this.limbs[i];
-      if (!L.dragging) continue;
-      const dx = L.tx - ax[i];
-      const dy = L.ty - ay[i];
-      const d = Math.hypot(dx, dy);
-      const follow = maxReachIdx(i) * SIM.reachFollowFrac;
-      if (d <= follow) continue;
-      const f = Math.min(SIM.reachStiffness * (d - follow), SIM.reachMaxForce * g);
-      const fx = (f * dx) / d;
-      const fy = (f * dy) / d;
-      acx += fx;
-      acy += fy;
-      apx += fx;
-      apy += fy;
+    // reach pull: the whole body follows a limb that reaches beyond its comfortable range (its
+    // anatomical envelope). Hands pull the body anywhere; a foot never pulls the body UP — only
+    // toward targets below or out to the side (the hips can't be lifted by a leg in the air).
+    {
+      let ux = C.x - P.x;
+      let uy = C.y - P.y;
+      const ul = Math.hypot(ux, uy) || 1;
+      ux /= ul;
+      uy /= ul;
+      for (let i = 0; i < 4; i++) {
+        const L = this.limbs[i];
+        if (!L.dragging) continue;
+        const ty = this.reachY(i);
+        const en = envEval(i, ax[i], ay[i], ux, uy, L.tx, ty);
+        const d = en.r;
+        if (d < 1e-6) continue;
+        const beyond = en.over > 0 ? en.excess + en.rMax * (1 - SIM.reachFollowFrac) : d - en.rMax * SIM.reachFollowFrac;
+        if (beyond <= 0) continue;
+        const f = Math.min(SIM.reachStiffness * beyond, SIM.reachMaxForce * g);
+        let fx = (f * (L.tx - ax[i])) / d;
+        let fy = (f * (ty - ay[i])) / d;
+        if (i >= 2) {
+          const up = fx * ux + fy * uy;
+          if (up > 0) {
+            fx -= up * ux;
+            fy -= up * uy;
+          }
+          // targets above the hip line don't pull at all
+          const vu = (L.tx - ax[i]) * ux + (L.ty - ay[i]) * uy;
+          if (vu > 0.05) continue;
+        }
+        acx += fx;
+        acy += fy;
+        apx += fx;
+        apy += fy;
+      }
     }
 
     // integrate
@@ -1227,19 +1436,27 @@ export class ClimberSim implements ClimberSimAPI {
     this.Cv.y = (C.y - ocy) / h;
   }
 
-  /** PBD projection: arms (ropes), legs (hard limits), spine, floor. */
+  /**
+   * PBD projection: arms and legs inside their anatomical envelopes (anatomy.ts) — an attached hand
+   * that would leave its shoulder's envelope pulls/pushes the chest back, an attached foot that would
+   * leave its hip's envelope pushes the pelvis back (with a high foot the hips can't sink or slide
+   * past where the leg would fold beyond its limit) — soft in-plane minimums, spine length, floor.
+   */
   private projectClimb(): void {
     const P = this.P;
     const C = this.C;
     const sh = BODY.shoulderHalf;
     const hh = BODY.hipHalf;
+    const res = this.envResidual;
     for (let it = 0; it < SIM.pbdIterations; it++) {
       // spine frame
       let sx = C.x - P.x;
       let sy = C.y - P.y;
       let sl = Math.hypot(sx, sy) || 1;
-      let rx = sy / sl;
-      let ry = -sx / sl;
+      let ux = sx / sl;
+      let uy = sy / sl;
+      let rx = uy;
+      let ry = -ux;
       for (let i = 0; i < 2; i++) {
         const L = this.limbs[i];
         if (!L.hold || L.dragging || L.busy) continue;
@@ -1249,10 +1466,14 @@ export class ClimberSim implements ClimberSimAPI {
         const dx = L.cx - shx;
         const dy = L.cy - shy;
         const d = Math.hypot(dx, dy);
-        if (d > BODY.armMax) {
-          const m = (d - BODY.armMax) / d;
-          C.x += dx * m;
-          C.y += dy * m;
+        const dist = envProject(i, shx, shy, ux, uy, L.cx, L.cy);
+        const allow = this.softAllow(L);
+        if (dist > allow) {
+          // move the shoulder so the grip point sits on the nearest allowed point (a fresh grab
+          // at the edge of the snap range eases the body in instead of yanking it)
+          const k = (dist - allow) / dist;
+          C.x += (L.cx - PROJ_OUT.x) * k;
+          C.y += (L.cy - PROJ_OUT.y) * k;
         } else if (d < SIM.armMinPlane && d > 1e-6) {
           // soft: a hand grabbed right at the shoulder pushes the body away gently
           const m = (Math.max(d - SIM.armMinPlane, -0.01) / d) * 0.5;
@@ -1263,8 +1484,10 @@ export class ClimberSim implements ClimberSimAPI {
       sx = C.x - P.x;
       sy = C.y - P.y;
       sl = Math.hypot(sx, sy) || 1;
-      rx = sy / sl;
-      ry = -sx / sl;
+      ux = sx / sl;
+      uy = sy / sl;
+      rx = uy;
+      ry = -ux;
       for (let i = 2; i < 4; i++) {
         const L = this.limbs[i];
         if (!(L.hold || L.smear) || L.dragging) continue;
@@ -1274,10 +1497,12 @@ export class ClimberSim implements ClimberSimAPI {
         const dx = L.cx - hx;
         const dy = L.cy - hy;
         const d = Math.hypot(dx, dy);
-        if (d > BODY.legMax) {
-          const m = (d - BODY.legMax) / d;
-          P.x += dx * m;
-          P.y += dy * m;
+        const dist = envProject(i, hx, hy, ux, uy, L.cx, L.cy);
+        const allow = this.softAllow(L);
+        if (dist > allow) {
+          const k = (dist - allow) / dist;
+          P.x += (L.cx - PROJ_OUT.x) * k;
+          P.y += (L.cy - PROJ_OUT.y) * k;
         } else if (d < SIM.legMinPlane && d > 1e-6) {
           // soft: a high-step folds the leg and eases the hips away instead of popping them
           const m = (Math.max(d - SIM.legMinPlane, -0.01) / d) * 0.5;
@@ -1300,9 +1525,22 @@ export class ClimberSim implements ClimberSimAPI {
       // keep the chest above the pelvis while climbing (no flips)
       if (C.y < P.y + 0.12) C.y = P.y + 0.12;
     }
+    // residual violations (conflicting contacts): the limb that can't stay pops off via its stress
+    {
+      const dx = C.x - P.x;
+      const dy = C.y - P.y;
+      const l = Math.hypot(dx, dy) || 1;
+      this.syncPose();
+      computeAnchors(this.pose, this.ax, this.ay);
+      for (let i = 0; i < 4; i++) {
+        const L = this.limbs[i];
+        const on = (L.hold || L.smear) && !L.dragging && !L.busy;
+        res[i] = on ? Math.max(0, envProject(i, this.ax[i], this.ay[i], dx / l, dy / l, L.cx, L.cy) - this.softAllow(L)) : 0;
+      }
+    }
   }
 
-  /** Dragged endpoints follow the finger (clamped to reach); free limbs dangle. */
+  /** Dragged endpoints follow the finger (clamped to the reach envelope); free limbs dangle. */
   private updateEndpoints(h: number): void {
     const ax = this.ax;
     const ay = this.ay;
@@ -1317,11 +1555,16 @@ export class ClimberSim implements ClimberSimAPI {
       const L = this.limbs[i];
       const side = i === 0 || i === 2 ? -1 : 1;
       if (L.dragging) {
-        const r = maxReachIdx(i) + SIM.reachTolerance;
-        const c = this.clampToReach(L.tx, L.ty, ax[i], ay[i], r);
+        // the limb follows the finger up to its anatomical limit (a hold up to SIM.reachTolerance
+        // further out still snaps on release; the body is then eased into reach)
+        const c = envClamp(i, ax[i], ay[i], sx, sy, L.tx, L.ty, 0);
         const kk = 1 - Math.exp(-36 * h);
         L.px += (c.x - L.px) * kk;
         L.py += (c.y - L.py) * kk;
+        // the body moves too: the endpoint itself never leaves the envelope
+        const e = envClamp(i, ax[i], ay[i], sx, sy, L.px, L.py, 0);
+        L.px = e.x;
+        L.py = e.y;
         L.depth = damp(L.depth, 0.12, 14, h);
       } else if (L.busy && L.busyDraw) {
         const tx = L.busyDraw.x;
@@ -1334,8 +1577,8 @@ export class ClimberSim implements ClimberSimAPI {
         L.py = damp(L.py, L.cy, 30, h);
         L.depth = damp(L.depth, L.smear ? 0.015 : i < 2 ? 0.03 : 0.02, 14, h);
       } else {
-        // dangling: arms hang by the side, legs hang down
-        const down = i < 2 ? 0.5 : 0.82;
+        // dangling: arms hang by the side (elbow soft, inside the arm envelope), legs hang down
+        const down = i < 2 ? 0.4 : 0.82;
         const tx = ax[i] - sx * down + rx * side * (i < 2 ? 0.06 : 0.05);
         const ty = ay[i] - sy * down + ry * side * (i < 2 ? 0.06 : 0.05);
         L.px = damp(L.px, tx, 9, h);
@@ -1754,8 +1997,8 @@ export class ClimberSim implements ClimberSimAPI {
       s.clipped.length = 0;
       for (const c of this.clipped) s.clipped.push(c);
     }
-    this.syncPose();
-    computeAnchors(this.pose, this.ax, this.ay);
+    const u = this.frameNow();
+    this.updateLayers();
     for (let i = 0; i < 4; i++) {
       const L = this.limbs[i];
       const o = s.limbs[LIMB_IDS[i]];
@@ -1769,10 +2012,40 @@ export class ClimberSim implements ClimberSimAPI {
       o.load = L.load;
       o.stress = L.stress;
       o.capacity = L.cap;
-      o.reachRatio = Math.hypot(L.px - this.ax[i], L.py - this.ay[i]) / maxReachIdx(i);
+      // fraction of the anatomical reach in this direction (≥ 1 = at the envelope's edge)
+      o.reachRatio = envEval(i, this.ax[i], this.ay[i], u.x, u.y, L.px, L.py).ratio;
       o.smearing = L.smear;
       o.shake = L.shake;
       o.busy = L.busy;
+      let layer = 0;
+      for (let p = 0; p < CROSS_PAIRS.length; p++) {
+        const c = this.cross[p];
+        if ((c === 1 && CROSS_PAIRS[p][0] === i) || (c === 2 && CROSS_PAIRS[p][1] === i)) layer++;
+      }
+      o.layer = layer;
+      o.front = layer > 0;
+    }
+  }
+
+  /**
+   * Depth order of crossing limbs. When two limb segments (shoulder→hand, hip→foot) start to cross
+   * in the wall plane, the limb that moved into the crossing (latest lift / placement) goes in front;
+   * the order sticks while they keep crossing, so a limb never pops through another.
+   */
+  private updateLayers(): void {
+    const active = this.phase === 'climbing' || this.phase === 'idle' || this.phase === 'topped';
+    for (let p = 0; p < CROSS_PAIRS.length; p++) {
+      if (!active) {
+        this.cross[p] = 0;
+        continue;
+      }
+      const a = CROSS_PAIRS[p][0];
+      const b = CROSS_PAIRS[p][1];
+      const A = this.limbs[a];
+      const B = this.limbs[b];
+      const crossing = segmentsCross(this.ax[a], this.ay[a], A.px, A.py, this.ax[b], this.ay[b], B.px, B.py);
+      if (!crossing) this.cross[p] = 0;
+      else if (this.cross[p] === 0) this.cross[p] = A.stamp >= B.stamp ? 1 : 2;
     }
   }
 }

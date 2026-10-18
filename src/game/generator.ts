@@ -786,7 +786,12 @@ const tutHold = (id: string, x: number, y: number, type: HoldType, size: number,
   seed,
 });
 
-/** Steini's hand-authored lesson: a friendly vertical problem on big orange jugs. */
+/**
+ * Steini's hand-authored lesson: a friendly vertical problem on big orange jugs. Laid out against the
+ * anatomical reach envelopes (anatomy.ts): with the climber's natural reach every scripted move ends
+ * at least 5 cm inside the limb's envelope (anatomy.test.ts checks it), the stretch to tut-hand-3 is
+ * long enough to shake on the way, and the right foot coming up under it calms things down.
+ */
 export function tutorialBoulder(): BoulderDef {
   const holds: HoldDef[] = [
     tutHold('tut-start-l', -0.2, 1.5, 'jug', 0.11, 'start', -90, 11),
@@ -795,14 +800,14 @@ export function tutorialBoulder(): BoulderDef {
     tutHold('tut-foot-r', 0.22, 0.4, 'jug', 0.085, 'foot', -90, 14),
     tutHold('tut-hand-1', 0.3, 1.98, 'jug', 0.11, 'hand', -90, 15),
     tutHold('tut-foot-2', 0.28, 0.82, 'jug', 0.085, 'foot', -90, 16),
-    tutHold('tut-hand-2', -0.24, 2.36, 'jug', 0.11, 'hand', -90, 17),
-    tutHold('tut-foot-3', -0.26, 1.1, 'jug', 0.085, 'foot', -90, 18),
-    tutHold('tut-hand-3', 0.83, 2.88, 'edge', 0.075, 'hand', -170, 19),
-    tutHold('tut-foot-4', 0.34, 1.45, 'jug', 0.085, 'foot', -90, 20),
-    tutHold('tut-hand-4', 0.05, 3.12, 'jug', 0.11, 'hand', -90, 21),
-    tutHold('tut-foot-5', -0.12, 1.8, 'jug', 0.085, 'foot', -90, 22),
-    tutHold('tut-top', 0.42, 3.62, 'jug', 0.12, 'top', -90, 23),
-    tutHold('tut-foot-6', 0.3, 2.15, 'jug', 0.085, 'foot', -90, 24),
+    tutHold('tut-hand-2', -0.24, 2.39, 'jug', 0.11, 'hand', -90, 17),
+    tutHold('tut-foot-3', -0.32, 1.25, 'jug', 0.085, 'foot', -90, 18),
+    tutHold('tut-hand-3', 0.965, 2.68, 'edge', 0.075, 'hand', -170, 19),
+    tutHold('tut-foot-4', 0.43, 1.47, 'jug', 0.085, 'foot', -90, 20),
+    tutHold('tut-hand-4', 0.11, 3.04, 'jug', 0.11, 'hand', -90, 21),
+    tutHold('tut-foot-5', -0.09, 1.83, 'jug', 0.085, 'foot', -90, 22),
+    tutHold('tut-top', 0.36, 3.61, 'jug', 0.12, 'top', -90, 23),
+    tutHold('tut-foot-6', 0.56, 2.08, 'jug', 0.085, 'foot', -90, 24),
   ];
   const rng = new Rng(0x57e1);
   const b = new Builder(rng, paramsFor(0, 0, false, 1), TUT);

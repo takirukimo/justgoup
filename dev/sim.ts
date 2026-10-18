@@ -1,11 +1,18 @@
 // Sim Lab — a 2D view of ClimberSim for tuning and visual QA (not part of the shipped build).
-// URL params: ?grade=4&seed=12&mode=boulder|rope|tutorial&bot=1&t=6 (pre-simulate t seconds)
+// URL params: ?grade=4&seed=12&mode=boulder|rope|tutorial|lab&bot=1&t=6 (pre-simulate t seconds)
+//   env=1            draw all four reach envelopes (the dragged limb's is always drawn)
+//   steps=5          tutorial: play the first n scripted TUTORIAL_SEQUENCE steps
+//   moves=RF:hi,LH:x  play limb moves (limb:holdId) through beginDrag/dragTo/endDrag
+//   hip=x,y          hold the hip handle at (x, y)
+//   drag=RF:x,y      start dragging a limb and keep the finger at (x, y)
+//   pause=1          freeze the sim after the setup
 
 import type { BetaMove, SimEvent } from '../src/core/contracts';
 import type { HoldDef, LimbId, Vec2 } from '../src/core/types';
 import { PALETTE, WALL } from '../src/config/brand';
 import { BODY, GAME } from '../src/config/tuning';
-import { BetaBot, ClimberSim, generateBoulder, generateRopeRoute, gradeColor, gradeLabel, fontGrade, nextHint, RopeSystem, tutorialBoulder } from '../src/game';
+import { BetaBot, ClimberSim, generateBoulder, generateRopeRoute, gradeColor, gradeLabel, fontGrade, nextHint, RopeSystem, tutorialBoulder, TUTORIAL_SEQUENCE } from '../src/game';
+import { hold as labHold, makeBoulder, moveLimb, run as runSim } from '../src/game/test-helpers';
 
 const LIMBS: LimbId[] = ['LH', 'RH', 'LF', 'RF'];
 const q = new URLSearchParams(location.search);
@@ -24,8 +31,27 @@ let hint: BetaMove | null = null;
 let lastEvents: string[] = [];
 let camY = 2;
 
+/** A small vertical problem for anatomy demos: a high step, a crossover, a low hand hold. */
+function labBoulder() {
+  return makeBoulder(
+    [
+      labHold('s1', -0.2, 2.1, 'jug', 0.11, 'start'),
+      labHold('s2', 0.25, 2.15, 'jug', 0.11, 'start'),
+      labHold('f1', -0.25, 0.75, 'jug', 0.08, 'foot'),
+      labHold('f2', 0.3, 0.8, 'jug', 0.08, 'foot'),
+      labHold('hi', 0.5, 1.45, 'jug', 0.09, 'foot'),
+      labHold('up', 0.12, 1.95, 'jug', 0.09, 'foot'),
+      labHold('x', -0.52, 2.62, 'jug', 0.1, 'hand'),
+      labHold('low', 0.42, 1.25, 'jug', 0.1, 'hand'),
+      labHold('cross', 0.42, 0.62, 'jug', 0.08, 'foot'),
+      labHold('t', 0, 4.1, 'jug', 0.12, 'top'),
+    ],
+    { name: 'Anatomy Lab' },
+  );
+}
+
 function load(): void {
-  const b = mode === 'tutorial' ? tutorialBoulder() : mode === 'rope' ? generateRopeRoute({ seed, grade }) : generateBoulder({ seed, grade });
+  const b = mode === 'lab' ? labBoulder() : mode === 'tutorial' ? tutorialBoulder() : mode === 'rope' ? generateRopeRoute({ seed, grade }) : generateBoulder({ seed, grade });
   sim = new ClimberSim(b);
   rope = b.mode === 'rope' ? new RopeSystem(b) : null;
   bot = null;
@@ -59,9 +85,11 @@ function resize(): void {
   cv.width = Math.round(W * dpr);
   cv.height = Math.round(H * dpr);
 }
-const scale = (): number => Math.min(W / (sim.boulder.width + 0.3), H / 3.6);
-const toScreen = (p: Vec2): Vec2 => ({ x: W / 2 + p.x * scale(), y: H * 0.55 - (p.y - camY) * scale() });
-const toWall = (x: number, y: number): Vec2 => ({ x: (x - W / 2) / scale(), y: camY - (y - H * 0.55) / scale() });
+const zoom = Number(q.get('zoom') ?? 1);
+const scale = (): number => Math.min(W / (sim.boulder.width + 0.3), H / 3.6) * zoom;
+const camX = (): number => (zoom > 1 ? sim.getState().pelvis.x : 0);
+const toScreen = (p: Vec2): Vec2 => ({ x: W / 2 + (p.x - camX()) * scale(), y: H * 0.55 - (p.y - camY) * scale() });
+const toWall = (x: number, y: number): Vec2 => ({ x: (x - W / 2) / scale() + camX(), y: camY - (y - H * 0.55) / scale() });
 
 function stressColor(s: number): string {
   if (s < 0.6) return PALETTE.good;
@@ -109,7 +137,7 @@ function label(text: string, p: Vec2, color: string): void {
 function draw(): void {
   const s = sim.getState();
   const b = sim.boulder;
-  camY += (Math.max(1.8, s.pelvis.y + 0.5) - camY) * 0.06;
+  camY += ((zoom > 1 ? s.pelvis.y + 0.25 : Math.max(1.8, s.pelvis.y + 0.5)) - camY) * 0.06;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = PALETTE.basalt;
   ctx.fillRect(0, 0, W, H);
@@ -189,17 +217,16 @@ function draw(): void {
       ctx.setLineDash([]);
     }
   }
-  // dragged limb: reach arc, reachable holds, snap candidate
+  // reach envelopes: all four (env=1) faintly, the dragged limb's strongly
+  for (const l of LIMBS) {
+    const ls = s.limbs[l];
+    if (!ls.dragging && !showEnv) continue;
+    drawEnvelope(l, ls.dragging);
+  }
+  // dragged limb: reachable holds, snap candidate
   for (const l of LIMBS) {
     const ls = s.limbs[l];
     if (!ls.dragging) continue;
-    const a = toScreen(ls.anchor);
-    ctx.strokeStyle = 'rgba(233,229,221,.18)';
-    ctx.setLineDash([3, 5]);
-    ctx.beginPath();
-    ctx.arc(a.x, a.y, sim.maxReach(l) * scale(), 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.setLineDash([]);
     for (const id of sim.reachableHolds(l)) {
       const h = b.holds.find((x) => x.id === id)!;
       const p = toScreen(h);
@@ -228,7 +255,8 @@ function draw(): void {
   const P = toScreen(s.pelvis);
   const C = toScreen(s.chest);
   ctx.lineCap = 'round';
-  for (const l of LIMBS) {
+  const order = [...LIMBS].sort((p, q) => (s.limbs[p].layer ?? 0) - (s.limbs[q].layer ?? 0));
+  for (const l of order) {
     const ls = s.limbs[l];
     const a = toScreen(ls.anchor);
     const e = toScreen(ls.pos);
@@ -245,12 +273,22 @@ function draw(): void {
     const sgn = l === 'LH' || l === 'LF' ? -1 : 1;
     const kx = mx + nx * bend * sgn * (l === 'LF' || l === 'RF' ? -1 : 1);
     const ky = my + ny * bend * sgn * (l === 'LF' || l === 'RF' ? -1 : 1);
+    if (ls.front) {
+      // depth hint: this limb crosses in front of another one
+      ctx.strokeStyle = 'rgba(13,14,16,.9)';
+      ctx.lineWidth = (l === 'LF' || l === 'RF' ? 7 : 6) + 4;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.quadraticCurveTo(kx, ky, ex, ey);
+      ctx.stroke();
+    }
     ctx.strokeStyle = ls.holdId || ls.smearing ? stressColor(ls.stress) : 'rgba(233,229,221,.55)';
     ctx.lineWidth = l === 'LF' || l === 'RF' ? 7 : 6;
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
     ctx.quadraticCurveTo(kx, ky, ex, ey);
     ctx.stroke();
+    if (ls.front) label('FRONT', { x: (a.x + ex) / 2 + 14, y: (a.y + ey) / 2 }, PALETTE.glacier);
     ctx.fillStyle = ls.busy ? PALETTE.signal : PALETTE.bone;
     ctx.beginPath();
     ctx.arc(ex, ey, l === 'LF' || l === 'RF' ? 6 : 5, 0, Math.PI * 2);
@@ -315,6 +353,32 @@ function draw(): void {
     return `<div class="limb">${l} <b style="color:${stressColor(ls.stress)}">${ls.holdId ? (ls.stress * 100).toFixed(0) + '%' : ls.smearing ? 'SMEAR' : '—'}</b><br>${(ls.load * 100).toFixed(0)}% BW · CAP ${(ls.capacity * 100).toFixed(0)}</div>`;
   }).join('');
   $('log').innerHTML = lastEvents.slice(-8).join('<br>');
+}
+
+const ENV_COLORS: Record<LimbId, string> = { LH: '154,212,222', RH: '255,178,63', LF: '79,209,139', RF: '255,79,31' };
+const showEnv = q.get('env') === '1';
+let envBuf: Vec2[] = [];
+function drawEnvelope(l: LimbId, strong: boolean): void {
+  const poly = sim.reachEnvelope(l, envBuf);
+  envBuf = poly;
+  const c = ENV_COLORS[l];
+  ctx.beginPath();
+  poly.forEach((v, i) => {
+    const p = toScreen(v);
+    if (i === 0) ctx.moveTo(p.x, p.y);
+    else ctx.lineTo(p.x, p.y);
+  });
+  ctx.closePath();
+  ctx.fillStyle = `rgba(${c},${strong ? 0.09 : 0.045})`;
+  ctx.fill();
+  ctx.strokeStyle = `rgba(${c},${strong ? 0.85 : 0.45})`;
+  ctx.lineWidth = strong ? 1.6 : 1;
+  ctx.setLineDash(strong ? [] : [4, 4]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  const a = toScreen(poly[0]);
+  ctx.fillStyle = `rgba(${c},0.9)`;
+  ctx.fillRect(a.x - 2, a.y - 2, 4, 4);
 }
 
 // ── input: drag limbs and the hips ──
@@ -421,6 +485,49 @@ resize();
 window.addEventListener('resize', resize);
 load();
 if (q.get('bot') === '1') setBot(true);
+// scripted setup for screenshots / QA
+setup();
+function setup(): void {
+  const nSteps = Number(q.get('steps') ?? 0);
+  if (nSteps > 0 && mode === 'tutorial') {
+    for (const st of TUTORIAL_SEQUENCE.slice(0, nSteps)) {
+      if (st.teach === 'hips') {
+        const h = sim.boulder.holds.find((x) => x.id === st.holdId)!;
+        sim.setHipTarget({ x: h.x, y: sim.getState().pelvis.y + 0.1 });
+        runSim(sim, 1);
+        sim.setHipTarget(null);
+      } else {
+        note(moveLimb(sim, st.limb, st.holdId));
+        runSim(sim, 0.6);
+      }
+    }
+  }
+  for (const m of (q.get('moves') ?? '').split(',').filter(Boolean)) {
+    const [l, id] = m.split(':') as [LimbId, string];
+    note(moveLimb(sim, l, id));
+    runSim(sim, 0.6);
+  }
+  const hip = q.get('hip');
+  if (hip) {
+    const [x, y] = hip.split(',').map(Number);
+    sim.setHipTarget({ x, y });
+    drag.set('hips', { id: -1, wall: { x, y }, off: { x: 0, y: 0 } });
+    runSim(sim, 1.5);
+  }
+  const dr = q.get('drag');
+  if (dr) {
+    const [l, xy] = dr.split(':') as [LimbId, string];
+    const [x, y] = xy.split(',').map(Number);
+    if (sim.beginDrag(l)) {
+      drag.set(l, { id: -1, wall: { x, y }, off: { x: 0, y: 0 } });
+      for (let k = 0; k < 60; k++) {
+        sim.dragTo(l, { x, y });
+        runSim(sim, 1 / 60);
+      }
+    }
+  }
+  camY = zoom > 1 ? sim.getState().pelvis.y + 0.25 : sim.getState().pelvis.y + 0.5;
+}
 const pre = Number(q.get('t') ?? 0);
 for (let t = 0; t < pre; t += 1 / 60) tick(1 / 60);
 if (q.get('hint') === '1') hint = nextHint(sim);
