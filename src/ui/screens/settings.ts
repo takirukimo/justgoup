@@ -4,7 +4,7 @@ import type { ScreenProps } from '../../core/contracts';
 import type { QualityLevel, Settings } from '../../core/types';
 import { BRAND } from '../../config/brand';
 import { button, el, label, stagger } from '../dom';
-import { chiralMark } from '../logo';
+import { chiralLockup } from '../logo';
 import { header, screenRoot, segmented, sliderRow, toggleRow, topoLayer } from '../parts';
 import type { ScreenView, UICtx } from '../screen';
 
@@ -85,10 +85,16 @@ export function createSettings(ctx: UICtx, props: P): ScreenView<P> {
       el(
         'section',
         'credits',
-        chiralMark('cr-mark'),
-        el('span', 'cr-name', `${BRAND.name} ${BRAND.sub}`),
-        label(`${BRAND.game} · ${BRAND.tagline}`),
-        el('div', 'cr-lines', label('DESIGN & DEVELOPMENT · CHIRAL SPORTS'), label('BUILT WITH THREE.JS'), label('TYPE · BARLOW CONDENSED · INTER · JETBRAINS MONO')),
+        el('span', 'cr-name', BRAND.game),
+        el('span', 'cr-by', label('BY'), chiralLockup('cr-lockup')),
+        el(
+          'div',
+          'cr-lines',
+          label(`DESIGN & DEVELOPMENT · ${BRAND.name} ${BRAND.sub}`),
+          label(`SET AT ${BRAND.gym} · ${BRAND.guideName.toUpperCase()} INSTRUCTING`),
+          label('BUILT WITH THREE.JS'),
+          label('TYPE · BARLOW CONDENSED · INTER · JETBRAINS MONO'),
+        ),
         label(`© ${new Date().getFullYear()} ${BRAND.name} ${BRAND.sub}`, 'cr-copy'),
       ),
       5,

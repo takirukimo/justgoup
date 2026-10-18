@@ -283,11 +283,12 @@ abstract class Director {
   }
 
   /**
-   * Tap-to-continue line that also auto-advances after `auto` seconds (default: reading time).
-   * A pause in the middle re-shows the line after resume.
+   * Tap-to-continue line that also auto-advances after `auto` seconds (default: its hold time, see
+   * S.holdTime, plus a beat to look at the scene). A tap always advances early. A pause in the
+   * middle re-shows the line after resume.
    */
   protected async talk(l: S.Line, pos: Pos = 'bottom', auto?: number): Promise<void> {
-    const wait = auto ?? S.readTime(l.text) + 1.4;
+    const wait = Math.max(auto ?? 0, S.holdTime(l.text) + TALK_EXTRA_S);
     for (let attempt = 0; attempt < 3; attempt++) {
       const epoch = this.pauseEpoch;
       this.lastLine = { line: l, pos };
@@ -346,7 +347,11 @@ abstract class Director {
 // ═══════════════════════════════ intro ═══════════════════════════════
 
 const FLY_SECONDS = 7.5;
-const INTRO_EST_SECONDS = 13.5;
+/** Extra beat on tap-to-continue lines so the player can also look at the scene (s). */
+const TALK_EXTRA_S = 0.8;
+/** The title card's staggered reveal and its fade-out (s), see src/tutorial/overlay.ts. */
+const CARD_REVEAL_S = 0.6;
+const CARD_LEAVE_S = 0.5;
 
 class IntroDirector extends Director {
   private overlay: IntroOverlay | null = null;
@@ -394,26 +399,35 @@ class IntroDirector extends Director {
     } catch {
       /* optional */
     }
+    // Steini: hello (waving), the idea, the goal (pointing at the wall)
+    const [hello, idea, goal] = S.INTRO_LINES;
+    const cardHold = S.cardHoldTime() + CARD_REVEAL_S;
+    const estimate = 0.55 + cardHold + CARD_LEAVE_S + S.INTRO_LINES.reduce((a, l) => a + S.holdTime(l.text) + TALK_EXTRA_S, 0);
     let t = 0;
     this.root.every((dt) => {
       t += dt;
-      this.overlay?.setProgress(t / INTRO_EST_SECONDS);
+      this.overlay?.setProgress(t / estimate);
     });
 
-    // title card over the fly-in
+    // title card over the fly-in: up long enough to read every word; a tap moves on early
     await this.sleep(0.55);
     this.overlay?.showCard();
-    await this.sleep(2.7);
+    const beat = this.root.child();
+    try {
+      const tap = this.overlay?.waitForTap() ?? new Promise<void>(() => undefined);
+      await beat.wait(Promise.race([tap, beat.sleep(cardHold)]));
+    } finally {
+      beat.close();
+      this.overlay?.stopWaitingForTap();
+    }
     this.overlay?.hideCard();
-    await this.sleep(0.35);
+    await this.sleep(CARD_LEAVE_S);
 
-    // Steini: hello (waving), the idea, the goal (pointing at the wall)
-    const [hello, idea, goal] = S.INTRO_LINES;
-    await this.talk(hello, 'bottom', S.readTime(hello.text) * 0.92);
+    await this.talk(hello, 'bottom');
     this.pose('idle', null);
-    await this.talk(idea, 'bottom', S.readTime(idea.text) * 0.92);
+    await this.talk(idea, 'bottom');
     this.pose('point', wall);
-    await this.talk(goal, 'bottom', S.readTime(goal.text) * 0.92 + 0.4);
+    await this.talk(goal, 'bottom');
     this.hideSpeech();
     this.overlay?.setProgress(1);
     await this.root.until(() => landed, 2.5);
@@ -434,7 +448,6 @@ class IntroDirector extends Director {
 const IDLE_NUDGE_S = 13;
 const RESTORE_AFTER_MISTAKE_S = 3.4;
 const MISTAKE_COOLDOWN_S = 1.6;
-const SUCCESS_BEAT_S = 1.25;
 /** Full stretch without the target lighting up for this long = the move is out of reach from here. */
 const STUCK_STRETCH_S = 4;
 /** The rescue's stand-up beat moves on after this long without success. */
@@ -474,6 +487,8 @@ class TutorialDirector extends Director {
   private saidLetGo = false;
   private readonly mistakeAt = new Map<S.MistakeKind, number>();
   private readonly mistakeN = new Map<S.MistakeKind, number>();
+  /** Hold time of the last mistake line (the instruction comes back only after it was readable). */
+  private lastMistakeHold = 0;
 
   constructor(ctx: TutorialRunContext) {
     super(ctx.renderer, ctx.ui, ctx.audio, ctx.clock);
@@ -576,9 +591,10 @@ class TutorialDirector extends Director {
     renderer.setCameraMode('preview');
     this.pose('point', top);
     await this.sleep(0.7);
-    await this.talk(S.T_OPEN[0], 'top');
+    const [routeLine, startTop] = S.tOpen(this.sim.boulder.color);
+    await this.talk(routeLine, 'top');
     this.pose('idle', top);
-    await this.talk(S.T_OPEN[1], 'top');
+    await this.talk(startTop, 'top');
 
     // on the wall: cut to the climbing camera; Steini steps off-frame for the lessons
     if (this.sim.getState().phase === 'idle') this.sim.start();
@@ -661,7 +677,7 @@ class TutorialDirector extends Director {
     if (!again.placed) {
       this.highlight(null);
       this.line(S.RESCUE.letGo, copy.pos);
-      await this.sleep(S.readTime(S.RESCUE.letGo.text, 1.6, 3));
+      await this.sleep(S.holdTime(S.RESCUE.letGo.text));
     }
     return again;
   }
@@ -718,7 +734,7 @@ class TutorialDirector extends Director {
       let restore: (() => void) | null = null;
       const scheduleRestore = (): void => {
         restore?.();
-        restore = s.timer(RESTORE_AFTER_MISTAKE_S, () => {
+        restore = s.timer(Math.max(RESTORE_AFTER_MISTAKE_S, this.lastMistakeHold), () => {
           restore = null;
           if (!this.isPlaced(step) && !dragging) this.line(copy.instruct, copy.pos, true);
         });
@@ -818,7 +834,8 @@ class TutorialDirector extends Director {
     this.react('clap', 1.3, this.chest());
     const praise = opts.success ? await opts.success() : copy.success;
     this.line(praise, copy.pos);
-    await this.sleep(opts.quiet ? 0.5 : Math.max(SUCCESS_BEAT_S, S.readTime(praise.text, 1.2, 2.6) - 0.2));
+    // the praise stays readable before the next instruction replaces it (quiet: the finale follows)
+    await this.sleep(opts.quiet ? 0.5 : S.holdTime(praise.text));
     return out;
   }
 
@@ -890,7 +907,7 @@ class TutorialDirector extends Director {
       this.chime();
       this.line(S.RESCUE.stood, pos);
       this.react('clap', 1.3, this.chest());
-      await this.sleep(S.readTime(S.RESCUE.stood.text, 1.4, 2.6));
+      await this.sleep(S.holdTime(S.RESCUE.stood.text));
     }
   }
 
@@ -961,7 +978,7 @@ class TutorialDirector extends Director {
     this.chime();
     this.line(S.HIPS.success, pos);
     this.react('clap', 1.3, this.chest());
-    await this.sleep(S.readTime(S.HIPS.success.text, 1.6, 3.2));
+    await this.sleep(S.holdTime(S.HIPS.success.text));
   }
 
   /** After the long reach: name what the player feels (or would feel), then explain pump. */
@@ -990,7 +1007,9 @@ class TutorialDirector extends Director {
     const n = this.mistakeN.get(kind) ?? 0;
     this.mistakeN.set(kind, n + 1);
     const pool = S.MISTAKES[kind];
-    this.line(pool[n % pool.length], pos, true);
+    const l = pool[n % pool.length];
+    this.lastMistakeHold = S.holdTime(l.text);
+    this.line(l, pos, true);
     return true;
   }
 

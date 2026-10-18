@@ -1,5 +1,6 @@
 // Display formatting shared by the screens (numbers, times, grades, wall angles).
 
+import type { BoulderDef } from '../core/types';
 import { fontGrade, gradeColor, gradeLabel } from '../game/grades';
 
 export const fmtInt = (n: number): string => Math.round(Number.isFinite(n) ? n : 0).toLocaleString('en-US');
@@ -37,12 +38,58 @@ export function fmtAge(epochMs: number, now = Date.now()): string {
   return `${Math.floor(d / (86400 * 365))}y ago`;
 }
 
-/** Wall angle as a spec-sheet value: "25°" + kind. */
-export function wallAngle(deg: number): { value: string; kind: string } {
-  const a = Math.round(deg);
-  if (a > 2) return { value: `${a}°`, kind: 'Overhang' };
-  if (a < -2) return { value: `${-a}°`, kind: 'Slab' };
-  return { value: '0°', kind: 'Vertical' };
+/** Walls within ±6° of vertical look vertical, so that is what the label says. */
+export const VERTICAL_TOLERANCE_DEG = 6;
+
+export interface WallLabel {
+  /** Spec-sheet label: 'WALL' (vertical), 'SLAB', 'OVERHANG' or 'MIXED' (multi-angle profile). */
+  kind: string;
+  /** Spec-sheet value: 'VERTICAL', '8°', '35°' or '0°→45°'. */
+  value: string;
+  /** Route style word when the problem has a notable one ('CAVE', 'TRAVERSE', 'DYNO', …). */
+  style: string | null;
+  /** One-line description, e.g. 'OVERHANG 35°', 'SLAB 8°', 'CAVE · MIXED · 0°→45°'. */
+  text: string;
+}
+
+const STYLE_WORD: Partial<Record<NonNullable<BoulderDef['style']>, string>> = {
+  cave: 'CAVE',
+  traverse: 'TRAVERSE',
+  dyno: 'DYNO',
+  compression: 'COMPRESSION',
+};
+
+const deg = (a: number): string => `${a < 0 ? '−' : ''}${Math.abs(Math.round(a))}°`;
+
+/** Kind + value for one flat angle (degrees; + overhang, − slab). */
+function flat(angle: number): { kind: string; value: string; text: string } {
+  const a = Math.round(angle);
+  if (Math.abs(angle) < VERTICAL_TOLERANCE_DEG) return { kind: 'WALL', value: 'VERTICAL', text: 'VERTICAL' };
+  if (a < 0) return { kind: 'SLAB', value: `${-a}°`, text: `SLAB ${-a}°` };
+  return { kind: 'OVERHANG', value: `${a}°`, text: `OVERHANG ${a}°` };
+}
+
+/**
+ * What the wall really is, for the route preview and problem cards. A multi-angle profile reads
+ * as its first panel → the panel most different from it ("MIXED · 0°→45°"); panels within the
+ * vertical tolerance of each other count as one flat wall.
+ */
+export function wallLabel(b: Pick<BoulderDef, 'wallAngle'> & Partial<Pick<BoulderDef, 'profile' | 'style'>>): WallLabel {
+  const style = (b.style && STYLE_WORD[b.style]) ?? null;
+  const panels = (b.profile ?? []).filter((p) => Number.isFinite(p.angle));
+  let base: { kind: string; value: string; text: string };
+  if (panels.length >= 2) {
+    const from = panels[0].angle;
+    const to = panels.reduce((far, p) => (Math.abs(p.angle - from) > Math.abs(far - from) ? p.angle : far), from);
+    if (Math.abs(to - from) < VERTICAL_TOLERANCE_DEG) base = flat((from + to) / 2);
+    else {
+      const range = `${deg(from)}→${deg(to)}`;
+      base = { kind: 'MIXED', value: range, text: `MIXED · ${range}` };
+    }
+  } else {
+    base = flat(panels.length === 1 ? panels[0].angle : b.wallAngle);
+  }
+  return { ...base, style, text: style ? `${style} · ${base.text}` : base.text };
 }
 
 export const grade = (g: number): string => gradeLabel(g);

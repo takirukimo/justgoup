@@ -10,7 +10,9 @@ import { ClimberSim } from '../game/climber-sim';
 import { tutorialBoulder, TUTORIAL_SEQUENCE } from '../game/generator';
 import { contactPoint, LIMB_INDEX } from '../game/holds';
 import { Clock } from './scope';
-import { abortTutorial, runTutorial, TUTORIAL_SIM_OPTIONS, tutorialStatus } from './tutorial';
+import { abortTutorial, runIntro, runTutorial, TUTORIAL_SIM_OPTIONS, tutorialStatus } from './tutorial';
+import { cardHoldTime, colourWord, FINALE, holdTime, INTRO_CARD, INTRO_LINES, readTime, tOpen } from './script';
+import { BRAND, PALETTE } from '../config/brand';
 import { randomTip, TIPS, tipFor } from './tips';
 
 const DT = 1 / 60;
@@ -318,5 +320,59 @@ describe('tips', () => {
     expect(picks.size).toBeGreaterThan(15);
     expect(TIPS).toContain(tipFor('pump', 3));
     expect(tipFor('barn-door', 1)).not.toMatch(/clip/i);
+  });
+});
+
+describe('pacing (owner: every card and line stays up long enough to read)', () => {
+  it('reads at 220 ms per word with a 2.5 s floor, and holds add the reveal + fade', () => {
+    expect(readTime('Allez!')).toBe(2.5);
+    expect(readTime('one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen')).toBeCloseTo(15 * 0.22, 5);
+    for (const l of INTRO_LINES) expect(holdTime(l.text)).toBeGreaterThan(readTime(l.text));
+    expect(cardHoldTime()).toBeGreaterThanOrEqual(2.5);
+  });
+
+  it('the intro keeps the title card and every line up for their reading time when nobody taps', async () => {
+    const clock = new Clock({ manual: true });
+    let now = 0;
+    clock.add((dt) => (now += dt));
+    const shown: { text: string; at: number }[] = [];
+    const ui = {
+      guide: {
+        say: (line: GuideLine) => {
+          shown.push({ text: line.text, at: now });
+          return line.waitForTap ? new Promise<void>(() => undefined) : Promise.resolve();
+        },
+        hide: () => undefined,
+        setSkip: () => undefined,
+      },
+      hud: { update: () => undefined, callout: () => undefined, toast: () => undefined },
+    } as unknown as UIAPI;
+    const boulder = tutorialBoulder();
+    const renderer = { setGuide: () => undefined, setCameraMode: () => undefined, getBoulder: () => boulder } as unknown as RendererAPI;
+    const audio = { play: () => undefined, haptic: () => undefined } as unknown as AudioAPI;
+    let done = false;
+    void runIntro({ renderer, ui, audio, clock }).then(() => (done = true));
+    for (let i = 0; i < 60 * 90 && !done; i++) {
+      clock.tick(DT);
+      await flush();
+    }
+    expect(done).toBe(true);
+    expect(shown.map((x) => x.text)).toEqual(INTRO_LINES.map((l) => l.text));
+    // the title card (shown at 0.55 s) is readable before Steini starts talking
+    expect(shown[0].at).toBeGreaterThanOrEqual(0.55 + cardHoldTime());
+    for (let i = 0; i + 1 < shown.length; i++) expect(shown[i + 1].at - shown[i].at, shown[i].text).toBeGreaterThanOrEqual(holdTime(shown[i].text));
+  }, 30000);
+
+  it('names the tutorial route by its tape colour and calls the game STEIBOCK', () => {
+    expect(colourWord('#FF4F1F')).toBe('orange');
+    expect(colourWord(PALETTE.signal)).toBe('pink');
+    expect(colourWord('#2F6FEB')).toBe('blue');
+    expect(colourWord('#F2C230')).toBe('yellow');
+    expect(tOpen(tutorialBoulder().color)[0].text).toMatch(/^This is my problem\. [A-Z][a-z]+ holds only\./);
+    expect(INTRO_CARD.title).toBe(BRAND.game);
+    expect(INTRO_LINES[0].text).toMatch(/instructor/i);
+    const all = [...INTRO_LINES, ...FINALE].map((l) => l.text).join(' ') + ' ' + TIPS.join(' ');
+    expect(all).not.toMatch(/just go up/i);
+    expect(FINALE.some((l) => l.text.includes(BRAND.game))).toBe(true);
   });
 });

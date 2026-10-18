@@ -202,7 +202,7 @@ export function steiniTip(portraits: Portraits, text: string, cls = ''): HTMLEle
     'div',
     `steini-tip ${cls}`.trim(),
     portraits.frame('ibex', 'pt-steini'),
-    el('div', 'st-body', el('span', 'st-name', BRAND.guideName.toUpperCase(), el('i', null, 'GUIDE')), el('p', 'st-text', text)),
+    el('div', 'st-body', el('span', 'st-name', BRAND.guideName.toUpperCase(), el('i', null, 'INSTRUCTOR')), el('p', 'st-text', text)),
   );
 }
 

@@ -6,7 +6,7 @@ import { ROUTE_COLORS } from '../../config/brand';
 import { gradeWord } from '../../game/grades';
 import { backButton, el, label, setChildren } from '../dom';
 import { icon } from '../icons';
-import { fontG, modeTitle, wallAngle } from '../format';
+import { fontG, modeTitle, wallLabel } from '../format';
 import { gradeChip, screenRoot, specCell, steiniTip, swatch, tapeChip } from '../parts';
 import type { ScreenView, UICtx } from '../screen';
 
@@ -46,7 +46,7 @@ export function createPreview(ctx: UICtx, props: P): ScreenView<P> {
   const render = (p: P): void => {
     const b = p.boulder;
     const routeHolds = b.holds.filter((h) => h.role !== 'deco').length;
-    const ang = wallAngle(b.wallAngle);
+    const wall = wallLabel(b);
     const run = p.run;
     const mode = (modeTitle[run.mode] ?? run.mode).toUpperCase();
     const runBits =
@@ -63,13 +63,13 @@ export function createPreview(ctx: UICtx, props: P): ScreenView<P> {
                 : 'CHIRAL HQ';
     setChildren(
       card,
-      el('div', 'pv-row1', label(`${mode} · ${runBits}`, 'pv-kicker'), el('span', 'pv-read', icon('eye'), 'READ THE LINE')),
+      el('div', 'pv-row1', label(`${mode} · ${runBits}${wall.style ? ` · ${wall.style}` : ''}`, 'pv-kicker'), el('span', 'pv-read', icon('eye'), 'READ THE LINE')),
       el('div', 'pv-row2', nameEl(b.name), gradeChip(b.grade, { size: 'lg' })),
       el(
         'div',
         'pv-specs',
         specCell('FONT', fontG(b.grade), undefined, 'spec-sm'),
-        specCell(ang.kind.toUpperCase(), ang.value, undefined, 'spec-sm'),
+        specCell(wall.kind, wall.value, undefined, 'spec-sm spec-wall'),
         b.mode === 'rope' ? specCell('HEIGHT', `${b.height} M`, undefined, 'spec-sm') : specCell('HOLDS', String(routeHolds), undefined, 'spec-sm'),
         specCell('COLOUR', el('span', 'pv-col', swatch(b.color), colourName(b.color)), undefined, 'spec-sm'),
       ),

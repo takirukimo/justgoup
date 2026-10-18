@@ -5,7 +5,7 @@ import { bus } from '../../core/events';
 import type { CommunityProblem } from '../../core/types';
 import { button, el, label, setChildren, stagger } from '../dom';
 import { icon } from '../icons';
-import { fmtAge, fmtInt, pct, wallAngle } from '../format';
+import { fmtAge, fmtInt, pct, wallLabel } from '../format';
 import { backendBadge, backendKind, backendNote, emptyState, gradeChip, header, routeThumb, screenRoot, segmented, skeletons, topoLayer } from '../parts';
 import type { ScreenView, UICtx } from '../screen';
 
@@ -22,7 +22,7 @@ export function createCommunity(ctx: UICtx, props: P): ScreenView<P> {
 
   const card = (pr: CommunityProblem, i: number): HTMLElement => {
     const b = pr.boulder;
-    const ang = wallAngle(b.wallAngle);
+    const wall = wallLabel(b);
     const holds = b.holds.filter((h) => h.role !== 'deco').length;
     const rate = pct(pr.sends, pr.plays);
     const c = button({ variant: 'plain', cls: 'cm-card', aria: `Play ${pr.name}`, onTap: () => bus.emit('ui:play-problem', { problem: pr }) });
@@ -38,7 +38,7 @@ export function createCommunity(ctx: UICtx, props: P): ScreenView<P> {
         el(
           'span',
           'cm-specs',
-          el('span', null, label(ang.kind.toUpperCase()), el('b', 't-num', ang.value)),
+          el('span', null, label(wall.style ?? wall.kind), el('b', 't-num', wall.value)),
           el('span', null, label('HOLDS'), el('b', 't-num', String(holds))),
           el('span', null, label('PLAYS'), el('b', 't-num', fmtInt(pr.plays))),
         ),

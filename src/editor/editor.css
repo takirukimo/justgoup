@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   JUST GO UP — problem editor ("setter mode")
+   STEIBOCK — problem editor ("setter mode")
    Lives inside #ui (.jgu-ui) and reuses its tokens (--c-*, --f-*, --hair*, --r-*, --ease…)
    and classes (.btn, .seg, .range, .grade, .t-label, .toast, .switch).
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -90,7 +90,7 @@
     background-color 0.2s;
 }
 .ed-name:focus-within {
-  border-color: rgba(255, 79, 31, 0.55);
+  border-color: rgba(var(--c-signal-rgb), 0.55);
   background: rgba(23, 25, 29, 0.95);
 }
 .ed-name-k {
@@ -218,7 +218,7 @@
   border-color: rgba(255, 178, 63, 0.28);
 }
 .ed-chip[data-status='nobeta'] {
-  border-color: rgba(255, 69, 69, 0.3);
+  border-color: rgba(var(--c-bad-rgb), 0.3);
 }
 .ed-chip[data-status='sent'],
 .ed-chip[data-status='live'] {
@@ -273,7 +273,7 @@
   color: var(--c-glacier);
 }
 .ed-chip[data-status='nobeta'] .ed-chip-v {
-  color: #ff8b80;
+  color: var(--c-bad-ink);
 }
 .ed-chip-chev {
   flex: none;
@@ -332,8 +332,8 @@
   height: 18px;
 }
 .ed-badge-ic.bad {
-  background: rgba(255, 69, 69, 0.12);
-  color: #ff8b80;
+  background: rgba(var(--c-bad-rgb), 0.12);
+  color: var(--c-bad-ink);
 }
 .ed-ring {
   position: relative;
@@ -392,17 +392,17 @@
   0% {
     box-shadow:
       inset 0 1px 0 rgba(255, 255, 255, 0.38),
-      0 0 0 0 rgba(255, 79, 31, 0.7);
+      0 0 0 0 rgba(var(--c-signal-rgb), 0.7);
   }
   70% {
     box-shadow:
       inset 0 1px 0 rgba(255, 255, 255, 0.38),
-      0 0 0 14px rgba(255, 79, 31, 0);
+      0 0 0 14px rgba(var(--c-signal-rgb), 0);
   }
   100% {
     box-shadow:
       inset 0 1px 0 rgba(255, 255, 255, 0.38),
-      0 0 0 0 rgba(255, 79, 31, 0);
+      0 0 0 0 rgba(var(--c-signal-rgb), 0);
   }
 }
 
@@ -734,7 +734,7 @@
   height: 20px;
 }
 .ed-del .btn-ic {
-  color: #ff8b80;
+  color: var(--c-bad-ink);
 }
 .ed-size {
   flex: 1;
@@ -1206,7 +1206,7 @@
   transition: stroke 0.25s;
 }
 .ov-bounds.on {
-  stroke: rgba(255, 79, 31, 0.6);
+  stroke: rgba(var(--c-signal-rgb), 0.6);
 }
 .ov-tag-bg {
   stroke: rgba(13, 14, 16, 0.9);
@@ -1252,7 +1252,7 @@
   stroke: rgba(13, 14, 16, 0.85);
 }
 .ov-flag {
-  fill: rgba(255, 69, 69, 0.1);
+  fill: rgba(var(--c-bad-rgb), 0.1);
   stroke: var(--c-bad);
   stroke-width: 1.75;
   stroke-dasharray: 3 3;
@@ -1296,7 +1296,7 @@
   fill: var(--c-signal);
 }
 .ov-ghost.bad .ov-gh-ring {
-  fill: rgba(255, 69, 69, 0.1);
+  fill: rgba(var(--c-bad-rgb), 0.1);
   stroke: var(--c-bad);
 }
 .ov-ripple {

@@ -15,8 +15,13 @@ const MOOD_ICON: Record<NonNullable<GuideLine['mood']>, IconName | null> = {
   warn: 'warn',
 };
 
+/** Typewriter reveal (keep in sync with the pacing helpers in src/tutorial/script.ts). */
 const MS_PER_CHAR = 24;
 const MAX_TYPE_MS = 2600;
+/** Old text fades out before the new line types in (cross-fade, never a hard cut). */
+const SWAP_OUT_MS = 150;
+/** Card leave animation (hide, or moving between the top and bottom edge). */
+const LEAVE_MS = 220;
 
 export class GuideBubble {
   readonly el: HTMLElement;
@@ -30,6 +35,9 @@ export class GuideBubble {
   private typed = true;
   private typeTimer = 0;
   private hideTimer = 0;
+  private swapTimer = 0;
+  private animTimer = 0;
+  private swapping = false;
   private visible = false;
   private skipFn: (() => void) | null = null;
 
@@ -44,7 +52,7 @@ export class GuideBubble {
       'div',
       'gb-card',
       el('div', 'gb-pt', portraits.frame('ibex', 'pt-guide'), this.moodEl),
-      el('div', 'gb-body', el('div', 'gb-tag', el('span', 'gb-name', BRAND.guideName.toUpperCase()), label('GUIDE · ' + BRAND.gym)), this.textEl, this.more),
+      el('div', 'gb-body', el('div', 'gb-tag', el('span', 'gb-name', BRAND.guideName.toUpperCase()), label('INSTRUCTOR · ' + BRAND.gym)), this.textEl, this.more),
       el('span', 'gb-tail'),
     );
     this.catcher = el('div', 'gb-catcher');
@@ -63,25 +71,40 @@ export class GuideBubble {
 
   say(line: GuideLine): Promise<void> {
     clearTimeout(this.hideTimer);
+    clearTimeout(this.swapTimer);
     // A newer line replaces (and resolves) a pending one.
     this.finishTap();
-    const wasVisible = this.visible;
+    const wasVisible = this.visible && this.el.classList.contains('on');
     this.visible = true;
     const pos = line.position ?? 'bottom';
     const mood = line.mood ?? 'happy';
-    this.el.classList.add('on');
-    this.el.classList.toggle('at-top', pos === 'top');
-    this.el.classList.toggle('at-bottom', pos !== 'top');
-    this.card.className = `gb-card mood-${mood}`;
-    const mi = MOOD_ICON[mood];
-    this.moodEl.replaceChildren(...(mi ? [icon(mi)] : []));
-    this.moodEl.classList.toggle('none', !mi);
-    if (wasVisible) {
-      this.card.classList.add('swap');
+    const moved = wasVisible && this.el.classList.contains('at-top') !== (pos === 'top');
+    const apply = (mode: 'enter' | 'swap'): void => {
+      this.swapping = false;
+      this.el.classList.add('on');
+      this.el.classList.toggle('at-top', pos === 'top');
+      this.el.classList.toggle('at-bottom', pos !== 'top');
+      this.card.className = `gb-card mood-${mood} ${mode}`;
+      const mi = MOOD_ICON[mood];
+      this.moodEl.replaceChildren(...(mi ? [icon(mi)] : []));
+      this.moodEl.classList.toggle('none', !mi);
+      this.setText(line.text);
+    };
+    // No hard cuts: a new line cross-fades the text in place; a line that moves to the other edge
+    // lets the card leave first, then enters at its new spot.
+    if (!wasVisible || this.isReduced()) {
+      apply(wasVisible ? 'swap' : 'enter');
+    } else if (moved) {
+      this.swapping = true;
+      this.card.classList.remove('enter', 'swap', 'swap-out');
+      this.card.classList.add('leave');
+      this.swapTimer = window.setTimeout(() => apply('enter'), LEAVE_MS);
     } else {
-      this.card.classList.add('enter');
+      this.swapping = true;
+      this.card.classList.remove('enter', 'swap');
+      this.card.classList.add('swap-out');
+      this.swapTimer = window.setTimeout(() => apply('swap'), SWAP_OUT_MS);
     }
-    this.setText(line.text);
     const wait = !!line.waitForTap;
     this.el.classList.toggle('waiting', wait);
     if (!wait) return Promise.resolve();
@@ -93,14 +116,19 @@ export class GuideBubble {
   hide(): void {
     this.finishTap();
     clearTimeout(this.typeTimer);
+    clearTimeout(this.swapTimer);
+    this.swapping = false;
+    const wasOn = this.visible;
     this.visible = false;
     this.el.classList.remove('waiting');
-    this.card.classList.add('leave');
     clearTimeout(this.hideTimer);
+    if (!wasOn) return;
+    this.card.classList.remove('enter', 'swap', 'swap-out');
+    this.card.classList.add('leave');
     this.hideTimer = window.setTimeout(() => {
       this.el.classList.remove('on');
-      this.card.classList.remove('leave', 'enter', 'swap');
-    }, 220);
+      this.card.classList.remove('leave');
+    }, this.isReduced() ? 0 : LEAVE_MS);
   }
 
   /** Optional: show a SKIP chip (tutorial); null hides it. */
@@ -145,8 +173,9 @@ export class GuideBubble {
     if (!reduced) {
       this.typeTimer = window.setTimeout(() => this.completeTyping(), i * step + 120);
     }
-    // restart swap / enter animation classes
-    window.setTimeout(() => this.card.classList.remove('enter', 'swap'), 360);
+    // drop the enter / swap animation class once it has played (so the next one can restart)
+    clearTimeout(this.animTimer);
+    this.animTimer = window.setTimeout(() => this.card.classList.remove('enter', 'swap'), 480);
   }
 
   private completeTyping(): void {
@@ -156,7 +185,7 @@ export class GuideBubble {
   }
 
   private onTap(): void {
-    if (!this.visible) return;
+    if (!this.visible || this.swapping) return;
     if (!this.typed) {
       this.completeTyping();
       return;

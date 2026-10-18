@@ -4,7 +4,7 @@
 import type { GuideLine } from '../core/contracts';
 import type { LimbId } from '../core/types';
 import type { TutorialStep } from '../game/generator';
-import { BRAND } from '../config/brand';
+import { BRAND, PALETTE } from '../config/brand';
 
 export type Mood = NonNullable<GuideLine['mood']>;
 
@@ -24,29 +24,63 @@ export const LIMB_NAME: Record<LimbId, string> = {
 
 // ───────────────────────────── intro (first launch) ─────────────────────────────
 
+/** The cinematic title card: game title, brand line, then a spec-sheet row about the gym. */
 export const INTRO_CARD = {
-  eyebrow: 'NOW ENTERING',
-  title: BRAND.gym,
+  eyebrow: `NOW ENTERING ${BRAND.gym}`,
+  title: BRAND.game,
   /** Spec-sheet row: tiny label above each value. */
   specs: [
     ['HALL', 'BOULDER'],
     ['WALL', '01 · 4.5 M'],
-    ['SETTER ON DUTY', BRAND.guideName.toUpperCase()],
+    ['INSTRUCTOR', BRAND.guideName.toUpperCase()],
   ],
 } as const;
 
 export const INTRO_LINES: readonly Line[] = [
-  L(`Grüezi! I’m ${BRAND.guideName}, head setter here at ${BRAND.gym}. Yes, the horns are real.`, 'happy'),
+  L(`Grüezi! I’m ${BRAND.guideName}, your instructor here at ${BRAND.gym}. Yes, the horns are real.`, 'happy'),
   L('Here you move every limb yourself. Two hands, two feet, one wobbly body.', 'think'),
   L('Find your balance, climb to the TOP, and please don’t fall off.', 'point'),
 ];
 
 // ───────────────────────────── tutorial: framing ─────────────────────────────
 
-export const T_OPEN: readonly Line[] = [
-  L('This is my problem. Orange holds only. The other colours belong to other routes.', 'point'),
-  L('Hands start on START. Finish with both hands on TOP, and hold it.', 'happy'),
-];
+/** Opening lines on the route-reading shot; the colour word follows the tutorial route's tape. */
+export function tOpen(routeHex: string): readonly Line[] {
+  const c = colourWord(routeHex);
+  return [
+    L(`This is my problem. ${c.charAt(0).toUpperCase() + c.slice(1)} holds only. The other colours belong to other routes.`, 'point'),
+    L('Hands start on START. Finish with both hands on TOP, and hold it.', 'happy'),
+  ];
+}
+
+/** Plain colour word for a route hex ('orange', 'pink', …). CHIRAL pink is always 'pink'. */
+export function colourWord(hex: string): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return 'glowing';
+  if (`#${m[1]}`.toLowerCase() === PALETTE.signal.toLowerCase()) return 'pink';
+  const n = parseInt(m[1], 16);
+  const r = ((n >> 16) & 255) / 255;
+  const g = ((n >> 8) & 255) / 255;
+  const b = (n & 255) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  const d = max - min;
+  if (l > 0.86 && d < 0.2) return 'white';
+  if (l < 0.16) return 'black';
+  const sat = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+  if (sat < 0.18) return 'grey';
+  let h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  h = (h * 60 + 360) % 360;
+  if (h < 12 || h >= 345) return 'red';
+  if (h < 42) return 'orange';
+  if (h < 70) return 'yellow';
+  if (h < 170) return 'green';
+  if (h < 200) return 'teal';
+  if (h < 255) return 'blue';
+  if (h < 290) return 'purple';
+  return 'pink';
+}
 
 export const T_HANDLES = L('Those rings are your hands and feet. Drag one, and only that limb moves.', 'point');
 
@@ -202,13 +236,47 @@ export const RESCUE = {
 // ───────────────────────────── finale ─────────────────────────────
 
 export const FINALE: readonly Line[] = [
-  L('SENT! Your first CHIRAL problem. I’d high-five you, but… hooves.', 'cheer'),
+  L(`SENT! Your first ${BRAND.name} problem. I’d high-five you, but… hooves.`, 'cheer'),
   L('Out there, problems are random. Shake too long or rush it, and you fall.', 'warn'),
-  L('Send as many as you can without falling. That’s your score. Hopp, just go up!', 'point'),
+  L(`Send as many as you can without falling. That’s your score. Welcome to ${BRAND.game}. Hopp!`, 'point'),
 ];
 
-/** Reading time for a line (s): enough to read it once at a relaxed pace. */
-export function readTime(text: string, min = 1.6, max = 5.5): number {
-  const words = text.trim().split(/\s+/).length;
-  return Math.min(max, Math.max(min, 1.0 + words * 0.24));
+// ───────────────────────────── pacing ─────────────────────────────
+//
+// Owner's rule: every card and line stays up long enough to read, about 220 ms per word with a
+// 2.5 s minimum, plus the fade. Tap-to-continue lines can always be advanced early.
+
+/** Seconds per word at a relaxed reading pace. */
+export const READ_S_PER_WORD = 0.22;
+/** Nothing Steini says is on screen for less than this (s). */
+export const READ_MIN_S = 2.5;
+/** Enter/leave cross-fade of the speech bubble and the title card (s). */
+export const FADE_S = 0.35;
+/** The bubble's typewriter reveal (keep in sync with src/ui/guide-bubble.ts). */
+const TYPE_S_PER_CHAR = 0.024;
+const TYPE_MAX_S = 2.6;
+
+export function wordCount(text: string): number {
+  const t = text.trim();
+  return t ? t.split(/\s+/).length : 0;
+}
+
+/** Pure reading time for a line or card (s): 220 ms per word, at least 2.5 s. */
+export function readTime(text: string): number {
+  return Math.max(READ_MIN_S, wordCount(text) * READ_S_PER_WORD);
+}
+
+/**
+ * How long a line stays on screen before the script moves on (s): its reading time, plus half of
+ * the typewriter reveal (people read along while it types), plus the fade.
+ */
+export function holdTime(text: string): number {
+  const typing = Math.min(TYPE_MAX_S, text.trim().length * TYPE_S_PER_CHAR);
+  return readTime(text) + typing * 0.5 + FADE_S;
+}
+
+/** The intro title card's on-screen time (s), from every word it shows. */
+export function cardHoldTime(): number {
+  const words = [INTRO_CARD.eyebrow, INTRO_CARD.title, `BY ${BRAND.name} ${BRAND.sub}`, ...INTRO_CARD.specs.flat()].join(' ');
+  return readTime(words) + FADE_S;
 }

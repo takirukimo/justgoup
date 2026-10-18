@@ -1,7 +1,7 @@
 {
-  "name": "Just Go Up — CHIRAL Bouldering",
-  "short_name": "Just Go Up",
-  "description": "A premium handheld 3D bouldering game.",
+  "name": "STEIBOCK by CHIRAL SPORTS",
+  "short_name": "STEIBOCK",
+  "description": "A handheld 3D bouldering and lead-climbing game by CHIRAL SPORTS. Move every limb, keep your balance, send.",
   "start_url": "./",
   "scope": "./",
   "display": "fullscreen",
@@ -10,7 +10,8 @@
   "theme_color": "#0D0E10",
   "icons": [
     { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
-    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }

@@ -15,7 +15,7 @@ const head = src.match(/<head[^>]*>([\s\S]*?)<\/head>/i)?.[1] ?? '';
 const body = src.match(/<body[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? '';
 if (!head || !body) throw new Error('unexpected build output: no <head>/<body>');
 
-const title = head.match(/<title>[\s\S]*?<\/title>/i)?.[0] ?? '<title>Just Go Up</title>';
+const title = head.match(/<title>[\s\S]*?<\/title>/i)?.[0] ?? '<title>STEIBOCK</title>';
 const keep = head
   .replace(/<title>[\s\S]*?<\/title>/i, '')
   // the publisher supplies charset + viewport; drop ours to avoid duplicates

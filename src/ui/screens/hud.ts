@@ -162,7 +162,7 @@ export class HudView implements ScreenView<P> {
     this.pumpBox = el(
       'div',
       'inst inst-pump',
-      el('div', 'inst-head', icon('forearm', 'inst-ic'), label('PUMP'), this.pumpPct),
+      el('div', 'inst-head', icon('forearm', 'inst-ic'), label('PUMP'), icon('warn', 'inst-alert'), this.pumpPct),
       el('div', 'pump-bar', this.pumpFill, el('i', 'pump-seg')),
     );
     const g = arcGauge();
@@ -172,7 +172,7 @@ export class HudView implements ScreenView<P> {
       'inst inst-ten',
       label('TENSION', 'tg-lbl'),
       el('div', 'tg-wrap', g.svg, el('div', 'bal', el('i', 'bal-rail'), this.balDot)),
-      el('div', 'tg-meta', this.tenState),
+      el('div', 'tg-meta', icon('warn', 'inst-alert'), this.tenState),
     );
 
     this.hintBtn = button({ icon: 'bulb', variant: 'icon', cls: 'hud-hint', aria: 'Hint', onTap: () => bus.emit('ui:hint') });

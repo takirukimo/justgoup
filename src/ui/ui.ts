@@ -55,6 +55,28 @@ const LEAVE_MS = 240;
 
 const kebab = (s: string): string => s.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase());
 
+/**
+ * UI-only colour roles layered over PALETTE (src/config/brand.ts):
+ *  signalInk  CHIRAL pink lifted for small text on near-black (6.4:1 on basalt, AA).
+ *  signalHi/Lo  the pink button gradient; white labels stay ≥ 4.5:1 across the label band.
+ *  bad / badInk  danger is a hot orange-red so stress and falls never read as brand pink.
+ */
+export const UI_COLOURS = {
+  signalInk: '#EE6B79',
+  signalHi: '#D9485A',
+  signalLo: '#B83045',
+  bad: '#FF5A26',
+  badInk: '#FF8A66',
+} as const;
+
+/** '#rrggbb' → 'r, g, b' (for rgba(var(--c-x-rgb), a) tints); null for anything else. */
+function hexRgb(hex: string): string | null {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return `${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}`;
+}
+
 export class GameUI implements UIAPI {
   /** Optional app hook for Settings → Reset progress (after the player confirms). */
   onResetProgress: (() => void) | null = null;
@@ -294,7 +316,12 @@ export class GameUI implements UIAPI {
   }
 
   private applyTokens(root: HTMLElement): void {
-    for (const [k, v] of Object.entries(PALETTE)) root.style.setProperty(`--c-${kebab(k)}`, v);
+    const colours: Record<string, string> = { ...PALETTE, ...UI_COLOURS };
+    for (const [k, v] of Object.entries(colours)) {
+      root.style.setProperty(`--c-${kebab(k)}`, v);
+      const rgb = hexRgb(v);
+      if (rgb) root.style.setProperty(`--c-${kebab(k)}-rgb`, rgb);
+    }
     root.style.setProperty('--f-display', FONTS.display);
     root.style.setProperty('--f-ui', FONTS.ui);
     root.style.setProperty('--f-mono', FONTS.mono);
