@@ -598,8 +598,16 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
         // the chord pressing it into a less steep panel (a kicker under a steep board) or off a steeper one
         nFoot = nPerFoot * (ci * cth + si * sth) + ((FOOT_PUSH_SHARE * cth) / nf) * (sth * ci - cth * si);
       }
-      // a pushing foot that has to PULL (toe-pull on a steep panel) carries that pull too
-      FOOT_PULL[i] = i >= 2 && !isHook(c.mode) && c.hold !== null ? nFoot : 0;
+      // a pushing foot that has to PULL (toe-pull) carries that pull as load where the flat-wall model has
+      // no answer for it: the extra pull a fold asks for (feet on a steeper panel than the stance's plane),
+      // and on roof panels (≥ FOOT_PULL_FROM°, ramping in to FOOT_PULL_FULL°) the whole of it — a foot
+      // can't hold a roof up by pushing on a down-facing edge, it needs a hook. Up to 45° the plane's own
+      // toe-pull stays in the foot's capacity (footCapacity), exactly as on a flat wall.
+      if (i >= 2 && !isHook(c.mode) && c.hold !== null && nFoot < 0) {
+        const w = smoothstep(FOOT_PULL_FROM, FOOT_PULL_FULL, prof.ang[k]);
+        const pull = nFoot - (1 - w) * (nPerFoot < 0 ? nPerFoot : 0);
+        FOOT_PULL[i] = pull < 0 ? pull : 0;
+      } else FOOT_PULL[i] = 0;
     }
     let dx = ax[i] - c.x;
     let dy = ay[i] - c.y;
@@ -852,8 +860,11 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
 
 /** Side-view scratch of the profile path. */
 const SV: Side = { h: 0, z: 0 };
-/** Profile path: each pushing foot's normal force in its own panel (negative = it must toe-pull). */
+/** Profile path: the toe-pull (≤ 0, body weights) each pushing foot carries as load. */
 const FOOT_PULL = new Float64Array(4);
+/** Panel angles (degrees) over which a pushing foot's whole toe-pull becomes load (roofs need hooks). */
+const FOOT_PULL_FROM = 45;
+const FOOT_PULL_FULL = 70;
 /** Share of the in-plane weight the feet are assumed to push along the chord (per-foot normal on a fold). */
 const FOOT_PUSH_SHARE = 0.6;
 
