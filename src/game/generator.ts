@@ -24,8 +24,8 @@ import { hashString, Rng } from '../core/rng';
 import { clamp, lerp } from '../core/math';
 import { planBetaDetailed, SOLVER, StanceLab, type PlanResult } from './solver';
 import type { Pose } from './statics';
-import { datan2, dhypot, dsin } from './dmath';
-import { canMatch, nominalCapacity, usableByHand } from './holds';
+import { datan2, dcos, dhypot, dsin } from './dmath';
+import { canMatch, contactPoint, nominalCapacity, usableByHand } from './holds';
 import { angleAt as profAngleAt, makeProfile, steepestAngle, type WallProfile } from './wall-profile';
 import {
   dailyStyle,
@@ -78,12 +78,13 @@ const HAND_TYPES: readonly HoldType[] = ['jug', 'edge', 'crimp', 'sloper', 'pinc
 
 /** Lead routes get a hold theme ([jug, edge, crimp, sloper, pinch, pocket] multipliers): varied hold sets. */
 type Theme = 'classic' | 'crimpy' | 'pinchy' | 'slopey' | 'pockets' | 'juggy';
+// (strong enough that a themed route's dominant hand hold is its theme, not the ubiquitous edge)
 const THEME_W: Record<Theme, readonly number[]> = {
   classic: [1, 1, 1, 1, 1, 1],
-  crimpy: [0.75, 1.3, 1.9, 0.6, 0.8, 0.8],
-  pinchy: [0.85, 0.8, 0.6, 1, 2.3, 0.6],
-  slopey: [0.85, 0.9, 0.6, 2.2, 1.1, 0.6],
-  pockets: [0.85, 1, 0.8, 0.7, 0.8, 2.6],
+  crimpy: [0.75, 1.1, 2.8, 0.6, 0.7, 0.7],
+  pinchy: [0.85, 0.65, 0.55, 1, 3, 0.55],
+  slopey: [0.85, 0.65, 0.55, 3.2, 1.1, 0.55],
+  pockets: [0.85, 0.7, 0.7, 0.65, 0.75, 3.4],
   juggy: [1.9, 1, 0.6, 0.7, 1, 0.7],
 };
 
@@ -116,6 +117,8 @@ interface Cand {
   maxT: number;
   /** A throw (deadpoint / double dyno) instead of a static move. */
   dyno?: 'LH' | 'RH' | 'both';
+  /** The route volume a fresh hand hold is bolted onto (set with the hold; GEN.holdsOnVolumes). */
+  vol?: HoldDef;
 }
 
 interface Frame {
@@ -149,6 +152,8 @@ interface Params {
   line: Line;
   profile: ProfileSpec | null;
   theme: Theme;
+  /** Hand holds may be bolted onto route volumes (GEN.holdsOnVolumes / GenerateOptions.holdsOnVolumes). */
+  mounts: boolean;
 }
 
 class Builder {
@@ -204,7 +209,8 @@ class Builder {
         const climb = this.H - 0.35 - this.yRef;
         this.slope = this.dir * Math.min(dtanDeg(rng.range(30, 50)), (2 * span - 0.2) / climb);
         this.x0 = clamp(-this.slope * climb * 0.5, -span, span);
-        this.amp = rng.range(0.04, 0.1);
+        // a tower's diagonal crosses the whole wall over 13 m: a little more wander on the way
+        this.amp = p.rope ? rng.range(0.08, 0.2) : rng.range(0.04, 0.1);
         break;
       }
       case 'zigzag': {
@@ -334,6 +340,8 @@ class Builder {
   private tmpSeq = 0;
   private topY = 4.15;
   private maxT = 0.6;
+  /** The grade's strain limit (maxT before the steep-panel floor of a profiled wall, see frame()). */
+  private baseMaxT = 0.6;
   /** Strain the setter aims each move at (see buildRoute). */
   private targetT = 0.45;
   private sinceRest = 0;
@@ -353,6 +361,41 @@ class Builder {
   private temp(role: HoldRole, type: HoldType, x: number, y: number, size: number, angle: number, color = this.color): HoldDef {
     const h: HoldDef = { id: `~${this.tmpSeq++}`, x: r3(x), y: r3(y), type, size: r3(size), angle: r3(angle), role, color, seed: 0 };
     return this.dress(h, true);
+  }
+
+  /** Share of graded hand moves set on a hold bolted onto a route volume (Params.mounts). */
+  private mountChance(): number {
+    switch (this.p.style) {
+      case 'compression':
+        return 0.4;
+      case 'mixed':
+        return 0.22;
+      case 'overhang':
+      case 'cave':
+        return 0.12;
+      default:
+        return 0.06;
+    }
+  }
+
+  /**
+   * A route volume for a hand hold at (x, y) facing `angle` to sit on (research §3.3: holds on volume faces):
+   * the hold on the volume's face toward the climber, the volume's centre behind it. Null when the
+   * volume would leave the wall, cover another route hold, or put its own foot spot (the top of the
+   * volume, where a foot stands) within snap range of the mounted hold (holds.volumeYields).
+   */
+  private mountVolume(x: number, y: number, angle: number, holdSize: number): HoldDef | null {
+    const { rng } = this;
+    const vs = rng.range(0.22, 0.34);
+    const off = vs * rng.range(0.38, 0.5);
+    const cx = x - dcos(angle) * off;
+    const cy = y - dsin(angle) * off;
+    if (Math.abs(cx) + vs > this.W / 2 - 0.05 || cy - vs < 0.2 || cy + vs > this.H - 0.15) return null;
+    if (this.gap(cx, cy, vs) < 0.03) return null;
+    const vol = this.temp('foot', 'volume', cx, cy, vs, -HALF_PI + rng.range(-0.2, 0.2));
+    const cp = contactPoint(vol, 2, false, { x: 0, y: 0 });
+    if (dhypot(cp.x - x, cp.y - y) - holdSize < GAME.snapRadius + 0.03) return null;
+    return vol;
   }
 
   private accept(h: HoldDef): HoldDef {
@@ -414,6 +457,25 @@ class Builder {
     return this.classicAngle() + this.rng.range(-0.45, 0.45);
   }
 
+  /** Profiled walls: surface heights of the convex lips the line climbs past (a steep panel easing off). */
+  private lips: number[] | null = null;
+
+  /**
+   * Turning a lip (a ≥ 40° panel easing off by ≥ 12°, research §3.4 "cruxes lead from poor holds to a
+   * reward hold"): the hand holds just below and over it are the reward — positive holds the body can
+   * pull over on. Not on a lip the route tops out on (a cave's lip top is the reward already).
+   */
+  private atLip(ty: number): boolean {
+    if (!this.prof) return false;
+    if (!this.lips) {
+      this.lips = [];
+      const pr = this.prof;
+      for (let i = 1; i < pr.n; i++) if (pr.ang[i - 1] >= 40 && pr.ang[i - 1] - pr.ang[i] >= 12 && this.topY > pr.y0[i] + 0.9) this.lips.push(pr.y0[i]);
+    }
+    for (const y of this.lips) if (ty >= y - 0.25 && ty <= y + 0.75) return true;
+    return false;
+  }
+
   /** Lead: how the template shapes the hand hold at height ty ('jug' rest, 'easy' start, 'crux'). */
   private leadZone(ty: number): 'start' | 'rest' | 'crux' | 'normal' {
     if (!this.p.rope) return 'normal';
@@ -454,6 +516,7 @@ class Builder {
       const hard = p.grade >= 5;
       let mode: 'jug' | 'better' | 'grade';
       if (restJug || zone === 'rest') mode = 'jug';
+      else if (this.atLip(ty)) mode = k === 0 || g <= 0.74 ? 'jug' : 'better';
       else if (zone === 'start') mode = g <= 0.62 ? 'jug' : 'better';
       else if (zone === 'crux') mode = k >= gradeTries + 2 ? 'better' : 'grade';
       else if (bump) mode = hard ? 'grade' : 'jug';
@@ -471,7 +534,9 @@ class Builder {
       if (squeeze && mode !== 'jug') angle = this.facing(li, tx, ty, cur);
       else if (mode === 'grade' && rng.chance(awkward)) angle = this.facing(li, tx, ty, cur);
       if (this.gap(tx, ty, type === 'volume' ? size : 0.07) < 0.03) tx = this.clampX(tx + side * (type === 'volume' ? size + 0.1 : 0.16));
-      out.push({ li, hold: this.temp('hand', type, tx, ty, size, angle), fresh: true, maxT: this.maxT });
+      // holds bolted onto a route volume: squeezes on compression, now and then on mixed / steep problems
+      const vol = p.mounts && mode !== 'jug' && type !== 'volume' && rng.chance(this.mountChance()) ? this.mountVolume(tx, ty, angle, size) : null;
+      out.push({ li, hold: this.temp('hand', type, tx, ty, size, angle), fresh: true, maxT: this.maxT, vol: vol ?? undefined });
     }
   }
 
@@ -602,6 +667,14 @@ class Builder {
     const cands: Cand[] = [];
     const a = this.slots[0]!;
     const b = this.slots[1]!;
+    if (this.prof) {
+      // A steep panel is never relaxed, whatever the grade (a cave's roof, a tower's crux, the lip above
+      // it): the moves there may strain the body like the panel demands. The setter still aims every
+      // move at the grade's targetT; the floor only lets the line get through.
+      const hi = Math.max(a.y, b.y);
+      const ang = Math.max(this.angleAt(hi), this.angleAt(hi + 0.4), this.angleAt(this.pose.py));
+      this.maxT = Math.max(this.baseMaxT, ang >= 38 ? lerp(0.66, 0.78, clamp((ang - 38) / 32, 0, 1)) : 0);
+    }
     const f2 = this.footOf(2);
     const f3 = this.footOf(3);
     const footHigh = Math.max(f2.y, f3.y, this.pose.py - 1.1);
@@ -693,6 +766,7 @@ class Builder {
       this.maxT = Math.max(this.maxT, lerp(0.7, 0.8, p.t));
       this.targetT = Math.max(this.targetT, 0.5);
     }
+    this.baseMaxT = this.maxT;
     if (p.rope) {
       // the crux band: the steepest panel (profiles), else 55–72 % of the height
       const prof = this.prof;
@@ -793,6 +867,7 @@ class Builder {
       }
       this.slots = r.slots;
       this.pose = r.pose;
+      if (c.fresh && c.vol) c.hold.onVolume = this.accept(c.vol).id;
       if (c.fresh) this.accept(c.hold);
       if (c.dyno) {
         this.dynoDone = true;
@@ -957,7 +1032,8 @@ class Builder {
 }
 
 function lineFor(style: RouteStyle, rope: boolean, rng: Rng): Line {
-  if (rope) return rng.weighted(['wave', 'zigzag'] as const, [1.4, 1]);
+  // lead lines: a meander up the tower, zigzags between the edges, or a diagonal from one side to the other
+  if (rope) return rng.weighted(['wave', 'zigzag', 'diagonal'] as const, [1.3, 1, 0.8]);
   switch (style) {
     case 'traverse':
       return 'traverse';
@@ -970,7 +1046,7 @@ function lineFor(style: RouteStyle, rope: boolean, rng: Rng): Line {
   }
 }
 
-function paramsFor(grade: number, angle: number, rope: boolean, ease: number, style: RouteStyle, profile: ProfileSpec | null, rng: Rng): Params {
+function paramsFor(grade: number, angle: number, rope: boolean, ease: number, style: RouteStyle, profile: ProfileSpec | null, rng: Rng, mounts = false): Params {
   const g = clamp(Math.round(grade), 0, 12);
   const t = g / 12;
   const p: Params = {
@@ -985,6 +1061,7 @@ function paramsFor(grade: number, angle: number, rope: boolean, ease: number, st
     style,
     line: lineFor(style, rope, rng.fork(0x11e)),
     profile,
+    mounts,
     theme: rope ? new Rng(rng.fork(0x7e3e).int(1, 0x7fffffff)).weighted(['classic', 'crimpy', 'pinchy', 'slopey', 'pockets', 'juggy'] as const, [2, g >= 4 ? 1.2 : 0.4, 1, g >= 3 ? 1 : 0.4, g >= 3 ? 0.8 : 0.3, g <= 4 ? 1.2 : 0.5]) : 'classic',
   };
   switch (style) {
@@ -1025,6 +1102,9 @@ const deriveSeed = (seed: number, attempt: number): number => (attempt === 0 ? s
 
 /** Multi-angle profiles for these options (GenerateOptions.profiles, else the GEN.profiles switch). */
 const profilesOn = (opts: GenerateOptions): boolean => (opts.profiles ?? GEN.profiles) === true && opts.wallAngle === undefined;
+
+/** Hand holds bolted onto route volumes for these options (GenerateOptions.holdsOnVolumes, else GEN.holdsOnVolumes). */
+const mountsOn = (opts: GenerateOptions): boolean => (opts.holdsOnVolumes ?? GEN.holdsOnVolumes) === true;
 
 /**
  * The archetype a boulder gets: GenerateOptions.style, else the Send Train rotation (opts.run), else a
@@ -1143,7 +1223,7 @@ export function generateCandidate(opts: GenerateOptions, attempt: number): Bould
     if (ease && style !== 'slab') angle = Math.min(angle, style === 'overhang' || style === 'compression' ? 25 : 20);
   }
   angle = clamp(angle, -15, 45);
-  const b = new Builder(rng, paramsFor(grade, angle, rope, ease, style, profile, rng), color);
+  const b = new Builder(rng, paramsFor(grade, angle, rope, ease, style, profile, rng, mountsOn(opts)), color);
   if (!b.buildRoute()) return null;
   b.buildExtraFeet();
   if (rope) b.buildQuickdraws();

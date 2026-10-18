@@ -31,6 +31,38 @@ export function usableBy(limbIdx: number, h: HoldDef): boolean {
   return isHandIdx(limbIdx) ? usableByHand(h) : usableByFoot(h);
 }
 
+/** Holds bolted onto route volumes (HoldDef.onVolume), by volume id; null when the problem has none. */
+export function mountsByVolume(holds: readonly HoldDef[]): Map<string, HoldDef[]> | null {
+  let out: Map<string, HoldDef[]> | null = null;
+  for (const h of holds) {
+    if (!h.onVolume || h.role === 'deco') continue;
+    out ??= new Map();
+    const list = out.get(h.onVolume);
+    if (list) list.push(h);
+    else out.set(h.onVolume, [h]);
+  }
+  return out;
+}
+
+/**
+ * Snap rule for a hold bolted onto a volume: a foot released within GAME.snapRadius of the mounted hold
+ * takes that hold, not the volume under it (the volume is far bigger, so plain nearest-edge snapping
+ * would always pick it). The sim's snapCandidate applies it; the generator keeps every volume's own
+ * foot spot out of its mounted holds' range, so the planner's targets stay unambiguous.
+ */
+export function volumeYields(vol: HoldDef, px: number, py: number, mounts: ReadonlyMap<string, readonly HoldDef[]> | null): boolean {
+  if (!mounts || vol.type !== 'volume') return false;
+  const list = mounts.get(vol.id);
+  if (!list) return false;
+  for (const m of list) {
+    const dx = px - m.x;
+    const dy = py - m.y;
+    const r = GAME.snapRadius + m.size;
+    if (dx * dx + dy * dy <= r * r) return true;
+  }
+  return false;
+}
+
 /** Longest reach of a limb in any direction (its envelope's maximum, see anatomy.ts). */
 export function maxReachIdx(limbIdx: number): number {
   return isHandIdx(limbIdx) ? BODY.armMax : BODY.legMax;

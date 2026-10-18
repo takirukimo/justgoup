@@ -289,7 +289,8 @@ export function styleProfile(style: RouteStyle, grade: number, rng: Rng): Profil
 
 /**
  * Lead Tower profile (GEN.profiles): a vertical start, an overhanging headwall that steepens, a roof crux
- * at 55–75 % of the height, and a less steep finish to the anchor (research §3.2 lead tower, §3.5 template).
+ * (45° easy … 60°+ hard) at 55–75 % of the height, a transition panel over its lip when the fold is big,
+ * and a less steep finish to the anchor (research §3.2 lead tower, §3.5 template).
  * The surface is `length` m long (the sim's y extent; GAME.ropeWall.height), so the world height is lower.
  */
 export function leadProfile(grade: number, rng: Rng, length: number): ProfileSpec {
@@ -298,14 +299,20 @@ export function leadProfile(grade: number, rng: Rng, length: number): ProfileSpe
     [rng.range(2.4, 3.0), rng.range(0, 5)],
     [rng.range(2.6, 3.4), lerp(10, 18, steep) + rng.range(-3, 3)],
     [rng.range(2.4, 3.2), lerp(18, 32, steep) + rng.range(-3, 3)],
-    [rng.range(1.2, 1.7), lerp(40, 58, steep) + rng.range(-3, 2)],
+    // the roof crux: 45° at the easy end, a 60°+ roof at the hard end (research §3.2 tower: [2.0, 60])
+    [rng.range(1.3, 1.8), lerp(45, 63, steep) + rng.range(-3, 2)],
   ];
   // the roof crux starts at 55–75 % of the route; the finish panel takes the rest
   const sofar = spec.reduce((a, s) => a + s[0], 0) - spec[3][0];
   const want = length * rng.range(0.56, 0.68);
   spec[2][0] = clamp(spec[2][0] + (want - sofar), 1.6, 4.2);
+  // over the roof's lip: a convex fold of more than ~25° is turned in two steps (a short transition
+  // panel), as on real towers — a single 40° lip would leave the feet hanging under the roof
+  const crux = spec[3][1];
+  const finish = lerp(14, 28, steep) + rng.range(-3, 3);
+  if (crux - finish > 25) spec.push([rng.range(0.8, 1.1), (crux + finish) / 2]);
   const used = spec.reduce((a, s) => a + s[0], 0);
-  spec.push([Math.max(1.5, length - used), lerp(12, 26, steep) + rng.range(-3, 3)]);
+  spec.push([Math.max(1.5, length - used), finish]);
   return stack(spec, 'TOWER');
 }
 

@@ -9,8 +9,10 @@ import { wallLabel } from '../ui/format';
 import { dailyBoulder, dailyGrade, generateBoulder } from './generator';
 import { availableStyles, dailyStyle, runStyle, STYLES } from './archetypes';
 import { planBetaDetailed } from './solver';
-import { usableByHand } from './holds';
+import { contactPoint, usableByHand } from './holds';
 import { profileOf, angleAt, wallTopHeight } from './wall-profile';
+import { ClimberSim } from './climber-sim';
+import { autoClimb } from './bot';
 
 const route = (b: BoulderDef) => b.holds.filter((h) => h.role !== 'deco');
 const hands = (b: BoulderDef) => b.holds.filter((h) => usableByHand(h) && h.role !== 'deco');
@@ -268,5 +270,56 @@ describe('archetypes — hold variety (research §3.3 catalogue)', () => {
     expect(avg(depth.hard)).toBeLessThan(avg(depth.easy));
     if (lips.easy.length && lips.hard.length) expect(avg(lips.hard)).toBeLessThan(avg(lips.easy));
     if (fingers.easy.length && fingers.hard.length) expect(avg(fingers.hard)).toBeLessThan(avg(fingers.easy));
+  });
+});
+
+describe('archetypes — the bot sends every one of them', () => {
+  it('through the player input API, with profiles off and on (throws on the dyno, roof hooks in the cave)', { timeout: 300_000 }, () => {
+    const failed: string[] = [];
+    for (const profiles of [false, true])
+      for (const style of availableStyles(profiles))
+        for (const grade of [3, 7]) {
+          const b = generateBoulder({ seed: 8100 + grade * 7 + STYLES.indexOf(style) * 131, grade, style, profiles });
+          expect(b.style).toBe(style);
+          const r = autoClimb(new ClimberSim(b));
+          if (!r.sent) failed.push(`${style} V${grade} (profiles ${profiles}): ${r.bot.log.slice(-3).join('; ')}`);
+          else if (style === 'dyno') expect(r.bot.throws, `${b.id} throws`).toBeGreaterThanOrEqual(1);
+        }
+    expect(failed).toEqual([]);
+  });
+});
+
+describe('archetypes — holds bolted onto volumes (GEN.holdsOnVolumes)', () => {
+  it('ships OFF (the renderer seats them on the volume face later); without it no hold is mounted', () => {
+    expect(GEN.holdsOnVolumes).toBe(false);
+    for (const b of some('compression', false, [4, 9])) expect(b.holds.some((h) => h.onVolume)).toBe(false);
+  });
+
+  it('compression squeezes sit on route volumes; a foot by the hold takes it, on top of the volume the volume', { timeout: 200_000 }, () => {
+    let mounted = 0;
+    for (const grade of [4, 6, 8, 10]) {
+      const b = generateBoulder({ seed: 300 + grade * 13, grade, style: 'compression', holdsOnVolumes: true });
+      const byId = new Map(b.holds.map((h) => [h.id, h] as const));
+      const sim = new ClimberSim(b);
+      for (const h of b.holds.filter((x) => x.onVolume)) {
+        mounted++;
+        const v = byId.get(h.onVolume!)!;
+        // a route volume (feet may stand on it, hands use the hold), the hold on its face
+        expect(v.type).toBe('volume');
+        expect(v.role).toBe('foot');
+        expect(usableByHand(h)).toBe(true);
+        expect(Math.hypot(v.x - h.x, v.y - h.y)).toBeLessThan(v.size);
+        // the volume's own foot spot stays out of the mounted hold's snap range (unambiguous targets)
+        const spot = contactPoint(v, 2, false, { x: 0, y: 0 });
+        expect(Math.hypot(spot.x - h.x, spot.y - h.y) - h.size).toBeGreaterThan(0.11);
+        // the sim's snap rule: a foot released on the hold takes the hold, not the volume under it
+        const onHold = contactPoint(h, 2, false, { x: 0, y: 0 });
+        const snapped = sim.snapCandidate('LF', onHold) ?? sim.snapCandidate('RF', onHold);
+        if (snapped) expect(snapped.id).not.toBe(v.id);
+      }
+      const r = autoClimb(sim);
+      expect(r.sent, `${b.id}: ${r.bot.log.join('; ')}`).toBe(true);
+    }
+    expect(mounted).toBeGreaterThanOrEqual(3);
   });
 });

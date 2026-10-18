@@ -177,6 +177,8 @@ export interface GenerateOptions {
   run?: { seed: number; index: number };
   /** Multi-angle wall profiles for this problem (default: tuning GEN.profiles). */
   profiles?: boolean;
+  /** Hand holds bolted onto route volumes (HoldDef.onVolume) for this problem (default: tuning GEN.holdsOnVolumes). */
+  holdsOnVolumes?: boolean;
 }
 
 export interface SendScoreInput {

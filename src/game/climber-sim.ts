@@ -128,6 +128,8 @@ import {
   type LimbContact,
   topHolds,
   usableByFoot,
+  mountsByVolume,
+  volumeYields,
   usableByHand,
 } from './holds';
 import { anatomicStrain, envClampOn, envelopePolygon, envEvalOn, envProjectOn, FOLD_K, PROJ_OUT, segmentsCross } from './anatomy';
@@ -363,6 +365,8 @@ export class ClimberSim implements ClimberSimAPI {
   private readonly holdById: Map<string, HoldDef>;
   private readonly handHolds: HoldDef[];
   private readonly footHolds: HoldDef[];
+  /** Holds bolted onto route volumes, by volume id (null: none). A foot next to one takes it, not the volume. */
+  private readonly mounts: Map<string, HoldDef[]> | null;
   private readonly topIds: Set<string>;
   private readonly cth: number;
   private readonly sth: number;
@@ -491,6 +495,7 @@ export class ClimberSim implements ClimberSimAPI {
     this.holdById = new Map(boulder.holds.map((h) => [h.id, h] as const));
     this.handHolds = boulder.holds.filter(usableByHand);
     this.footHolds = boulder.holds.filter(usableByFoot);
+    this.mounts = mountsByVolume(boulder.holds);
     this.topIds = new Set(topHolds(boulder).map((h) => h.id));
     this.cth = Math.cos(boulder.wallAngle * DEG);
     this.sth = Math.sin(boulder.wallAngle * DEG);
@@ -1296,6 +1301,7 @@ export class ClimberSim implements ClimberSimAPI {
     for (const h of list) {
       const d = Math.hypot(p.x - h.x, p.y - h.y) - h.size;
       if (d > GAME.snapRadius || d >= bestD) continue;
+      if (i >= 2 && volumeYields(h, p.x, p.y, this.mounts)) continue;
       contactPoint(h, i, this.wouldMatch(i, h), tmp);
       if (!this.reachOk(i, tmp.x, tmp.y, SIM.reachTolerance)) continue;
       if (this.blocked(i, tmp.x, tmp.y, h)) continue;
