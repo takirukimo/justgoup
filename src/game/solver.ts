@@ -410,14 +410,13 @@ class Planner {
   /** Would the feet's modes at `pose` differ from the ones the contacts carry? */
   private footModesChange(contacts: Contacts, pose: Pose): boolean {
     const prof = this.prof;
-    if (!prof) return false;
     computeAnchors(pose, this.AX, this.AY);
     const comY = pose.py + BODY.comT * (pose.cy - pose.py);
-    const bodyAngle = smoothAngleAt(prof, comY);
+    const bodyAngle = prof ? smoothAngleAt(prof, comY) : this.b.wallAngle;
     for (let i = 2; i < 4; i++) {
       const c = contacts[i];
       if (!c || !c.hold) continue;
-      const wall = Math.max(angleAt(prof, c.y), bodyAngle);
+      const wall = prof ? Math.max(angleAt(prof, c.y), bodyAngle) : bodyAngle;
       const m = footModeFor(c.hold, c.x, c.y, this.AX[i], this.AY[i], pose.px, wall, null);
       const mode = m === 'heel' ? FOOT_HEEL : m === 'toe' ? FOOT_TOE : m === 'drop' ? FOOT_DROP : FOOT_PUSH;
       if (mode !== c.mode) return true;
@@ -426,20 +425,20 @@ class Planner {
   }
 
   /**
-   * Folded walls: feet on holds get the technique the live climber would use there (holds.footModeFor,
-   * the sim's rule) for the body in `pose` — hooks on roofs pull instead of pushing. Flat walls keep
-   * pushing feet (the planner's long-standing model).
+   * Feet on holds get the technique the live climber would use there (holds.footModeFor, the sim's rule)
+   * for the body in `pose`: hooks on roofs pull instead of pushing, a foot at hip height out to the side
+   * of a steep flat wall heel-hooks, a sidepull foothold drops the knee. (Flat walls used to plan pushing
+   * feet only, so a stance the sim turned into a weak heel hook could slip where the plan stood calm.)
    */
   applyFootModes(contacts: Contacts, pose: Pose): void {
     const prof = this.prof;
-    if (!prof) return;
     computeAnchors(pose, this.AX, this.AY);
     const comY = pose.py + BODY.comT * (pose.cy - pose.py);
-    const bodyAngle = smoothAngleAt(prof, comY);
+    const bodyAngle = prof ? smoothAngleAt(prof, comY) : this.b.wallAngle;
     for (let i = 2; i < 4; i++) {
       const c = contacts[i];
       if (!c || !c.hold) continue;
-      const wall = Math.max(angleAt(prof, c.y), bodyAngle);
+      const wall = prof ? Math.max(angleAt(prof, c.y), bodyAngle) : bodyAngle;
       const m = footModeFor(c.hold, c.x, c.y, this.AX[i], this.AY[i], pose.px, wall, null);
       c.mode = m === 'heel' ? FOOT_HEEL : m === 'toe' ? FOOT_TOE : m === 'drop' ? FOOT_DROP : FOOT_PUSH;
     }
@@ -471,12 +470,12 @@ class Planner {
     const contacts = this.setContacts(n, -1);
     this.prm.reachLimb = -1;
     const init = seed ?? initialPose(contacts, this.prm, this.tmpPose);
-    if (this.prof) this.applyFootModes(contacts, init);
+    this.applyFootModes(contacts, init);
     const pose: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
     let r = seed ? optimizePose(contacts, this.prm, init, pose, this.ev, 44, true) : optimizePose(contacts, this.prm, init, pose, this.ev, 90);
     // the sim infers each foot's mode from where the body SETTLES: when the settled pose turns a toe hook
-    // into a plain edge (or the other way round), judge the stance with the modes the sim will use
-    if (this.prof && this.footModesChange(contacts, pose)) {
+    // into a plain edge (or an edge into a heel hook), judge the stance with the modes the sim will use
+    if (this.footModesChange(contacts, pose)) {
       this.applyFootModes(contacts, pose);
       const p2: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
       const r2 = optimizePose(contacts, this.prm, pose, p2, this.ev, 44, true);
@@ -499,7 +498,7 @@ class Planner {
     const hit = this.reachCache.get(cacheKey);
     if (hit) return hit;
     const contacts = this.setContacts(n, li);
-    if (this.prof) this.applyFootModes(contacts, n.pose);
+    this.applyFootModes(contacts, n.pose);
     const prm = this.reachPrm;
     prm.reachLimb = li;
     prm.reachX = tx;
@@ -760,7 +759,7 @@ class Planner {
     a.cx = parent.pose.cx + d.sx;
     a.cy = parent.pose.cy + d.sy;
     const contacts = this.setContacts(n, -1);
-    if (this.prof) this.applyFootModes(contacts, a);
+    this.applyFootModes(contacts, a);
     const prm = this.prm;
     prm.reachLimb = -1;
     const ev = evaluateStance(a, contacts, prm, this.ev);
