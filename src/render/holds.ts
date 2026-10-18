@@ -434,6 +434,29 @@ export interface HoldGeometry {
 }
 
 const geoCache = new Map<string, HoldGeometry>();
+/**
+ * Every problem brings new hold shapes (type × variant × size), and route holds are drawn with the
+ * cached geometry itself, so the cache keeps GPU buffers alive: an endless Send Train run would
+ * grow it with every boulder. Past this many entries, the shapes the current wall does not use
+ * are freed (least recently used first). Disposing is safe even if something still draws one: three.js simply
+ * re-uploads it.
+ */
+const GEO_CACHE_MAX = 120;
+/** HoldSet.build() generation, and the generation that last asked for each cache key. */
+let geoEpoch = 0;
+const geoUsed = new Map<string, number>();
+
+function trimHoldCache(): void {
+  if (geoCache.size <= GEO_CACHE_MAX) return;
+  const target = Math.floor(GEO_CACHE_MAX * 0.75);
+  for (const [key, entry] of geoCache) {
+    if (geoCache.size <= target) break;
+    if ((geoUsed.get(key) ?? -1) >= geoEpoch) continue; // on the wall right now
+    entry.geo.dispose();
+    geoCache.delete(key);
+    geoUsed.delete(key);
+  }
+}
 
 function ensureColor(g: THREE.BufferGeometry): void {
   if (!g.getAttribute('color')) {
@@ -451,8 +474,14 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 
   const sb = Math.max(1, Math.round(size * 200));
   const key = `${type}:${variant}:${sb}:${lod}`;
   const segU = (n: number) => (lod ? Math.max(8, Math.round(n * 0.5)) : n);
+  geoUsed.set(key, geoEpoch);
   const hit = geoCache.get(key);
-  if (hit) return hit;
+  if (hit) {
+    // keep the Map in least-recently-used order for trimHoldCache()
+    geoCache.delete(key);
+    geoCache.set(key, hit);
+    return hit;
+  }
   const s = sb / 200;
   const rng = new Rng(0x4011d + variant * 7919 + type.length * 131);
   let built: Built | null = null;
@@ -598,6 +627,7 @@ export class HoldSet {
   /** Rebuild everything for `holds` on `boulder`. */
   build(boulder: BoulderDef, holds: readonly HoldDef[], opts: HoldSetOptions = {}): void {
     this.clear();
+    geoEpoch++;
     const deco: { h: HoldDef; g: HoldGeometry }[] = [];
     const m = new THREE.Matrix4();
     for (const h of holds) {
@@ -652,6 +682,7 @@ export class HoldSet {
     }
     this.buildAo(holds);
     this.buildTapes(boulder, holds, opts);
+    trimHoldCache();
   }
 
   private buildAo(holds: readonly HoldDef[]): void {
@@ -805,6 +836,7 @@ export class HoldSet {
 export function disposeHoldCache(): void {
   for (const g of geoCache.values()) g.geo.dispose();
   geoCache.clear();
+  geoUsed.clear();
   boltProto?.dispose();
   boltProto = null;
 }

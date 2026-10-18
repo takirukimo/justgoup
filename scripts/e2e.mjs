@@ -115,7 +115,7 @@ async function tapText(text, scope = '#ui') {
 }
 
 // ───────────────────────────── boot ─────────────────────────────
-await page.goto(`${base}/?debug=1&q=${q}&ts=${ts}`, { waitUntil: 'load' });
+await page.goto(`${base}/?debug=1&q=${q}&ts=${ts}`, { waitUntil: 'load', timeout: 180000 });
 await waitFor(() => (window.__jgu?.frames ?? 0) > 3, 'first frames', 180000);
 await page.waitForTimeout(800);
 ok(!(await page.$('#boot')), 'boot overlay removed after the first frame');
@@ -546,8 +546,12 @@ if (want('editor')) {
   ok(after > before, `editor placed holds by tapping (${before} → ${after})`);
   await shot('editor-holds');
 
-  // remix a generated sample, then TEST it: the app runs a test climb and hands back to the editor
+  // remix a generated sample (the easiest grade, so the climbing bot sends it reliably), then TEST
+  // it: the app runs a test climb and hands back to the editor
   await tap('.ed-tool-more', 'editor menu');
+  for (let k = 0; k < 6 && (await page.evaluate(() => document.querySelector('.ed-sample-v')?.textContent)) !== 'V0'; k++) {
+    await tap('#ui button[aria-label="Easier"]', 'sample: easier');
+  }
   await tap('.ed-sample-go', 'LOAD sample');
   await tapText('REPLACE');
   await waitFor(() => {
@@ -556,6 +560,9 @@ if (want('editor')) {
   }, 'sample problem', 120000);
   await page.waitForTimeout(1500);
   await shot('editor-sample');
+  ok(await page.evaluate(() => document.querySelector('.ed-pub')?.disabled === true), 'PUBLISH is locked before a sent test climb');
+
+  // first TEST: back out from the pause sheet → the editor comes back with the draft
   await tap('.ed-test', 'TEST');
   await waitScreen('preview', 120000);
   await veilClear();
@@ -572,21 +579,45 @@ if (want('editor')) {
   await veilClear();
   await page.waitForTimeout(1200);
   await shot('editor-after-test');
-  ok(true, 'editor reopened with the draft after quitting the test climb');
+  ok(await page.evaluate(() => document.querySelector('.ed-pub')?.disabled === true), 'quitting the test climb keeps PUBLISH locked');
 
-  // publish through the app (the PUBLISH button itself unlocks only after a sent test climb)
+  // second TEST: send it for real (touch drags), which unlocks PUBLISH
+  await tap('.ed-test', 'TEST');
+  await waitScreen('preview', 120000);
+  await veilClear();
+  await tap('.pv-hit', 'TAP TO START');
+  await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'test climb start (2)', 60000);
+  await page.waitForTimeout(600);
+  const testSent = await autoClimb({
+    label: 'editor-test',
+    until: async () => {
+      const ph = await page.evaluate(() => window.__jgu.sim?.getState().phase ?? 'gone');
+      return ph === 'topped' || ph === 'falling' || ph === 'landed' || ph === 'gone';
+    },
+  });
+  const testPhase = await page.evaluate(() => window.__jgu.sim?.getState().phase ?? 'gone');
+  ok(testSent && testPhase === 'topped', `editor test climb sent by touch drags (phase ${testPhase})`);
+  await waitFor(() => window.__jgu.app.current === 'editor' && window.__jgu.editor.isOpen, 'editor reopened after the send', 90000);
+  await veilClear();
+  await waitFor(() => document.querySelector('.ed-pub')?.disabled === false, 'PUBLISH unlocked', 30000).catch(() => false);
+  await page.waitForTimeout(900);
+  await shot('editor-publish-unlocked');
+  ok(await page.evaluate(() => document.querySelector('.ed-pub')?.disabled === false), 'a sent test climb unlocks PUBLISH');
+
+  // publish through the real button + confirm dialog
+  const prePub = await page.evaluate(() => window.__jgu.app.profile.myProblems.length);
+  await tap('.ed-pub', 'PUBLISH');
+  await tap('.modal-ok', 'confirm PUBLISH');
+  await waitFor((n) => window.__jgu.app.profile.myProblems.length > n, 'published problem saved', 30000, prePub);
+  await page.waitForTimeout(1500);
   const pub = await page.evaluate(async () => {
     const j = window.__jgu;
-    const before = j.app.profile.myProblems.length;
-    const d = j.editor.getDraft();
-    j.bus.emit('editor:publish', { boulder: { ...d, name: 'E2E Line' } });
-    for (let i = 0; i < 100 && j.app.profile.myProblems.length === before; i++) await new Promise((r) => setTimeout(r, 100));
-    await new Promise((r) => setTimeout(r, 800));
+    const mine = j.app.profile.myProblems;
+    const name = mine[mine.length - 1]?.name;
     const list = await j.backend.listProblems({ sort: 'new', limit: 50 });
-    return { mine: j.app.profile.myProblems.length - before, listed: list.some((p) => p.name === 'E2E Line') };
+    return { mine: mine.length, listed: list.some((p) => p.name === name), name };
   });
-  ok(pub.mine === 1 && pub.listed, `editor:publish saves to the profile and the community wall (${JSON.stringify(pub)})`);
-  await page.waitForTimeout(600);
+  ok(pub.mine === prePub + 1 && pub.listed, `PUBLISH saves to the profile and the community wall (${JSON.stringify(pub)})`);
   await shot('editor-published-toast');
 
   await tap('.ed-x', 'close editor');

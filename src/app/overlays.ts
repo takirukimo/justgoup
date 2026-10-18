@@ -32,7 +32,7 @@ backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);display:flex;gap:6
 @keyframes jga-dash{to{stroke-dashoffset:-20}}
 @keyframes jga-ping{0%{transform:scale(.6);opacity:.9}100%{transform:scale(1.9);opacity:0}}
 .jga-error{position:absolute;inset:0;z-index:90;display:grid;place-items:center;padding:24px;background:${PALETTE.basalt};color:${PALETTE.bone};pointer-events:auto}
-.jga-error-card{max-width:340px;width:100%;display:flex;flex-direction:column;gap:14px;padding:26px 22px;border-radius:18px;
+.jga-error-card{box-sizing:border-box;max-width:340px;width:100%;display:flex;flex-direction:column;gap:14px;padding:26px 22px;border-radius:18px;
 background:rgba(23,25,29,.9);border:1px solid rgba(255,255,255,.08);box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
 .jga-error-mark{width:28px;height:28px;color:${PALETTE.signal}}
 .jga-error-k{font:600 10px/1 ${FONTS.mono};letter-spacing:.26em;color:${PALETTE.signal}}

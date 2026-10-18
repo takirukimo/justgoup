@@ -22,7 +22,7 @@ const page = await browser.newPage({ viewport: { width: w, height: h }, deviceSc
 const logs = [];
 page.on('console', (m) => logs.push(`[${m.type()}] ${m.text()}`));
 page.on('pageerror', (e) => logs.push(`[pageerror] ${e.message}`));
-await page.goto(url, { waitUntil: 'load' });
+await page.goto(url, { waitUntil: 'load', timeout: 180000 });
 await page.waitForTimeout(wait);
 if (evalJs) {
   await page.evaluate(evalJs);

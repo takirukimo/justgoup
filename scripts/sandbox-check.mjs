@@ -190,7 +190,7 @@ async function tapText(text) {
 try {
   // ?debug=1 exposes window.__jgu; ?backend=auto opts this automated browser out of the
   // local-only QA default so the real selection (Supabase → Artifact db → local) runs.
-  await tab.goto(`http://127.0.0.1:${port}/?debug=1&backend=auto&q=low`, { waitUntil: 'load' });
+  await tab.goto(`http://127.0.0.1:${port}/?debug=1&backend=auto&q=low`, { waitUntil: 'load', timeout: 180000 });
   const sel = await waitFor(
     () => (window.__jgu?.backend ? { label: window.__jgu.backend.label, kind: window.__jgu.backend.kind, ms: window.__jgu.backendMs } : null),
     'backend selection',

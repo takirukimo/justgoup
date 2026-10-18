@@ -45,6 +45,7 @@ export class SimDriver {
   private readonly look: Vec2 = { x: 0, y: 0 };
   private lookOn = false;
   private lookSet = false;
+  private readonly lookSent: Vec2 = { x: NaN, y: NaN };
 
   constructor(svc: Services, sim: ClimberSim, opts: DriverOptions = {}) {
     this.svc = svc;
@@ -213,11 +214,9 @@ export class SimDriver {
   private updateLook(st: ClimberState, dt: number): void {
     const { controls, renderer } = this.svc;
     if (st.phase !== 'climbing' || controls.dragging) {
-      // the controls own the focus hint while a limb is dragged
-      if (st.phase !== 'climbing' && this.lookSet) {
-        renderer.setCameraFocusHint(null);
-        this.lookSet = false;
-      }
+      // the controls own the focus hint while a limb is dragged (and clear it on release)
+      if (st.phase !== 'climbing' && this.lookSet) renderer.setCameraFocusHint(null);
+      this.lookSet = false;
       return;
     }
     this.lookT += dt;
@@ -226,8 +225,15 @@ export class SimDriver {
       this.lookOn = this.nextHold(st, this.look);
     }
     const target = this.lookOverride ?? (this.lookOn ? this.look : null);
+    // only push changes: the renderer copies the hint, so an unchanged one would allocate per frame
+    if (target && this.lookSet && target.x === this.lookSent.x && target.y === this.lookSent.y) return;
+    if (!target && !this.lookSet) return;
     renderer.setCameraFocusHint(target);
     this.lookSet = !!target;
+    if (target) {
+      this.lookSent.x = target.x;
+      this.lookSent.y = target.y;
+    }
   }
 
   /** The next route hand hold above the higher hand, nearest the body line. */

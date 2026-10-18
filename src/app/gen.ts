@@ -1,6 +1,8 @@
 // Async problem generation. Prefers an inline Web Worker (bundled into the single-file build); when
 // workers are unavailable (strict sandboxes) the same code runs on the main thread a frame later so
-// the loading state paints first. Results are memoised per request key.
+// the loading state paints first. A worker that goes silent is given up on after a generous
+// watchdog, so a climb can never wait forever under the transition veil. Results are memoised per
+// request key.
 
 import type { BoulderDef } from '../core/types';
 import type { GenerateOptions } from '../core/contracts';
@@ -14,7 +16,11 @@ interface Pending {
   req: GenRequest;
   resolve: (b: BoulderDef) => void;
   reject: (e: Error) => void;
+  watchdog?: ReturnType<typeof setTimeout>;
 }
+
+/** Generation takes well under a second in the worker; this long means it is stuck or dead. */
+const WORKER_WATCHDOG_MS = 20000;
 
 const keyOf = (r: Req): string => (r.kind === 'daily' ? `daily:${r.dateKey}` : `${r.kind}:${JSON.stringify(r.opts)}`);
 
@@ -60,10 +66,16 @@ export class ProblemFactory {
         return;
       }
       this.pending.set(req.id, job);
+      job.watchdog = setTimeout(() => {
+        if (!this.pending.has(req.id)) return;
+        console.warn('[gen] worker stopped answering; generating on the main thread');
+        this.fail();
+      }, WORKER_WATCHDOG_MS);
       try {
         w.postMessage(req);
       } catch {
         this.pending.delete(req.id);
+        clearTimeout(job.watchdog);
         this.fail();
         this.inline(job);
       }
@@ -92,6 +104,7 @@ export class ProblemFactory {
         const job = this.pending.get(e.data.id);
         if (!job) return;
         this.pending.delete(e.data.id);
+        clearTimeout(job.watchdog);
         this.settle(job, e.data);
       };
       w.onerror = (e: ErrorEvent) => {
@@ -113,11 +126,20 @@ export class ProblemFactory {
     this.worker = null;
     const waiting = [...this.pending.values()];
     this.pending.clear();
-    for (const job of waiting) this.inline(job);
+    for (const job of waiting) {
+      clearTimeout(job.watchdog);
+      this.inline(job);
+    }
   }
 
   private inline(job: Pending): void {
     // two frames later: the transition is on screen before the main thread blocks
-    setTimeout(() => this.settle(job, handleGen(job.req)), 34);
+    setTimeout(() => {
+      try {
+        this.settle(job, handleGen(job.req));
+      } catch (err) {
+        job.reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    }, 34);
   }
 }
