@@ -26,6 +26,12 @@ export const BOT = {
   shakeMax: 20,
   /** Only from a calm stance. */
   calmTension: 0.75,
+  /**
+   * … where the other hand can take this hand's load too while it is off (chalk dip / shake-out): the
+   * other hand's stress with both hands' loads on it must stay under this (a dip on a steep wall from a
+   * poor hold is how a lead climber comes off).
+   */
+  freeHandMax: 0.82,
   /** Launch power of a planned deadpoint / dyno (1 = the ideal throw). */
   throwPower: 1.06,
 } as const;
@@ -305,7 +311,7 @@ export class BetaBot {
     const s = sim.getState();
     if (s.tension > BOT.calmTension) return false;
     const hand = limb === 'LH' || limb === 'RH' ? limb : null;
-    if (hand && sim.chalkUp && (s.limbs[hand].friction ?? 1) < BOT.chalkBelow && s.limbs[hand].holdId) {
+    if (hand && sim.chalkUp && (s.limbs[hand].friction ?? 1) < BOT.chalkBelow && s.limbs[hand].holdId && this.canFree(hand, s)) {
       const held = s.limbs[hand].holdId;
       if (sim.chalkUp(hand)) {
         this.bodyHand = hand;
@@ -322,7 +328,7 @@ export class BetaBot {
       for (const h of order) {
         if ((s.limbs[h].pump ?? 0) < BOT.shakeAbove) continue;
         const held = s.limbs[h].holdId;
-        if (!held) continue;
+        if (!held || !this.canFree(h, s)) continue;
         if (sim.shakeOut(h)) {
           this.bodyHand = h;
           this.bodyHold = this.holds.get(held) ?? null;
@@ -334,6 +340,14 @@ export class BetaBot {
       }
     }
     return false;
+  }
+
+  /** Can the other hand hold this one's load as well while this one is off the wall for a moment? */
+  private canFree(hand: 'LH' | 'RH', s: ReturnType<ClimberSimAPI['getState']>): boolean {
+    const me = s.limbs[hand];
+    const o = s.limbs[hand === 'LH' ? 'RH' : 'LH'];
+    if (!o.holdId || o.busy || !(o.capacity > 0)) return false;
+    return (o.load + me.load) / o.capacity <= BOT.freeHandMax;
   }
 
   /** Chalking, shaking out and re-gripping after a shake-out. */
