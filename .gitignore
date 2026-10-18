@@ -9,3 +9,6 @@ screenshots/
 
 # Claude Code agent worktrees / local state
 .claude/
+
+# Agent scratch probes/benchmarks (never committed)
+src/**/__*.test.ts
