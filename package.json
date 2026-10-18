@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "JUST GO UP — a premium handheld 3D bouldering game on the CHIRAL wall.",
+  "description": "STEIBOCK by CHIRAL SPORTS — a premium handheld 3D bouldering and lead climbing game.",
   "scripts": {
     "dev": "vite --host",
     "build": "tsc --noEmit && vite build",

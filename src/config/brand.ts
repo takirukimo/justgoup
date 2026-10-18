@@ -84,7 +84,7 @@ export const PALETTE = {
   moss: '#7C8B5A',
   good: '#4FD18B',
   warn: '#FFB23F',
-  bad: '#FF4545',
+  bad: '#FF5A26', // hot orange-red: distinct from CHIRAL pink (matches the UI danger token)
 } as const;
 
 /** Route colours (gym tape colours, slightly desaturated for a premium look). */
