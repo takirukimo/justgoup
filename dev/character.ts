@@ -2,6 +2,7 @@
 //   ?view=heads            lineup of all 9 heads (3×3)          &yaw=<deg> &spin=1
 //   ?view=head&id=ibex     single head close-up                  &yaw=<deg> &pitch=<deg> &dist=<m>
 //   ?view=portraits        renderPortrait() output grid
+//   ?view=limits           anatomy QA: extreme / illegal poses, falls, crossovers (see character-limits.ts)
 //   ?t=<s>                 freeze the clock at t seconds (deterministic screenshots)
 
 import * as THREE from 'three';
@@ -26,6 +27,7 @@ const labels = document.getElementById('labels') as HTMLDivElement;
 
 const canvas = document.getElementById('gl') as HTMLCanvasElement;
 if (view === 'game') void import('./character-game').then((m) => m.runGame(canvas, qs, hud));
+else if (view === 'limits') void import('./character-limits').then((m) => m.runLimits(canvas, qs, labels, hud));
 else studio();
 
 /** Studio views (heads, portraits, body, guide, climber poses) on a plain WebGLRenderer. */
