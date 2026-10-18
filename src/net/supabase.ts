@@ -11,7 +11,7 @@
 import type { BackendAPI } from '../core/contracts';
 import type { CommunityProblem, LeaderboardMode, ScoreEntry } from '../core/types';
 import { BACKEND_TIMEOUTS } from '../config/backend';
-import { BackendError } from './errors';
+import { BackendError, deadline } from './errors';
 import { clampLimit, DEFAULT_PROBLEM_LIMIT, DEFAULT_SCORE_LIMIT, utcDayKey } from './local';
 import { uuid } from './storage';
 import {
@@ -223,10 +223,10 @@ export class SupabaseBackend implements BackendAPI {
     const timeoutMs = opts.timeoutMs ?? this.timeoutMs;
     const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
     let timedOut = false;
-    const timer = setTimeout(() => {
+    const cancelTimer = deadline(timeoutMs, () => {
       timedOut = true;
       ctrl?.abort();
-    }, timeoutMs);
+    });
     const headers: Record<string, string> = {
       apikey: this.key,
       Authorization: `Bearer ${this.key}`,
@@ -251,7 +251,7 @@ export class SupabaseBackend implements BackendAPI {
         if (!ctrl) setTimeout(() => reject(new DOMException('timeout', 'AbortError')), timeoutMs);
       });
     } catch (err) {
-      clearTimeout(timer);
+      cancelTimer();
       if (timedOut) throw new BackendError(`Supabase ${what} timed out after ${timeoutMs} ms`, 'timeout', { cause: err });
       throw new BackendError(`Supabase ${what}: network error`, 'network', { cause: err, detail: err instanceof Error ? err.message : String(err) });
     }
@@ -260,11 +260,11 @@ export class SupabaseBackend implements BackendAPI {
     try {
       text = await res.text();
     } catch (err) {
-      clearTimeout(timer);
+      cancelTimer();
       if (timedOut) throw new BackendError(`Supabase ${what} timed out after ${timeoutMs} ms`, 'timeout', { cause: err });
       throw new BackendError(`Supabase ${what}: response interrupted`, 'network', { cause: err });
     }
-    clearTimeout(timer);
+    cancelTimer();
 
     if (!res.ok) throw httpError(what, res.status, text);
     if (!text) return null as T;

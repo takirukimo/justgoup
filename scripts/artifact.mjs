@@ -2,11 +2,14 @@
 // claude.ai Artifact publisher expects: no doctype/html/head/body wrappers (the publisher adds its
 // own skeleton), <title> first, and an explicit dark look since the game commits to one theme.
 //
-// usage: npm run build:single && node scripts/artifact.mjs [out.html]
+// usage: npm run build:single && node scripts/artifact.mjs [out.html] [--in path/to/single/index.html]
 import { readFileSync, writeFileSync } from 'node:fs';
 
-const src = readFileSync(new URL('../dist-single/index.html', import.meta.url), 'utf8');
-const out = process.argv[2] ?? new URL('../dist-single/artifact.html', import.meta.url).pathname;
+const argv = process.argv.slice(2);
+const inAt = argv.indexOf('--in');
+const input = inAt >= 0 ? argv.splice(inAt, 2)[1] : new URL('../dist-single/index.html', import.meta.url).pathname;
+const src = readFileSync(input, 'utf8');
+const out = argv[0] ?? new URL('../dist-single/artifact.html', import.meta.url).pathname;
 
 const head = src.match(/<head[^>]*>([\s\S]*?)<\/head>/i)?.[1] ?? '';
 const body = src.match(/<body[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? '';

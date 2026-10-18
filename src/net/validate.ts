@@ -237,13 +237,15 @@ export function parseBoulder(raw: unknown, opts: ParseBoulderOptions = {}): Boul
   return out;
 }
 
-/** UTF-8 byte length of the JSON encoding. */
+/** UTF-8 byte length of the JSON encoding as Postgres stores it in jsonb (an upper bound). */
 export function jsonBytes(v: unknown): number {
   const s = JSON.stringify(v) ?? '';
   let bytes = 0;
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);
-    if (c < 0x80) bytes += 1;
+    // Postgres renders jsonb::text with a space after every ':' and ',' (the CHECK measures that)
+    if (c === 0x3a || c === 0x2c) bytes += 2;
+    else if (c < 0x80) bytes += 1;
     else if (c < 0x800) bytes += 2;
     else if (c >= 0xd800 && c <= 0xdbff) {
       bytes += 4;

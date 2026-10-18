@@ -43,17 +43,46 @@ export function errorMessage(err: unknown): string {
   return String(err);
 }
 
-/** Resolve `p`, or reject with a `timeout` BackendError after `ms`. */
+/** A timer this late means the page itself was busy (boot, a long frame), not the other side. */
+const STALL_MS = 200;
+/** Extra turn granted after such a stall, so an answer already queued behind it gets processed. */
+const GRACE_MS = 400;
+const MAX_GRACES = 3;
+
+/**
+ * Call `onExpire` after `ms`, measuring the remote side's latency rather than this page's own
+ * main-thread stalls: when the timer fires overdue (the page was blocked, e.g. building the scene
+ * at boot on a slow phone), the reply may already be waiting in the task queue, so a short grace
+ * period is granted first. Returns a cancel function.
+ */
+export function deadline(ms: number, onExpire: () => void): () => void {
+  let due = Date.now() + ms;
+  let graces = 0;
+  let timer: ReturnType<typeof setTimeout>;
+  const check = (): void => {
+    if (Date.now() - due > STALL_MS && graces < MAX_GRACES) {
+      graces++;
+      due = Date.now() + GRACE_MS;
+      timer = setTimeout(check, GRACE_MS);
+      return;
+    }
+    onExpire();
+  };
+  timer = setTimeout(check, ms);
+  return () => clearTimeout(timer);
+}
+
+/** Resolve `p`, or reject with a `timeout` BackendError after `ms` (see deadline()). */
 export function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(new BackendError(`${what} timed out after ${ms} ms`, 'timeout')), ms);
+    const cancel = deadline(ms, () => reject(new BackendError(`${what} timed out after ${ms} ms`, 'timeout')));
     p.then(
       (v) => {
-        clearTimeout(t);
+        cancel();
         resolve(v);
       },
       (e: unknown) => {
-        clearTimeout(t);
+        cancel();
         reject(e);
       },
     );
