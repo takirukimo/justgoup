@@ -82,8 +82,8 @@
  * call (mutated in place); copy what you need to keep.
  */
 
-import type { BoulderDef, ClimberPhase, ClimberState, FootMode, HoldDef, LimbId, LimbSnapshot, QuickdrawDef, Vec2 } from '../core/types';
-import type { ClimberSimAPI, FallReason, ReleaseOptions, SimEvent, SimOptions } from '../core/contracts';
+import type { BoulderDef, ClimberPhase, ClimberState, FlightInfo, FootMode, HoldDef, LimbId, LimbSnapshot, QuickdrawDef, Vec2 } from '../core/types';
+import type { ClimberSimAPI, DynoPreview, FallReason, ReleaseOptions, SimEvent, SimOptions } from '../core/contracts';
 import { BODY, GAME, SIM } from '../config/tuning';
 import { clamp, clamp01, damp, DEG, smoothstep } from '../core/math';
 import {
@@ -166,6 +166,8 @@ interface LimbRt {
   busyKind: 'clip' | 'chalk' | null;
   /** Hands: hanging free by the side, shaking the forearm out. */
   shakeOut: boolean;
+  /** Hands: thrown at a hold in a dyno / deadpoint flight. */
+  flying: boolean;
   /** Feet: how the attached foot is used (inferred from where it was put), null while free. */
   mode: FootMode | null;
   /** Feet: flagging (no hold; the leg is a counterweight). Offset of the foot from its hip in the body frame. */
@@ -249,6 +251,7 @@ function newLimb(): LimbRt {
     busyDraw: null,
     busyKind: null,
     shakeOut: false,
+    flying: false,
     mode: null,
     flag: false,
     flagO: 0,
@@ -268,6 +271,30 @@ function newLimb(): LimbRt {
     hy: -1,
     stamp: 0,
   };
+}
+
+/** A deadpoint / dyno in progress (ClimberSim.launch → flyStep → endFlight). */
+interface Flight {
+  kind: 'deadpoint' | 'dyno';
+  /** Moving hand indices and, per entry, the target contact point. */
+  hands: number[];
+  limbs: LimbId[];
+  hold: HoldDef;
+  tx: number[];
+  ty: number[];
+  /** Per entry: settled (caught or missed), caught, ripped off, the target in reach last step, its excess. */
+  done: boolean[];
+  caught: boolean[];
+  ripped: boolean[];
+  inReach: boolean[];
+  lastEx: number[];
+  /** Per entry: the hold the hand left (a deadpoint may fall back onto it). */
+  prev: (HoldDef | null)[];
+  power: number;
+  t: number;
+  /** Predicted apex time, and the time the CoM really stopped rising (−1 until then). */
+  tApex: number;
+  apexAt: number;
 }
 
 function snapshot(id: LimbId): LimbSnapshot {
@@ -406,6 +433,9 @@ export class ClimberSim implements ClimberSimAPI {
   private readonly flagArr = new Float64Array(6);
   /** Substeps until the next foot-technique re-check (rock-over onto a heel hook etc.). */
   private footTick = 0;
+  /** Dyno / deadpoint in progress (phase stays 'climbing'). */
+  private flight: Flight | null = null;
+  private readonly flightInfo: FlightInfo = { kind: 'deadpoint', limbs: [], holdId: '', t: 0, apexIn: 0, power: 1 };
 
   constructor(boulder: BoulderDef, opts: ClimberSimOptions = {}) {
     this.boulder = boulder;
@@ -474,6 +504,7 @@ export class ClimberSim implements ClimberSimAPI {
       this.pumpWarned[i] = false;
     }
     this.barnAmt = 0;
+    this.flight = null;
     this.tension = 0;
     this.shakeAmt = 0;
     this.shaking = false;
@@ -555,7 +586,7 @@ export class ClimberSim implements ClimberSimAPI {
   // ═══════════════════════════════ input ═══════════════════════════════
 
   beginDrag(limb: LimbId): boolean {
-    if (this.phase !== 'climbing') return false;
+    if (this.phase !== 'climbing' || this.flight) return false;
     const i = LIMB_INDEX[limb];
     const L = this.limbs[i];
     if (L.busy || L.dragging) return false;
@@ -601,8 +632,7 @@ export class ClimberSim implements ClimberSimAPI {
     if (!L.dragging) return [];
     L.dragging = false;
     const out: SimEvent[] = [];
-    if (this.phase !== 'climbing') return out;
-    void opts;
+    if (this.phase !== 'climbing' || this.flight) return out;
     const p = { x: L.tx, y: L.ty };
     const intent = this.releaseTarget(limb, p);
     const hold = intent.hold;
@@ -622,6 +652,11 @@ export class ClimberSim implements ClimberSimAPI {
       return out;
     }
 
+    if (!hold && i < 2 && opts?.velocity && !this.flight) {
+      // a committed flick toward a hold beyond the static reach throws a deadpoint / dyno
+      const thrown = this.flickThrow(i, p, opts.velocity);
+      if (thrown) return thrown;
+    }
     if (hold) {
       const quality = this.predictGrip(limb, hold.id);
       this.attach(i, hold);
@@ -680,7 +715,7 @@ export class ClimberSim implements ClimberSimAPI {
    */
   chalkUp(hand: 'LH' | 'RH'): boolean {
     const i = LIMB_INDEX[hand];
-    if (i > 1 || this.phase !== 'climbing') return false;
+    if (i > 1 || this.phase !== 'climbing' || this.flight) return false;
     const L = this.limbs[i];
     if (L.busy || L.dragging) return false;
     const held = L.hold;
@@ -718,7 +753,7 @@ export class ClimberSim implements ClimberSimAPI {
    */
   shakeOut(hand: 'LH' | 'RH'): boolean {
     const i = LIMB_INDEX[hand];
-    if (i > 1 || this.phase !== 'climbing') return false;
+    if (i > 1 || this.phase !== 'climbing' || this.flight) return false;
     const L = this.limbs[i];
     if (L.busy || L.dragging || L.shakeOut) return false;
     if (!this.canShakeOut(i)) return false;
@@ -818,6 +853,391 @@ export class ClimberSim implements ClimberSimAPI {
     this.posture.py = this.P.y;
     this.postureOn = true;
     return true;
+  }
+
+  // ═══════════════════════════════ deadpoints + dynos ═══════════════════════════════
+
+  /**
+   * Throw at a hold (research §2.5): 'LH' / 'RH' is a deadpoint (the other hand stays on its hold, the
+   * feet stay on when the legs allow, else they cut), 'both' a double-hand dyno (both hands and the feet
+   * leave; best from a crouch). The body follows a ballistic arc aimed so its apex lands the hand just
+   * past the hold; `power` scales the launch (1 = ideal; < ≈0.95 falls short, more overshoots), capped by
+   * what the legs (crouch depth) and arms can produce. The hand closes on the hold near the apex if the
+   * catch's peak stress stays under SIM.dynoCatchStress (it costs a pump spike); otherwise it misses —
+   * a deadpoint may fall back onto the hold it left, a dyno with no hand left falls ('no-hands').
+   * Events: 'release'…, 'dyno-start', later 'grab' + 'dyno-catch' or 'dyno-miss' (+ 'return' / 'fall').
+   * Returns the launch events ([] when refused: wrong phase, a flight in progress, a busy hand, no other
+   * hand on a hold for a deadpoint, a target a double dyno can't share).
+   */
+  dyno(limb: 'LH' | 'RH' | 'both', holdId: string, power = 1): SimEvent[] {
+    if (this.phase !== 'climbing' || this.flight) return [];
+    const h = this.holdById.get(holdId);
+    if (!h || !usableByHand(h)) return [];
+    const hands = limb === 'both' ? [0, 1] : [LIMB_INDEX[limb]];
+    if (hands[0] > 1) return [];
+    for (const i of hands) if (this.limbs[i].busy) return [];
+    if (hands.length === 2 && !canMatch(0, h)) return [];
+    if (hands.length === 1) {
+      const o = this.limbs[1 - hands[0]];
+      if (!o.hold || o.busy || o.dragging) return [];
+    }
+    for (const i of hands) this.limbs[i].dragging = false;
+    return this.launch(hands, h, Number.isFinite(power) ? clamp(power, 0.2, 2) : 1);
+  }
+
+  /** What a committed flick of the dragged hand released at p would throw to (input preview), or null. */
+  dynoCandidate(limb: LimbId, p: Vec2): DynoPreview | null {
+    const i = LIMB_INDEX[limb];
+    if (i > 1 || this.phase !== 'climbing' || this.flight) return null;
+    const h = this.dynoTarget(i, p.x, p.y);
+    if (!h) return null;
+    const o = this.limbs[1 - i];
+    const both = o.dragging && this.dynoTarget(1 - i, o.tx, o.ty) === h && canMatch(0, h);
+    const hands = both ? [0, 1] : [i];
+    const plan = this.throwPlan(hands, h, 1);
+    return { holdId: h.id, kind: both || !(o.hold && !o.busy) ? 'dyno' : 'deadpoint', rise: plan.rise, feasible: plan.need <= plan.vmax + 1e-9 };
+  }
+
+  /** A usable hand hold near (x, y) beyond the static reach of hand i but within throwing range, or null. */
+  private dynoTarget(i: number, x: number, y: number): HoldDef | null {
+    const u = this.frameNow();
+    const tmp = this.qTmp;
+    let best: HoldDef | null = null;
+    let bestD = Infinity;
+    for (const h of this.handHolds) {
+      const d = Math.hypot(x - h.x, y - h.y) - h.size;
+      if (d > GAME.snapRadius || d >= bestD) continue;
+      contactPoint(h, i, this.wouldMatch(i, h), tmp);
+      const ex = envEval(i, this.ax[i], this.ay[i], u.x, u.y, tmp.x, tmp.y).excess;
+      if (ex <= SIM.reachTolerance || ex > SIM.dynoMaxReach) continue;
+      if (this.blocked(i, tmp.x, tmp.y, h)) continue;
+      best = h;
+      bestD = d;
+    }
+    return best;
+  }
+
+  /** endDrag with a release velocity: throw when the flick commits toward an out-of-reach hold. */
+  private flickThrow(i: number, p: Vec2, v: Vec2): SimEvent[] | null {
+    if (!Number.isFinite(v.x) || !Number.isFinite(v.y)) return null;
+    const h = this.dynoTarget(i, p.x, p.y);
+    if (!h) return null;
+    const L = this.limbs[i];
+    const tmp = contactPoint(h, i, false, this.releaseTmp);
+    const dx = tmp.x - L.px;
+    const dy = tmp.y - L.py;
+    const len = Math.hypot(dx, dy) || 1;
+    const along = (v.x * dx + v.y * dy) / len;
+    if (along < SIM.dynoMinFlick) return null;
+    const power = clamp(along / SIM.dynoFlickRef, 0.6, 1.4);
+    const o = this.limbs[1 - i];
+    // the other hand flicked at the same hold too (multi-touch): a double dyno
+    if (o.dragging && !o.busy && canMatch(0, h) && this.dynoTarget(1 - i, o.tx, o.ty) === h) {
+      o.dragging = false;
+      return this.launch([0, 1], h, power);
+    }
+    if (o.busy) return null;
+    return this.launch([i], h, power);
+  }
+
+  /** Most launch speed (m/s) the climber can produce now: legs over their remaining extension + arms. */
+  private launchSpeedMax(): number {
+    let ext = 0;
+    let nf = 0;
+    for (let i = 2; i < 4; i++) {
+      const L = this.limbs[i];
+      if (!(L.hold || L.smear) || L.dragging) continue;
+      ext += Math.max(0, BODY.legMax * 0.97 - Math.hypot(this.ax[i] - L.cx, this.ay[i] - L.cy));
+      nf++;
+    }
+    const legs = nf ? Math.sqrt(2 * SIM.dynoLegAccel * (ext / nf)) * (1 - SIM.dynoSteepLegLoss * Math.max(0, this.sth)) : 0;
+    let nh = 0;
+    for (let i = 0; i < 2; i++) if (this.limbs[i].hold && !this.limbs[i].busy) nh++;
+    const arms = Math.sqrt(2 * SIM.dynoArmAccel * SIM.dynoArmExt * this.strength * Math.max(nh, 1) * 0.5);
+    return Math.sqrt(legs * legs + arms * arms);
+  }
+
+  private readonly planOut = { vx: 0, vy: 0, tApex: 0, rise: 0, speed: 0, need: 0, vmax: 0, tx: [0, 0], ty: [0, 0] };
+
+  /**
+   * Ballistic launch for moving hands toward h: the body displacement that brings each hand inside its
+   * envelope (+SIM.dynoMargin), an apex SIM.dynoAimPast past it, scaled by power and capped at the
+   * climber's launch speed. Reuses its output object.
+   */
+  private throwPlan(hands: number[], h: HoldDef, power: number): typeof this.planOut {
+    const u = this.frameNow();
+    const o = this.planOut;
+    const both = hands.length === 2;
+    let Dx = 0;
+    let Dy = 0;
+    for (let k = 0; k < hands.length; k++) {
+      const i = hands[k];
+      const c = contactPoint(h, i, both, this.releaseTmp);
+      o.tx[k] = c.x;
+      o.ty[k] = c.y;
+      const en = envEval(i, this.ax[i], this.ay[i], u.x, u.y, c.x, c.y);
+      const vx = c.x - this.ax[i];
+      const vy = c.y - this.ay[i];
+      const l = Math.hypot(vx, vy) || 1;
+      const need = en.excess > 0 ? en.excess + SIM.dynoMargin : 0;
+      Dx += (vx / l) * need;
+      Dy += (vy / l) * need;
+    }
+    Dx /= hands.length;
+    Dy /= hands.length;
+    o.rise = Math.hypot(Dx, Dy);
+    const gp = Math.max(0.5, SIM.gravity * this.cth);
+    const hop = Math.max(Dy + SIM.dynoAimPast, SIM.dynoMinHop, SIM.dynoLateralHop * Math.abs(Dx));
+    let vy = Math.sqrt(2 * gp * hop);
+    let vx = Dx / (vy / gp);
+    // the climber aims for the hold: extra commitment adds a little height (jumping past the hold is
+    // good, research [37]), too little falls short
+    const p = power > 1 ? 1 + 0.4 * (power - 1) : power;
+    vx *= p;
+    vy *= p;
+    o.vmax = this.launchSpeedMax();
+    let sp = Math.hypot(vx, vy);
+    o.need = sp;
+    if (sp > o.vmax) {
+      vx *= o.vmax / sp;
+      vy *= o.vmax / sp;
+      sp = o.vmax;
+    }
+    o.vx = vx;
+    o.vy = vy;
+    o.speed = sp;
+    o.tApex = Math.max(0.04, vy / gp);
+    return o;
+  }
+
+  private launch(hands: number[], h: HoldDef, power: number): SimEvent[] {
+    const out: SimEvent[] = [];
+    const plan = this.throwPlan(hands, h, power);
+    const both = hands.length === 2;
+    const u = this.frameNow();
+    // where the body will be at the apex (rigid shift), to see which contacts can stay on
+    const gp = Math.max(0.5, SIM.gravity * this.cth);
+    const sx = plan.vx * plan.tApex;
+    const sy = plan.vy * plan.tApex - 0.5 * gp * plan.tApex * plan.tApex;
+    let kind: 'deadpoint' | 'dyno' = both ? 'dyno' : 'deadpoint';
+    let feetOn = 0;
+    for (let i = 2; i < 4; i++) if ((this.limbs[i].hold || this.limbs[i].smear) && !this.limbs[i].dragging) feetOn++;
+    // the launch work (feet ≈1.8× the hands; campusing it is all arms)
+    const effort = plan.vmax > 0 ? (plan.speed / plan.vmax) * (plan.speed / plan.vmax) : 1;
+    for (let i = 0; i < 2; i++) if (this.limbs[i].hold) this.forearms[i].spend(SIM.dynoLaunchPump * effort * (feetOn ? 1 : 2));
+    const prev: (HoldDef | null)[] = [];
+    for (const i of hands) {
+      const L = this.limbs[i];
+      prev.push(L.hold ?? L.prevHold);
+      if (L.hold) {
+        L.prevHold = L.hold;
+        out.push({ type: 'release', limb: LIMB_IDS[i], holdId: L.hold.id });
+      }
+      if (L.shakeOut) {
+        L.shakeOut = false;
+        out.push({ type: 'shake-out-end', limb: LIMB_IDS[i] });
+      }
+      L.hold = null;
+      L.dragging = false;
+      L.flying = true;
+      L.slipT = 0;
+      this.forearms[i].release();
+    }
+    // the other hand of a deadpoint stays on if its arm reaches from the apex, else it lets go too
+    if (!both) {
+      const j = 1 - hands[0];
+      const O = this.limbs[j];
+      if (O.hold && envEval(j, this.ax[j] + sx, this.ay[j] + sy, u.x, u.y, O.cx, O.cy).excess > 0.06) {
+        out.push({ type: 'release', limb: LIMB_IDS[j], holdId: O.hold.id });
+        O.prevHold = O.hold;
+        O.hold = null;
+        kind = 'dyno';
+      }
+    }
+    // feet: a dyno leaves the wall; a deadpoint keeps the feet the legs can still reach at the apex
+    for (let i = 2; i < 4; i++) {
+      const L = this.limbs[i];
+      if (!(L.hold || L.smear) || L.dragging) continue;
+      const stay = kind === 'deadpoint' && envEval(i, this.ax[i] + sx, this.ay[i] + sy, u.x, u.y, L.cx, L.cy).excess <= 0.03;
+      if (stay) continue;
+      out.push({ type: 'release', limb: LIMB_IDS[i], holdId: L.hold ? L.hold.id : null });
+      L.prevHold = L.hold;
+      L.prevSmear = L.smear;
+      L.hold = null;
+      L.smear = false;
+      L.mode = null;
+    }
+    for (const L of this.limbs) {
+      if (L.flag) L.flag = false;
+      L.sfx = 0;
+      L.sfy = 0;
+    }
+    this.refreshMatch();
+    // the throw
+    this.Pv.x = this.Cv.x = plan.vx;
+    this.Pv.y = this.Cv.y = plan.vy;
+    this.hipTarget = null;
+    this.postureOn = false;
+    this.noHandsT = 0;
+    const limbs = hands.map((i) => LIMB_IDS[i]);
+    this.flight = {
+      kind,
+      hands: hands.slice(),
+      limbs,
+      hold: h,
+      tx: plan.tx.slice(0, hands.length),
+      ty: plan.ty.slice(0, hands.length),
+      done: hands.map(() => false),
+      caught: hands.map(() => false),
+      ripped: hands.map(() => false),
+      inReach: hands.map(() => false),
+      lastEx: hands.map(() => Infinity),
+      prev,
+      power,
+      t: 0,
+      tApex: plan.tApex,
+      apexAt: -1,
+    };
+    out.push({ type: 'dyno-start', limbs: limbs.slice(), holdId: h.id, kind, power });
+    this.syncState();
+    return out;
+  }
+
+  /** One fixed step of a flight: ballistic body, hands reaching, catch near the apex or miss. */
+  private flyStep(h: number): void {
+    const F = this.flight!;
+    F.t += h;
+    this.time += h;
+    this.updateBusy(h);
+    this.integrateBody(h, 1);
+    this.syncPose();
+    computeAnchors(this.pose, this.ax, this.ay);
+    this.updateEndpoints(h);
+    this.buildContacts();
+    this.updateForearms(h);
+    if (this.P.y > this.stats.maxHeight) this.stats.maxHeight = this.P.y;
+    const u = this.frameNow();
+    const vy = this.Pv.y * MP + this.Cv.y * MC;
+    if (F.apexAt < 0 && vy <= 0) F.apexAt = F.t;
+    // which hands can close on the hold now: in reach and near the apex (or about to pass it)
+    const ready: number[] = [];
+    for (let k = 0; k < F.hands.length; k++) {
+      if (F.done[k]) continue;
+      const i = F.hands[k];
+      const ex = envEval(i, this.ax[i], this.ay[i], u.x, u.y, F.tx[k], F.ty[k]).excess;
+      const inReach = ex <= SIM.dynoCatchTol;
+      const leaving = F.inReach[k] && ex > F.lastEx[k] + 1e-4;
+      if (inReach && (vy <= SIM.dynoGrabVy || leaving || F.apexAt >= 0)) ready.push(k);
+      F.inReach[k] = inReach;
+      F.lastEx[k] = ex;
+    }
+    if (ready.length) this.tryCatch(ready);
+    const apex = F.apexAt >= 0 ? F.apexAt : F.tApex;
+    if (F.t > apex + SIM.dynoLate || F.t > SIM.dynoMaxFlight) for (let k = 0; k < F.hands.length; k++) F.done[k] = true;
+    if (F.done.every((d) => d)) this.endFlight();
+  }
+
+  /** The hands in `ks` (indices into the flight) close on the hold together; each holds or rips off. */
+  private tryCatch(ks: number[]): void {
+    const F = this.flight!;
+    for (const k of ks) {
+      const i = F.hands[k];
+      this.attach(i, F.hold);
+      this.limbs[i].flying = false;
+    }
+    this.buildContacts();
+    this.syncPose();
+    const prm = this.prmScratch;
+    prm.reachLimb = -1;
+    prm.maxPelvisY = Infinity;
+    const ev = evaluateStance(this.pose, this.contacts, prm, this.evScratch);
+    const vx = this.Pv.x * MP + this.Cv.x * MC;
+    const vy = this.Pv.y * MP + this.Cv.y * MC;
+    const v2 = vx * vx + vy * vy;
+    // the arm absorbs the body's remaining speed over its flex: the peak finger load (research 1.1–1.6 BW)
+    const dyn = 1 + v2 / (2 * SIM.gravity * SIM.dynoAbsorb);
+    const apex = F.apexAt >= 0 ? F.apexAt : F.tApex;
+    const timing = F.t - apex;
+    const caughtLimbs: LimbId[] = [];
+    let worst = 0;
+    for (const k of ks) {
+      const i = F.hands[k];
+      const L = this.limbs[i];
+      const load = (ev.feasible ? ev.load[i] : ks.length > 1 ? 0.5 : 1) * dyn;
+      const peak = load / Math.max(ev.cap[i], 0.01);
+      worst = Math.max(worst, peak);
+      F.done[k] = true;
+      this.forearms[i].spend(SIM.dynoCatchPump * peak * peak);
+      if (peak <= SIM.dynoCatchStress) {
+        F.caught[k] = true;
+        caughtLimbs.push(LIMB_IDS[i]);
+        L.age = 0;
+        L.attachGap = 0;
+        this.stats.moves++;
+        this.wearChalk(i, this.sweatM);
+      } else {
+        // ripped off: the fingers can't stop the body
+        F.ripped[k] = true;
+        L.hold = null;
+        L.flying = false;
+      }
+    }
+    this.refreshMatch();
+    if (caughtLimbs.length) {
+      const quality = clamp01(1 - (0.6 * Math.max(0, worst - 0.6)) / (SIM.dynoCatchStress - 0.6) - 0.4 * clamp01(Math.abs(timing) / 0.25));
+      for (const limb of caughtLimbs) {
+        this.events.push({ type: 'grab', limb, holdId: F.hold.id, quality });
+        if (this.topIds.has(F.hold.id)) this.events.push({ type: 'top-touch', limb });
+      }
+      this.events.push({ type: 'dyno-catch', limbs: caughtLimbs, holdId: F.hold.id, quality, timing });
+    }
+  }
+
+  /** The flight is over: misses fall back (deadpoint) or fall; caught throws settle into the stance. */
+  private endFlight(): void {
+    const F = this.flight!;
+    this.flight = null;
+    const missed: LimbId[] = [];
+    let ripped = false;
+    for (let k = 0; k < F.hands.length; k++) {
+      if (F.caught[k]) continue;
+      const i = F.hands[k];
+      this.limbs[i].flying = false;
+      missed.push(LIMB_IDS[i]);
+      if (F.ripped[k]) ripped = true;
+    }
+    if (F.caught.some((c) => c)) {
+      // the arms absorb the throw
+      this.Pv.x *= SIM.dynoKeep;
+      this.Pv.y *= SIM.dynoKeep;
+      this.Cv.x *= SIM.dynoKeep;
+      this.Cv.y *= SIM.dynoKeep;
+    }
+    if (missed.length) {
+      this.events.push({ type: 'dyno-miss', limbs: missed, holdId: F.hold.id, reason: ripped ? 'ripped' : 'short' });
+      // a deadpoint can fall back onto the hold it left while the other hand still holds
+      for (let k = 0; k < F.hands.length; k++) {
+        if (F.caught[k]) continue;
+        const i = F.hands[k];
+        const prev = F.prev[k];
+        const o = this.limbs[1 - i];
+        if (F.kind !== 'deadpoint' || !prev || !o.hold) continue;
+        this.frameNow();
+        const tmp = contactPoint(prev, i, this.wouldMatch(i, prev), this.qTmp);
+        if (this.reachOk(i, tmp.x, tmp.y, SIM.reachTolerance + 0.12) && !this.blocked(i, tmp.x, tmp.y, prev)) {
+          this.attach(i, prev);
+          this.forearms[i].spend(SIM.dynoCatchPump);
+          this.events.push({ type: 'return', limb: LIMB_IDS[i], holdId: prev.id });
+        }
+      }
+    }
+    this.buildContacts();
+    if (!this.contacts[0] && !this.contacts[1]) {
+      this.fall('no-hands');
+      return;
+    }
+    this.noHandsT = 0;
+    this.retarget();
   }
 
   // ═══════════════════════════════ queries ═══════════════════════════════
@@ -994,6 +1414,7 @@ export class ClimberSim implements ClimberSimAPI {
       L.shakeOut = false;
       L.dragging = false;
     }
+    this.flight = null;
     this.placeLimbs(place, false);
     this.settle(0.8);
     this.phase = 'climbing';
@@ -1345,6 +1766,7 @@ export class ClimberSim implements ClimberSimAPI {
       L.shakeOut = false;
       L.flag = false;
       L.mode = null;
+      L.flying = false;
       L.prevHold = h;
       L.prevSmear = false;
       L.slipT = 0;
@@ -1634,7 +2056,8 @@ export class ClimberSim implements ClimberSimAPI {
       case 'idle':
       case 'climbing':
       case 'topped':
-        this.climbStep(h, 1);
+        if (this.flight) this.flyStep(h);
+        else this.climbStep(h, 1);
         break;
       case 'falling':
         this.fallStep(h);
@@ -1778,10 +2201,12 @@ export class ClimberSim implements ClimberSimAPI {
     // node that carries it: the difference is a pure couple on the spine (with the core torque the
     // statics allowed), so the statically solved pose, torso lean included, is an equilibrium of
     // the dynamics instead of the torso drooping toward the hands.
-    let couple = this.coreTq;
+    // in a dyno / deadpoint flight the body is ballistic: no support forces, no posture, little damping
+    const fly = this.flight !== null;
+    let couple = fly ? 0 : this.coreTq;
     for (let i = 0; i < 4; i++) {
       const L = this.limbs[i];
-      if (L.sfx === 0 && L.sfy === 0) continue;
+      if (fly || (L.sfx === 0 && L.sfy === 0)) continue;
       if (i < 2) {
         acx += (L.sfx * g) / MC;
         acy += (L.sfy * g) / MC;
@@ -1807,7 +2232,7 @@ export class ClimberSim implements ClimberSimAPI {
     }
 
     // hip target (player) or autonomic posture
-    if (this.phase === 'climbing' || this.phase === 'idle') {
+    if (!fly && (this.phase === 'climbing' || this.phase === 'idle')) {
       let tx = 0;
       let ty = 0;
       let k = 0;
@@ -1853,7 +2278,7 @@ export class ClimberSim implements ClimberSimAPI {
       uy /= ul;
       for (let i = 0; i < 4; i++) {
         const L = this.limbs[i];
-        if (!L.dragging) continue;
+        if (!L.dragging || fly) continue;
         const ty = this.reachY(i);
         const en = envEval(i, ax[i], ay[i], ux, uy, L.tx, ty);
         const d = en.r;
@@ -1918,7 +2343,7 @@ export class ClimberSim implements ClimberSimAPI {
     }
 
     // integrate
-    const dmp = Math.exp(-SIM.dampClimb * dampBoost * h);
+    const dmp = Math.exp(-(fly ? SIM.dampAir : SIM.dampClimb * dampBoost) * h);
     this.Pv.x = (this.Pv.x + apx * h) * dmp;
     this.Pv.y = (this.Pv.y + apy * h) * dmp;
     this.Cv.x = (this.Cv.x + acx * h) * dmp;
@@ -2050,6 +2475,8 @@ export class ClimberSim implements ClimberSimAPI {
     const sh = BODY.shoulderHalf;
     const hh = BODY.hipHalf;
     const res = this.envResidual;
+    // in a flight the arms / legs fold in 3D past the shoulder / hip (a lock-off): no in-plane minimum
+    const fly = this.flight !== null;
     for (let it = 0; it < SIM.pbdIterations; it++) {
       // spine frame
       let sx = C.x - P.x;
@@ -2076,7 +2503,7 @@ export class ClimberSim implements ClimberSimAPI {
           const k = (dist - allow) / dist;
           C.x += (L.cx - PROJ_OUT.x) * k;
           C.y += (L.cy - PROJ_OUT.y) * k;
-        } else if (d < SIM.armMinPlane && d > 1e-6) {
+        } else if (!fly && d < SIM.armMinPlane && d > 1e-6) {
           // soft: a hand grabbed right at the shoulder pushes the body away gently
           const m = (Math.max(d - SIM.armMinPlane, -0.01) / d) * 0.5;
           C.x += dx * m;
@@ -2105,7 +2532,7 @@ export class ClimberSim implements ClimberSimAPI {
           const k = (dist - allow) / dist;
           P.x += (L.cx - PROJ_OUT.x) * k;
           P.y += (L.cy - PROJ_OUT.y) * k;
-        } else if (d < SIM.legMinPlane && d > 1e-6) {
+        } else if (!fly && d < SIM.legMinPlane && d > 1e-6) {
           // soft: a high-step folds the leg and eases the hips away instead of popping them
           const m = (Math.max(d - SIM.legMinPlane, -0.01) / d) * 0.5;
           P.x += dx * m;
@@ -2174,6 +2601,14 @@ export class ClimberSim implements ClimberSimAPI {
         L.px = damp(L.px, tx, 18, h);
         L.py = damp(L.py, ty, 18, h);
         L.depth = damp(L.depth, 0.1, 14, h);
+      } else if (L.flying && this.flight) {
+        // reaching for the target hold through the flight (the arm stays inside its envelope)
+        const F = this.flight;
+        const k = F.hands.indexOf(i);
+        const c = envClamp(i, ax[i], ay[i], sx, sy, F.tx[k], F.ty[k], 0);
+        L.px = damp(L.px, c.x, 30, h);
+        L.py = damp(L.py, c.y, 30, h);
+        L.depth = damp(L.depth, 0.08, 14, h);
       } else if (L.busy && L.busyKind === 'chalk') {
         // into the chalk bag behind the hips (the depth puts the hand behind the body)
         const tx = this.P.x - sx * 0.1 + rx * side * 0.05;
@@ -2426,6 +2861,7 @@ export class ClimberSim implements ClimberSimAPI {
     }
     this.events.push({ type: 'fall', reason });
     this.phase = 'falling';
+    this.flight = null;
     this.hipTarget = null;
     this.postureOn = false;
     this.matchT = 0;
@@ -2443,6 +2879,7 @@ export class ClimberSim implements ClimberSimAPI {
       L.shakeOut = false;
       L.flag = false;
       L.mode = null;
+      L.flying = false;
       L.load = 0;
       L.stress = 0;
       L.cap = 0;
@@ -2680,6 +3117,18 @@ export class ClimberSim implements ClimberSimAPI {
     s.balance = this.balance;
     s.topProgress = clamp01(this.matchT / GAME.topHold);
     s.time = this.time;
+    const F = this.flight;
+    s.airborne = F !== null;
+    if (F) {
+      const fi = this.flightInfo;
+      fi.kind = F.kind;
+      fi.limbs = F.limbs;
+      fi.holdId = F.hold.id;
+      fi.t = F.t;
+      fi.apexIn = (F.apexAt >= 0 ? F.apexAt : F.tApex) - F.t;
+      fi.power = F.power;
+      s.flight = fi;
+    } else s.flight = null;
     if (s.clipped.length !== this.clipped.length || s.clipped.some((v, k) => v !== this.clipped[k])) {
       s.clipped.length = 0;
       for (const c of this.clipped) s.clipped.push(c);
@@ -2710,6 +3159,8 @@ export class ClimberSim implements ClimberSimAPI {
         o.friction = this.handFric[i];
         o.shakingOut = L.shakeOut;
         o.chalking = L.busy && L.busyKind === 'chalk';
+        o.flying = L.flying;
+        o.flightTarget = L.flying && F ? F.hold.id : null;
       }
       let layer = 0;
       for (let p = 0; p < CROSS_PAIRS.length; p++) {

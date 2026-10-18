@@ -81,6 +81,11 @@ export class Forearm {
     this.exhausted = false;
   }
 
+  /** A burst of work outside the steady model (a dyno launch or catch): spend this fraction of W′. */
+  spend(fraction: number): void {
+    if (fraction > 0) this.w = Math.max(0, this.w - fraction);
+  }
+
   /** The hand let go of its hold: the next grip starts unoccluded. */
   release(): void {
     this.holdT = 0;

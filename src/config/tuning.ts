@@ -372,6 +372,46 @@ export const SIM = {
   /** Release zone for a chalk dip: finger within this distance (m) of the chalk bag (behind the hips). */
   chalkZone: 0.2,
 
+  // ── Dynamics: deadpoints + dynos (research §2.5, §6.6) ──
+  /** The throw aims the hand this far (m) inside its reach envelope at the apex. */
+  dynoMargin: 0.02,
+  /** …and puts the apex this far past the needed rise ("aiming past the hold worked best" [37]). */
+  dynoAimPast: 0.05,
+  /** Smallest hop (m) of a throw, and the hop per metre of sideways throw (lateral dynos jump too). */
+  dynoMinHop: 0.06,
+  dynoLateralHop: 0.35,
+  /**
+   * Launch speed the climber can produce: legs (feet ≈1.8× the hands at launch [37]) accelerate the body
+   * over the leg extension still available (a deep crouch throws further), the arms over dynoArmExt.
+   * Defaults give ≈3.6 m/s from a crouch with arms (≈0.65 m of rise at vertical: a recreational 0.4–0.8 m
+   * dyno), ≈2 m/s campusing. On overhangs the feet push less (dynoSteepLegLoss · sin θ).
+   */
+  dynoLegAccel: 18,
+  dynoArmAccel: 7,
+  dynoArmExt: 0.3,
+  dynoSteepLegLoss: 0.4,
+  /** Furthest a throw can be aimed (m beyond the static reach) for a dyno candidate. */
+  dynoMaxReach: 1.3,
+  /** Catch: the target within this (m) of the hand's envelope; the hand closes near the apex (CoM vy ≤ dynoGrabVy). */
+  dynoCatchTol: 0.07,
+  dynoGrabVy: 0.3,
+  /** Seconds past the apex before an unreached throw is a miss (research catch window −150…+50 ms; game +100 ms). */
+  dynoLate: 0.1,
+  /** Arm flex (m) that absorbs the catch: peak load = static load × (1 + v²/(2 g · dynoAbsorb)) (research 1.1–1.6 BW). */
+  dynoAbsorb: 0.18,
+  /** A catch holds if its peak stress (peak load / capacity) stays under this; the hand rips off above it. */
+  dynoCatchStress: 1.5,
+  /** Pump: W′ fraction spent per launch (× (v / vmax)², ×2 without feet) and per catch (× peak stress²). */
+  dynoLaunchPump: 0.03,
+  dynoCatchPump: 0.05,
+  /** Fraction of the body's speed left after a caught throw (the arms absorb the rest). */
+  dynoKeep: 0.35,
+  /** Release flick (wall-local m/s along the line to the hold) that commits a throw, and the flick of an ideal one. */
+  dynoMinFlick: 1.2,
+  dynoFlickRef: 3.0,
+  /** Longest flight (s) before the sim calls it a miss. */
+  dynoMaxFlight: 1.2,
+
   // ── Falling + rope ──
   /** Rope: soft catch stiffness (1/s²) per metre of rope out, and damping. */
   ropeStiffness: 260,

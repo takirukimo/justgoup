@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import type { SimEvent } from '../core/contracts';
 import type { BoulderDef, HoldDef, LimbId } from '../core/types';
-import { SIM } from '../config/tuning';
+import { GAME, SIM } from '../config/tuning';
 import { ClimberSim, type ClimberSimOptions } from './climber-sim';
 import { Forearm } from './forearm';
 import { edgeDepthFactor, frictionCapFactor, handGripBase, pumpCapFactor } from './holds';
@@ -634,5 +634,159 @@ describe('foot techniques (research §2.2, §2.3)', () => {
     run(sim, 0.1);
     expect(sim.getState().limbs.LF.footMode).toBeUndefined();
     expect(sim.getState().limbs.LH.footMode).toBeUndefined();
+  });
+});
+
+// ═══════════════════════════════ deadpoints + dynos ═══════════════════════════════
+
+describe('deadpoints and dynos (research §2.5, §6.6)', () => {
+  const deadpointWall = (target: HoldDef): BoulderDef =>
+    makeBoulder([hold('s1', -0.2, 2.0, 'jug', 0.1, 'start'), hold('s2', 0.2, 1.9, 'jug', 0.1, 'start'), hold('f1', -0.2, 0.9, 'jug', 0.08, 'foot'), hold('f2', 0.2, 0.9, 'jug', 0.08, 'foot'), target, hold('t', 0, 4.1, 'jug', 0.12, 'top')]);
+  /** Climber crouched (hips pulled 0.2 m down) under a hold the right hand can't reach statically. */
+  const crouched = (target: HoldDef): ClimberSim => {
+    const sim = new ClimberSim(deadpointWall(target), { sweat: 0 });
+    sim.start();
+    run(sim, 1);
+    sim.setHipTarget({ x: 0, y: sim.getState().pelvis.y - 0.2 });
+    run(sim, 1);
+    expect(sim.reachableHolds('RH')).not.toContain(target.id);
+    return sim;
+  };
+  const fly = (sim: ClimberSim, secs: number, ev: SimEvent[]): { at: Record<string, number> } => {
+    const at: Record<string, number> = {};
+    for (let k = 0, t = 0; k < secs * 120; k++, t += 1 / 120)
+      for (const e of sim.step(1 / 120)) {
+        ev.push(e);
+        if (!(e.type in at)) at[e.type] = t;
+      }
+    return { at };
+  };
+
+  it('a deadpoint throws the body on an arc and catches the hold just before the apex; feet and the other hand stay on', () => {
+    const sim = crouched(hold('h1', 0.25, 2.85, 'jug', 0.1, 'hand'));
+    const p0 = sim.getState().limbs.RH.pump!;
+    const start = sim.dyno('RH', 'h1', 1);
+    expect(start.map((e) => e.type)).toEqual(['release', 'dyno-start']);
+    const ds = start[1];
+    expect(ds.type === 'dyno-start' && ds.kind).toBe('deadpoint');
+    let s = sim.getState();
+    expect(s.airborne).toBe(true);
+    expect(s.phase).toBe('climbing');
+    expect(s.flight?.limbs).toEqual(['RH']);
+    expect(s.limbs.RH.flying).toBe(true);
+    expect(s.limbs.RH.flightTarget).toBe('h1');
+    expect(s.velocity.y).toBeGreaterThan(1);
+    const ev: SimEvent[] = [];
+    const { at } = fly(sim, 1, ev);
+    const c = ev.find((e) => e.type === 'dyno-catch');
+    expect(c && c.type === 'dyno-catch' && c.limbs).toEqual(['RH']);
+    // research [37]: the catch comes just before the apex (window −150 … +50 ms; the game allows +100 ms)
+    expect(c && c.type === 'dyno-catch' && c.timing).toBeGreaterThan(-0.15);
+    expect(c && c.type === 'dyno-catch' && c.timing).toBeLessThan(0.1);
+    expect(at.grab).toBe(at['dyno-catch']);
+    expect(at['dyno-catch']).toBeGreaterThan(0.08);
+    expect(at['dyno-catch']).toBeLessThan(0.45);
+    s = sim.getState();
+    expect(s.airborne).toBe(false);
+    expect(s.flight).toBeNull();
+    expect([s.limbs.LH.holdId, s.limbs.RH.holdId, s.limbs.LF.holdId, s.limbs.RF.holdId]).toEqual(['s1', 'h1', 'f1', 'f2']);
+    expect(s.limbs.RH.flying).toBe(false);
+    // the throw and the catch cost forearm
+    expect(s.limbs.RH.pump!).toBeGreaterThan(p0 + 0.003);
+    expect(ev.some((e) => e.type === 'fall' || e.type === 'slip')).toBe(false);
+  });
+
+  it('a timid throw falls short; the deadpoint falls back onto the hold it left', () => {
+    const sim = crouched(hold('h1', 0.25, 2.9, 'jug', 0.1, 'hand'));
+    sim.dyno('RH', 'h1', 0.6);
+    const ev: SimEvent[] = [];
+    fly(sim, 1, ev);
+    const miss = ev.find((e) => e.type === 'dyno-miss');
+    expect(miss && miss.type === 'dyno-miss' && miss.reason).toBe('short');
+    const ret = ev[ev.indexOf(miss!) + 1];
+    expect(ret).toEqual({ type: 'return', limb: 'RH', holdId: 's2' });
+    expect(sim.getState().phase).toBe('climbing');
+    expect(sim.getState().limbs.RH.holdId).toBe('s2');
+  });
+
+  it('a hold too poor for the catch rips off (the catch load is 1.1–1.6 BW, not the static load)', () => {
+    // a big throw at a crimp: the feet cut, the arm has to stop the whole body
+    const sim = new ClimberSim(deadpointWall(hold('c1', 0.25, 3.0, 'crimp', 0.03, 'hand')), { sweat: 0 });
+    sim.start();
+    run(sim, 1);
+    const start = sim.dyno('RH', 'c1', 1);
+    expect(start.filter((e) => e.type === 'release').map((e) => e.type === 'release' && e.limb)).toEqual(['RH', 'LF', 'RF']);
+    const ev: SimEvent[] = [];
+    fly(sim, 1, ev);
+    const miss = ev.find((e) => e.type === 'dyno-miss');
+    expect(miss && miss.type === 'dyno-miss' && miss.reason).toBe('ripped');
+    expect(ev.some((e) => e.type === 'dyno-catch')).toBe(false);
+  });
+
+  it('a double-hand dyno from a crouch: all four limbs leave, the flight outlasts the old no-hands grace, both hands catch', () => {
+    const b = makeBoulder([hold('s1', -0.2, 1.7, 'jug', 0.1, 'start'), hold('s2', 0.2, 1.7, 'jug', 0.1, 'start'), hold('f1', -0.2, 0.85, 'jug', 0.08, 'foot'), hold('f2', 0.2, 0.85, 'jug', 0.08, 'foot'), hold('t', 0, 3.2, 'jug', 0.12, 'top')]);
+    const sim = new ClimberSim(b, { sweat: 0 });
+    sim.start();
+    run(sim, 1);
+    const pump0 = sim.getState().pump;
+    const start = sim.dyno('both', 't', 1);
+    expect(start.filter((e) => e.type === 'release')).toHaveLength(4);
+    const ds = start.find((e) => e.type === 'dyno-start');
+    expect(ds && ds.type === 'dyno-start' && ds.kind).toBe('dyno');
+    const ev: SimEvent[] = [];
+    const { at } = fly(sim, 2, ev);
+    // research §6.6: ≈0.3 s with no hands on for a 0.5 m rise; the old 0.28 s grace would have dropped it
+    expect(at['dyno-catch']).toBeGreaterThan(SIM.noHandsGrace);
+    expect(at['dyno-catch']).toBeLessThan(0.5);
+    const c = ev.find((e) => e.type === 'dyno-catch');
+    expect(c && c.type === 'dyno-catch' && c.limbs).toEqual(['LH', 'RH']);
+    expect(ev.some((e) => e.type === 'fall')).toBe(false);
+    run(sim, GAME.topHold + 0.3, ev);
+    expect(sim.getState().phase).toBe('topped');
+    // dynos are expensive: both forearms paid for the launch and the catch
+    expect(sim.getState().limbs.LH.pump!).toBeGreaterThan(pump0 + 0.03);
+  });
+
+  it('a double dyno that falls short is a fall (no hands left)', () => {
+    const b = makeBoulder([hold('s1', -0.2, 1.7, 'jug', 0.1, 'start'), hold('s2', 0.2, 1.7, 'jug', 0.1, 'start'), hold('f1', -0.2, 0.85, 'jug', 0.08, 'foot'), hold('f2', 0.2, 0.85, 'jug', 0.08, 'foot'), hold('t', 0, 3.2, 'jug', 0.12, 'top')]);
+    const sim = new ClimberSim(b, { sweat: 0 });
+    sim.start();
+    run(sim, 1);
+    sim.dyno('both', 't', 0.65);
+    const ev: SimEvent[] = [];
+    fly(sim, 2, ev);
+    const types = ev.map((e) => e.type);
+    expect(types.indexOf('dyno-miss')).toBeGreaterThanOrEqual(0);
+    expect(types.indexOf('fall')).toBeGreaterThan(types.indexOf('dyno-miss'));
+    const fall = ev.find((e) => e.type === 'fall');
+    expect(fall && fall.type === 'fall' && fall.reason).toBe('no-hands');
+  });
+
+  it('endDrag with a committed flick throws; a plain release keeps the old behaviour', () => {
+    const target = hold('h1', 0.25, 2.85, 'jug', 0.1, 'hand');
+    const flick = (velocity?: { x: number; y: number }): SimEvent[] => {
+      const sim = crouched(target);
+      expect(sim.beginDrag('RH')).toBe(true);
+      for (let k = 0; k < 3; k++) {
+        sim.dragTo('RH', { x: 0.25, y: 2.82 });
+        sim.step(1 / 60);
+      }
+      const pv = sim.dynoCandidate('RH', { x: 0.25, y: 2.82 });
+      expect(pv).toEqual({ holdId: 'h1', kind: 'deadpoint', rise: expect.any(Number), feasible: true });
+      return sim.endDrag('RH', velocity ? { velocity } : undefined);
+    };
+    expect(flick({ x: 0.2, y: 3.2 }).map((e) => e.type)).toEqual(['dyno-start']);
+    expect(flick({ x: 0, y: 0.3 }).map((e) => e.type)).toEqual(['return']); // no commitment
+    expect(flick().map((e) => e.type)).toEqual(['return']);
+  });
+
+  it('dynoCandidate flags a throw the climber cannot make', () => {
+    const sim = new ClimberSim(deadpointWall(hold('far', 0.3, 3.85, 'jug', 0.1, 'hand')), { sweat: 0 });
+    sim.start();
+    run(sim, 1);
+    const pv = sim.dynoCandidate('RH', { x: 0.3, y: 3.85 });
+    expect(pv?.holdId).toBe('far');
+    expect(pv?.feasible).toBe(false);
+    expect(sim.dynoCandidate('RH', { x: 0.2, y: 1.9 })).toBeNull(); // in static reach: just grab it
   });
 });
