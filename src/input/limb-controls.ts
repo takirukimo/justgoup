@@ -2625,7 +2625,8 @@ export class LimbControls implements LimbControlsAPI {
     if (this.chalkOk && H.map(this.bag.x, this.bag.y, p)) {
       const d = Math.hypot(tx - this.bag.x, ty - this.bag.y) - SIM.chalkZone;
       const on = this.zone === ZONE_CHALK;
-      const a = on ? 1 : clamp(1 - d / 0.55, 0, 1) * 0.6;
+      // always a whisper while a hand is dragged, clearer as the finger nears the hips
+      const a = on ? 1 : 0.22 + clamp(1 - d / 0.55, 0, 1) * 0.43;
       if (a > 0.02) {
         const bx = p.x;
         const by = p.y;
@@ -2658,7 +2659,7 @@ export class LimbControls implements LimbControlsAPI {
       shakeLanePoint(idx, A, this.up, (L.down0 + L.down1) / 2, (L.out0 + L.out1) / 2, this.s1);
       const d = Math.max(0, Math.hypot(tx - this.s1.x, ty - this.s1.y) - 0.24);
       const on = this.zone === ZONE_SHAKE;
-      const a = on ? 1 : clamp(1 - d / 0.45, 0, 1) * 0.5;
+      const a = on ? 1 : 0.2 + clamp(1 - d / 0.45, 0, 1) * 0.4;
       if (a > 0.02 && on) {
         // the lane itself only shows while the finger is in it (a whisper of fill + a dashed edge)
         const c = this.laneQuad;
