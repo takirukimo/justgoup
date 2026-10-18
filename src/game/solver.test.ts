@@ -6,6 +6,7 @@ import { estimateGrade, nextHint, planBeta, planBetaDetailed } from './solver';
 import { RopeSystem } from './rope';
 import { hold, makeBoulder } from './test-helpers';
 import { usableByFoot, usableByHand } from './holds';
+import { availableStyles } from './archetypes';
 
 /** ≥ 1: how much busier than one runnable task per core the machine is right now (1 when unknown). */
 function loadFactor(): number {
@@ -50,6 +51,26 @@ describe('planBeta', () => {
     }
     times.sort((a, b) => a - b);
     // 60 ms on an idle machine; the budget scales with the machine's load (shared CI / dev boxes)
+    expect(times[Math.floor(times.length / 2)]).toBeLessThan(60 * loadFactor());
+  });
+
+  it('stays fast on every archetype, multi-angle walls included (< 60 ms median, deterministic budgets)', { timeout: 120_000 }, () => {
+    const problems: ReturnType<typeof generateBoulder>[] = [];
+    for (const profiles of [false, true])
+      for (const style of availableStyles(profiles)) for (const g of [2, 6, 10]) problems.push(generateBoulder({ seed: 5100 + g * 3 + style.length, grade: g, style, profiles }));
+    planBeta(problems[0]); // warm-up (JIT)
+    const times: number[] = [];
+    for (const b of problems) {
+      let best = Infinity;
+      for (let k = 0; k < 2; k++) {
+        const t0 = performance.now();
+        // the generator's own deterministic budget: every generated problem solves within it
+        expect(planBeta(b, { maxNodes: 700 }), b.id).not.toBeNull();
+        best = Math.min(best, performance.now() - t0);
+      }
+      times.push(best);
+    }
+    times.sort((a, b) => a - b);
     expect(times[Math.floor(times.length / 2)]).toBeLessThan(60 * loadFactor());
   });
 

@@ -221,6 +221,8 @@ export class BetaBot {
           }
           if (!grabbed) {
             this.log.push(`miss ${limb}->${st.move.holdId} (${ev.map((x) => x.type).join(',')})`);
+            // the limb went back where it was: from this stance, try another first move
+            this.missed.push({ stance: this.stanceKey(), limb, holdId: st.move.holdId });
             this.retry();
             return;
           }
@@ -434,8 +436,16 @@ export class BetaBot {
     this.t = 0;
   }
 
+  /** Static moves the climber missed, with the stance (hold ids LH|RH|LF|RF) they were tried from. */
+  private readonly missed: { stance: string; limb: LimbId; holdId: string }[] = [];
+
+  private stanceKey(): string {
+    const s = this.sim.getState();
+    return `${s.limbs.LH.holdId}|${s.limbs.RH.holdId}|${s.limbs.LF.holdId}|${s.limbs.RF.holdId}`;
+  }
+
   private retry(): void {
-    if (!this.opts.replan || this.replans >= 3) {
+    if (!this.opts.replan || this.replans >= 4) {
       this.fail('move missed');
       return;
     }
@@ -454,8 +464,19 @@ export class BetaBot {
       maxNodes: this.sim.boulder.mode === 'rope' ? 2600 : 900,
       clipped: s.clipped,
     };
+    // a move missed from this very stance is not tried first again (when the beta has another way)
+    const key = this.stanceKey();
+    const avoid = this.missed.filter((m) => m.stance === key).map((m) => ({ limb: m.limb, holdId: m.holdId }));
+    const tries: Parameters<typeof planBetaDetailed>[1][] = [];
     // after two missed throws, a static beta from here is worth more than a third throw
-    const plan = (this.misses >= 2 ? planBetaDetailed(this.sim.boulder, { ...opts, dynos: false }) : null) ?? planBetaDetailed(this.sim.boulder, opts);
+    if (this.misses >= 2) {
+      if (avoid.length) tries.push({ ...opts, dynos: false, avoid });
+      tries.push({ ...opts, dynos: false });
+    }
+    if (avoid.length) tries.push({ ...opts, avoid });
+    tries.push(opts);
+    let plan: PlanResult | null = null;
+    for (const o of tries) if ((plan = planBetaDetailed(this.sim.boulder, o))) break;
     if (!plan) {
       this.fail('replan failed');
       return;

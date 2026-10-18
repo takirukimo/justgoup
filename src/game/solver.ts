@@ -7,8 +7,11 @@
 // Search budgets are node counts (deterministic). Interactive calls may add a wall-clock cap, but it
 // never ends a search before SOLVER.minNodes expansions, so a slow phone gets exactly the answer a
 // fast desktop gets for every problem solvable within that many expansions (generated problems
-// need ~35 at the median and < 260 at worst). The search evaluates children lazily (see expand()).
-// Hot-path numbers: ~25 ms median per generated boulder on a desktop core.
+// need ~35 at the median). The search evaluates children lazily (see expand()). It is weighted A*
+// that turns greedier when a search runs long (SOLVER.greedAfter) and on multi-angle walls, so the
+// long tail (hard traverses, caves, V10+ compression) stays near ~200 expansions.
+// Hot-path numbers: ~30 ms median per generated boulder on a desktop core (every archetype, profiles
+// on or off), p90 ≈ 100 ms.
 
 import type { BoulderDef, HoldDef, LimbId, QuickdrawDef, Vec2, WallPanel } from '../core/types';
 import type { BetaMove, ClimberSimAPI } from '../core/contracts';
@@ -22,12 +25,14 @@ import {
   LIMB_IDS,
   LIMB_INDEX,
   maxReachIdx,
+  mountsByVolume,
   nominalCapacity,
   placementBlocked,
   startPlacement,
   topHolds,
   usableByFoot,
   usableByHand,
+  volumeYields,
 } from './holds';
 import {
   computeAnchors,
@@ -76,6 +81,19 @@ export const SOLVER = {
   pump: 0.52,
   /** Weighted A*: f = g + heuristicWeight · h. */
   heuristicWeight: 2.4,
+  /**
+   * The same on a multi-angle wall: a greedier search. Profiled stances cost ≈2× a flat one and steep
+   * panels branch much more (caves needed ≈300 expansions at 2.4), so the search commits sooner:
+   * ≈55 % fewer expansions over every archetype for ≈2 % more strain per move (no lost solutions).
+   */
+  heuristicWeightProfile: 3.5,
+  /**
+   * A search still open after `greedAfter` expansions turns greedier (heuristicWeightGreedy): the
+   * typical problem (≈35 expansions) keeps its calm beta, the long tail (hard traverses, caves,
+   * compression at V10+) commits sooner instead of running into the budget. Deterministic (counts).
+   */
+  greedAfter: 80,
+  heuristicWeightGreedy: 4.5,
   maxNodesBoulder: 700,
   maxNodesRope: 2600,
   /**
@@ -124,6 +142,11 @@ export interface PlanOptions {
   clipped?: readonly string[];
   /** Plan deadpoints / dynos too (default: only on problems of style 'dyno'). */
   dynos?: boolean;
+  /**
+   * Moves NOT to start with (from the start stance): a live climber that just missed one of them
+   * (the bot, a hint after a failed move) gets a different first move when one exists.
+   */
+  avoid?: readonly { limb: LimbId; holdId: string }[];
 }
 
 export interface PlanStep {
@@ -244,19 +267,28 @@ class Heap {
     const last = a.pop()!;
     if (a.length) {
       a[0] = last;
-      let i = 0;
-      for (;;) {
-        const l = 2 * i + 1;
-        const r = l + 1;
-        let m = i;
-        if (l < a.length && a[l].f < a[m].f) m = l;
-        if (r < a.length && a[r].f < a[m].f) m = r;
-        if (m === i) break;
-        [a[m], a[i]] = [a[i], a[m]];
-        i = m;
-      }
+      this.down(0);
     }
     return top;
+  }
+  /** Scale every queued node's heuristic share (f − g) by k and restore the heap order. */
+  reweight(k: number): void {
+    const a = this.a;
+    for (const n of a) n.f = n.g + (n.f - n.g) * k;
+    for (let i = (a.length >> 1) - 1; i >= 0; i--) this.down(i);
+  }
+  private down(i: number): void {
+    const a = this.a;
+    for (;;) {
+      const l = 2 * i + 1;
+      const r = l + 1;
+      let m = i;
+      if (l < a.length && a[l].f < a[m].f) m = l;
+      if (r < a.length && a[r].f < a[m].f) m = r;
+      if (m === i) break;
+      [a[m], a[i]] = [a[i], a[m]];
+      i = m;
+    }
   }
 }
 
@@ -297,13 +329,20 @@ class Planner {
   private readonly AY = new Float64Array(4);
   private readonly tmpC = { x: 0, y: 0 };
 
+  /** Heuristic weight of this wall (SOLVER.heuristicWeight / heuristicWeightProfile), and the live one of a search. */
+  readonly baseHw: number;
+  hw: number;
+
   constructor(b: BoulderDef, assist: number, prof: WallProfile | null = profileOf(b)) {
     this.b = b;
     this.prof = prof && !prof.flat ? prof : null;
+    this.baseHw = this.prof ? SOLVER.heuristicWeightProfile : SOLVER.heuristicWeight;
+    this.hw = this.baseHw;
     this.prm = makeParams(b.wallAngle, assist, SOLVER.pump, this.prof);
     this.reachPrm = makeParams(b.wallAngle, assist, SOLVER.pump, this.prof);
     this.handHolds = b.holds.filter(usableByHand);
     this.footHolds = b.holds.filter(usableByFoot);
+    this.mounts = mountsByVolume(b.holds);
     const tops = topHolds(b);
     this.topIds = new Set(tops.map((h) => h.id));
     this.topY = tops.length ? Math.max(...tops.map((h) => h.y)) : b.height - 0.35;
@@ -318,6 +357,38 @@ class Planner {
     this.smearOk = this.prof ? this.prof.minAngle <= SIM.smearMaxAngle : b.wallAngle <= SIM.smearMaxAngle;
     const q = b.mode === 'rope' ? b.quickdraws ?? [] : [];
     this.anchor = q.length ? q[q.length - 1] : null;
+  }
+
+  /** PlanOptions.avoid: the root's key and the "limbIndex|holdId" moves it must not start with. */
+  avoidKey: string | null = null;
+  avoid: Set<string> | null = null;
+
+  /** Holds bolted onto route volumes (the sim's snap rule, holds.volumeYields). */
+  private readonly mounts: Map<string, HoldDef[]> | null;
+  private readonly shadow = new Map<string, boolean>();
+
+  /**
+   * Would a limb released on hold h's grip point snap onto ANOTHER hold (the sim's snapCandidate picks
+   * the hold whose edge is nearest — a big volume or jug right next to h wins)? Such a target is left out:
+   * the planned move would grab the wrong hold. Conservative (ignores reach), cached per hold.
+   */
+  private shadowed(h: HoldDef, li: number, matched: boolean, cp: { x: number; y: number }): boolean {
+    const hand = li < 2;
+    const key = `${h.id}|${hand ? 'h' : 'f'}${matched ? 'm' : ''}${li & 1}`;
+    const hit = this.shadow.get(key);
+    if (hit !== undefined) return hit;
+    let best: HoldDef | null = null;
+    let bestD = Infinity;
+    for (const o of hand ? this.handHolds : this.footHolds) {
+      const d = dhypot(cp.x - o.x, cp.y - o.y) - o.size;
+      if (d > GAME.snapRadius || d >= bestD) continue;
+      if (!hand && volumeYields(o, cp.x, cp.y, this.mounts)) continue;
+      best = o;
+      bestD = d;
+    }
+    const out = best !== null && best !== h;
+    this.shadow.set(key, out);
+    return out;
   }
 
   /** A usable foothold within the sim's snap radius of (x, y): a foot released there grabs it, it doesn't smear. */
@@ -492,7 +563,7 @@ class Planner {
       pose: st.pose,
       tension: st.tension,
       g,
-      f: g + SOLVER.heuristicWeight * this.heuristic(slots),
+      f: g + this.hw * this.heuristic(slots),
       parent,
       step,
       depth: parent ? parent.depth + 1 : 0,
@@ -537,7 +608,7 @@ class Planner {
     n.tension = st.tension;
     n.step = step;
     n.g = parent.g + this.moveCost(st.tension, r.tension);
-    n.f = n.g + SOLVER.heuristicWeight * this.heuristic(n.slots);
+    n.f = n.g + this.hw * this.heuristic(n.slots);
     STEP_NODE.set(step, n);
     return true;
   }
@@ -684,7 +755,7 @@ class Planner {
     n.step = step;
     n.transient = st.tension > SOLVER.stanceMax || !n.slots[2] || !n.slots[3] || !n.slots[0] || !n.slots[1];
     n.g = parent.g + this.moveCost(st.tension, 0.7) + SOLVER.dynoCost;
-    n.f = n.g + SOLVER.heuristicWeight * this.heuristic(n.slots);
+    n.f = n.g + this.hw * this.heuristic(n.slots);
     STEP_NODE.set(step, n);
     return true;
   }
@@ -723,7 +794,7 @@ class Planner {
           pose: n.pose,
           tension: n.tension,
           g,
-          f: g + SOLVER.heuristicWeight * this.heuristic(slots),
+          f: g + this.hw * this.heuristic(slots),
           parent: n,
           step: null,
           depth: n.depth + 1,
@@ -781,8 +852,10 @@ class Planner {
         maxHandY = Math.max(maxHandY, s.y);
       }
     }
+    const avoid = n.key === this.avoidKey ? this.avoid : null;
     for (const h of list) {
       if (h === cur) continue;
+      if (avoid !== null && avoid.has(`${li}|${h.id}`)) continue;
       const d = dhypot(h.x - anchorX, h.y - anchorY);
       if (d > reach) continue;
       let score: number;
@@ -805,6 +878,7 @@ class Planner {
         score = -Math.abs(h.y - ideal) * 1.4 + nominalCapacity(h, false, this.angleOf(h.y)) * 0.35 + (h.y - curY) * 0.5 - Math.abs(h.x - n.pose.px) * 0.4;
       }
       const cp = contactPoint(h, li, n.slots[pair] === h, this.tmpC);
+      if (this.shadowed(h, li, n.slots[pair] === h, cp)) continue;
       if (!this.targetOk(n, li, h, cp.x, cp.y, slack)) continue;
       out.push({ hold: h, x: h.x, y: h.y, score });
     }
@@ -813,7 +887,8 @@ class Planner {
       const sx = n.pose.px + side * 0.16;
       const sy = Math.max(0.35, minHandY - 1.25);
       // (not where the sim would snap the foot onto a foothold instead)
-      if (this.smearAt(sy) && !this.nearFoothold(sx, sy) && this.targetOk(n, li, null, sx, sy, slack)) out.push({ hold: null, x: sx, y: sy, score: -1.2 });
+      if (this.smearAt(sy) && !this.nearFoothold(sx, sy) && !(avoid !== null && avoid.has(`${li}|${SMEAR_ID}`)) && this.targetOk(n, li, null, sx, sy, slack))
+        out.push({ hold: null, x: sx, y: sy, score: -1.2 });
     }
     out.sort((a, c) => c.score - a.score);
     if (out.length > SOLVER.candidatesPerLimb) out.length = SOLVER.candidatesPerLimb;
@@ -882,7 +957,7 @@ class Planner {
           pose: n.pose,
           tension: n.tension,
           g: hBase,
-          f: hBase + SOLVER.heuristicWeight * this.heuristic(slots),
+          f: hBase + this.hw * this.heuristic(slots),
           parent: n,
           step: null,
           depth: n.depth + 1,
@@ -1117,6 +1192,10 @@ export function planBetaDetailed(boulder: BoulderDef, opts: PlanOptions & { goal
     if (s.violation > 0.02) return null;
     root = { ...st, key, pose: s.pose, tension: s.tension, g: 0, f: 0, parent: null, step: null, depth: 0, move: null };
   }
+  if (opts.avoid?.length) {
+    planner.avoidKey = root.key;
+    planner.avoid = new Set(opts.avoid.map((m) => `${LIMB_INDEX[m.limb]}|${m.holdId}`));
+  }
   const handY = (n: Node): number => {
     const a = n.slots[0];
     const b = n.slots[1];
@@ -1180,6 +1259,7 @@ function searchFrom(planner: Planner, root: Node, maxNodes: number, clock: Clock
   const open = new Heap();
   const closed = new Set<string>();
   const best = new Map<string, number>();
+  planner.hw = planner.baseHw;
   open.push(root);
   best.set(root.key, root.g);
   let nodes = 0;
@@ -1204,6 +1284,10 @@ function searchFrom(planner: Planner, root: Node, maxNodes: number, clock: Clock
     nodes++;
     clock.used++;
     if (nodes > maxNodes) break;
+    if (nodes === SOLVER.greedAfter && planner.hw < SOLVER.heuristicWeightGreedy) {
+      open.reweight(SOLVER.heuristicWeightGreedy / planner.hw);
+      planner.hw = SOLVER.heuristicWeightGreedy;
+    }
     if (clock.used > clock.minNodes && (nodes & 7) === 0 && now() - t0 > clock.maxMs) break;
     if (n.depth > 80) continue;
     planner.expand(
