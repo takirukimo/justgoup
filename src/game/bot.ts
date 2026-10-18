@@ -70,6 +70,8 @@ export class BetaBot {
   private throwBoost = 0;
   /** Missed throws (after two, re-plans look for a static beta first). */
   private misses = 0;
+  /** Hands that caught the throw in flight so far. */
+  private readonly caught: LimbId[] = [];
   readonly log: string[] = [];
 
   constructor(sim: ClimberSimAPI, plan?: PlanResult | null, opts: BetaBotOptions = {}) {
@@ -114,6 +116,12 @@ export class BetaBot {
     }
     if (s.phase !== 'climbing') return;
     const st = this.step();
+    if (!st && this.recovering && this.phase === 'prep') {
+      // the feet are back on after a throw went wrong: plan the rest from here
+      this.recovering = false;
+      this.replan();
+      return;
+    }
     if (!st && this.phase !== 'clip' && this.phase !== 'clipwait') {
       // all moves done: wait on the top (rope: clip the anchor first)
       this.t += dt;
@@ -167,27 +175,35 @@ export class BetaBot {
       }
       case 'fly': {
         if (!st) break;
-        // the throw is in the air: wait for the catch (or the miss)
+        // the throw is in the air: wait for the catch (or the miss) of every throwing hand — a double
+        // dyno can stick with one hand and come up short with the other
+        const throwing: LimbId[] = st.move.dyno === 'both' ? ['LH', 'RH'] : [st.move.dyno === 'RH' ? 'RH' : st.move.dyno === 'LH' ? 'LH' : st.move.limb];
         for (const e of events) {
-          if (e.type === 'dyno-catch') {
-            this.moves++;
-            this.throwBoost = 0;
-            this.fastFeet = !!st.dyno && st.dyno.cut.some((l) => l === 'LF' || l === 'RF');
-            if (this.opts.useHips) sim.setHipTarget({ x: st.pose.px, y: st.pose.py });
-            this.phase = 'settle';
-            this.t = 0;
-            return;
-          }
+          if (e.type === 'dyno-catch') for (const l of e.limbs) if (!this.caught.includes(l)) this.caught.push(l);
           if (e.type === 'dyno-miss') {
-            this.log.push(`dyno missed ${st.move.dyno}->${st.move.holdId} (${e.reason})`);
+            this.log.push(`dyno missed ${e.limbs.join('+')}->${st.move.holdId} (${e.reason})`);
             // throw harder after a short one, softer after ripping off; a second miss looks for a static way
             this.throwBoost = clamp(this.throwBoost + (e.reason === 'short' ? 0.1 : -0.05), -0.1, 0.3);
             this.misses++;
-            // a deadpoint that fell back onto its hold can try again from the live stance
+            this.caught.length = 0;
+            // the throw cut the feet: whatever comes next, they go straight back on
+            this.fastFeet = (!s.limbs.LF.holdId && !s.limbs.LF.smearing) || (!s.limbs.RF.holdId && !s.limbs.RF.smearing);
+            // a deadpoint that fell back onto its hold (or half a double dyno that stuck) goes on from the
+            // live stance
             if (s.phase === 'climbing' && (s.limbs.LH.holdId || s.limbs.RH.holdId)) this.retry();
             else this.fail('dyno missed');
             return;
           }
+        }
+        if (throwing.every((l) => this.caught.includes(l))) {
+          this.caught.length = 0;
+          this.moves++;
+          this.throwBoost = 0;
+          this.fastFeet = !!st.dyno && st.dyno.cut.some((l) => l === 'LF' || l === 'RF');
+          if (this.opts.useHips) sim.setHipTarget({ x: st.pose.px, y: st.pose.py });
+          this.phase = 'settle';
+          this.t = 0;
+          return;
         }
         if (this.t > 2.5) this.fail('dyno: no catch');
         break;
@@ -432,6 +448,7 @@ export class BetaBot {
       return;
     }
     this.throws++;
+    this.caught.length = 0;
     this.phase = 'fly';
     this.t = 0;
   }
@@ -455,7 +472,54 @@ export class BetaBot {
     this.t = 0;
   }
 
+  /** A short recovery plan is running (feet back on after a throw), then a full re-plan. */
+  private recovering = false;
+
+  /**
+   * Feet dangling after a throw (cut in the flight, or half a double dyno that stuck): the planner only
+   * plans from stances that hold the climber, so first put each dangling foot on the best foothold it
+   * can reach right now (a quick placement, like a climber who just caught a dyno). False when no foot
+   * dangles or none can reach a hold.
+   */
+  private feetFirst(): boolean {
+    const sim = this.sim;
+    const s = sim.getState();
+    if (!s.limbs.LH.holdId && !s.limbs.RH.holdId) return false;
+    const pose = { px: s.pelvis.x, py: s.pelvis.y, cx: s.chest.x, cy: s.chest.y };
+    const steps: PlanStep[] = [];
+    const taken = new Set<string>();
+    for (const foot of ['LF', 'RF'] as const) {
+      const L = s.limbs[foot];
+      if (L.holdId || L.smearing || L.dragging) continue;
+      const ideal = { x: s.pelvis.x + (foot === 'LF' ? -0.2 : 0.2), y: s.pelvis.y - 0.85 };
+      let best: string | null = null;
+      let bs = -Infinity;
+      for (const id of sim.reachableHolds(foot)) {
+        const h = this.holds.get(id);
+        if (!h || taken.has(id)) continue;
+        const sc = sim.predictGrip(foot, id) - Math.hypot(h.x - ideal.x, h.y - ideal.y) * 1.5;
+        if (sc > bs) {
+          bs = sc;
+          best = id;
+        }
+      }
+      if (!best) continue;
+      taken.add(best);
+      steps.push({ move: { limb: foot, holdId: best }, moveTension: 0, tension: 0, distance: 0, pose, reachPose: pose });
+    }
+    if (!steps.length) return false;
+    this.log.push(`feet back on: ${steps.map((x) => `${x.move.limb}->${x.move.holdId}`).join(', ')}`);
+    this.plan = { moves: steps.map((x) => x.move), steps, startTension: s.tension, startPose: pose, nodes: 0, ms: 0 };
+    this.idx = 0;
+    this.fastFeet = true;
+    this.recovering = true;
+    this.phase = 'prep';
+    this.t = 0;
+    return true;
+  }
+
   private replan(): void {
+    if (!this.recovering && this.feetFirst()) return;
     const s = this.sim.getState();
     const ids = (['LH', 'RH', 'LF', 'RF'] as const).map((l) => s.limbs[l].holdId);
     const opts = {

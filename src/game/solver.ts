@@ -407,11 +407,6 @@ class Planner {
     return this.prof ? angleAt(this.prof, y) <= SIM.smearMaxAngle : this.smearOk;
   }
 
-  /**
-   * Folded walls: feet on holds get the technique the live climber would use there (holds.footModeFor,
-   * the sim's rule) for the body in `pose` — hooks on roofs pull instead of pushing. Flat walls keep
-   * pushing feet (the planner's long-standing model).
-   */
   /** Would the feet's modes at `pose` differ from the ones the contacts carry? */
   private footModesChange(contacts: Contacts, pose: Pose): boolean {
     const prof = this.prof;
@@ -430,6 +425,11 @@ class Planner {
     return false;
   }
 
+  /**
+   * Folded walls: feet on holds get the technique the live climber would use there (holds.footModeFor,
+   * the sim's rule) for the body in `pose` — hooks on roofs pull instead of pushing. Flat walls keep
+   * pushing feet (the planner's long-standing model).
+   */
   applyFootModes(contacts: Contacts, pose: Pose): void {
     const prof = this.prof;
     if (!prof) return;
@@ -1131,11 +1131,12 @@ function startSlots(p: Planner, ids: (string | null)[], b: BoulderDef, pose: Pos
     const h = id ? byId.get(id) : undefined;
     if (h && (i < 2 ? usableByHand(h) : usableByFoot(h))) slots[i] = h;
   }
-  if (!slots[0] || !slots[1]) return null;
+  // one hand may be off (a live climber after half a double dyno stuck): the plan puts it back on first
+  if (!slots[0] && !slots[1]) return null;
   // Feet without holds smear (same rule as the sim's start placement).
-  if (p.smearOk && p.smearAt(Math.max(0.45, pose ? pose.py - 0.62 : Math.min((slots[0] as HoldDef).y, (slots[1] as HoldDef).y) - 1.25))) {
-    const h0 = slots[0] as HoldDef;
-    const h1 = slots[1] as HoldDef;
+  const h0 = (slots[0] ?? slots[1]) as HoldDef;
+  const h1 = (slots[1] ?? slots[0]) as HoldDef;
+  if (p.smearOk && p.smearAt(Math.max(0.45, pose ? pose.py - 0.62 : Math.min(h0.y, h1.y) - 1.25))) {
     const cx = pose ? pose.px : (h0.x + h1.x) / 2;
     const fy = pose ? pose.py - 0.62 : Math.min(h0.y, h1.y) - 1.25;
     for (let i = 2; i < 4; i++) {
