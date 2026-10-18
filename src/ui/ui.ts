@@ -6,7 +6,7 @@ import './styles.css';
 import type { GuideLine, ScreenId, ScreenProps, UIAPI } from '../core/contracts';
 import { bus } from '../core/events';
 import type { ClimberState, HeadId, Profile, RunInfo, Settings } from '../core/types';
-import { FONTS, PALETTE } from '../config/brand';
+import { BRAND, FONTS, PALETTE } from '../config/brand';
 import { el } from './dom';
 import { FxLayer } from './fx';
 import { GuideBubble } from './guide-bubble';
@@ -322,6 +322,8 @@ export class GameUI implements UIAPI {
       const rgb = hexRgb(v);
       if (rgb) root.style.setProperty(`--c-${kebab(k)}-rgb`, rgb);
     }
+    // the CHIRAL mark as a CSS mask (tee prints on outfit swatches)
+    root.style.setProperty('--mark-mask', svgUrl(BRAND.logoSvg.replace('fill="currentColor"', 'fill="#000"')));
     root.style.setProperty('--f-display', FONTS.display);
     root.style.setProperty('--f-ui', FONTS.ui);
     root.style.setProperty('--f-mono', FONTS.mono);

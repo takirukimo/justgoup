@@ -218,9 +218,10 @@ export class HudView implements ScreenView<P> {
     if (run.boulderName !== q.name) {
       q.name = run.boulderName;
       setText(this.nameEl, run.boulderName);
-      // Long route names step down a size before they need an ellipsis.
+      // Long route names step down a size (and tighten) before they need an ellipsis.
       const n = run.boulderName.length;
-      this.nameEl.style.setProperty('--hr-fs', n > 18 ? '14px' : n > 13 ? '16px' : '18px');
+      this.nameEl.style.setProperty('--hr-fs', n > 18 ? '13.5px' : n > 15 ? '14.5px' : n > 12 ? '16px' : '18px');
+      this.nameEl.style.setProperty('--hr-ls', n > 12 ? '0.025em' : '0.06em');
     }
     if (run.grade !== q.grade) {
       q.grade = run.grade;

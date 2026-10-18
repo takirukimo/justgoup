@@ -89,6 +89,27 @@ function svgFor(id: HeadId): string {
       g.push(`<path d="M55 46.5c5-2.4 11-2.4 15 0" stroke="${accent}" stroke-opacity=".35" stroke-width="2" fill="none"/>`);
       break;
     }
+    case 'human': {
+      // base = skin, secondary = hair, accent = the black CHIRAL SPORTS cap
+      g.push(`<path d="M27 101C30 93.5 36 90 43 89.2L63.5 89.2C70 90 74.5 93.5 76.5 101Z" fill="#141517"/>`);
+      g.push(`<path d="M27 101C30 93.5 36 90 43 89.2" fill="none" stroke="#fff" stroke-opacity=".14" stroke-width="1.2"/>`);
+      g.push(
+        `<path d="M40 101C41 93 41.4 86 40.6 80 37 75 35 68 35.4 60 36.4 47 46 38.4 57.6 38.4 66 38.4 71.4 43.2 73 50.4L74.4 55.6 80.2 61.6C81 62.6 80.4 63.8 79 64L75.6 64.4 75.8 67.2 74.6 68.4 75.2 70.4C75.6 72.6 74.4 74.6 72.2 75.6L71 77.2C67.8 79.6 64.6 80 62.4 80.4L62.6 89.4 44 89.4Z" fill="${base}"/>`,
+      );
+      g.push(`<path d="M40.6 80C47 82 54 81.6 62.4 80.4" fill="none" stroke="#000" stroke-opacity=".16" stroke-width="2.4"/>`);
+      g.push(`<path d="M36 53C34.6 61 35.8 69 40.2 75.4 42.6 71 44.6 64.6 45 57Z" fill="${secondary}"/>`);
+      g.push(`<ellipse cx="49.5" cy="59.5" rx="3.4" ry="4.8" fill="${base}" stroke="#000" stroke-opacity=".22" stroke-width="1.1"/>`);
+      g.push(`<path d="M66 51.6c2.4-1 4.8-.9 6.6.2" stroke="${secondary}" stroke-width="1.6" fill="none" stroke-linecap="round"/>`);
+      g.push(`<ellipse cx="69.6" cy="55.6" rx="1.5" ry="1.3" fill="${eye}"/>`);
+      g.push(`<path d="M73.6 72.2c-1.2.5-2.4.6-3.6.3" stroke="#000" stroke-opacity=".3" stroke-width="1" fill="none"/>`);
+      // cap: crown, brim, top button, panel seam and the white front embroidery
+      g.push(`<path d="M34.2 53.4C33.2 41 42.8 31.4 56 31.4 66.6 31.4 73.6 37.4 74.8 48L35.8 54.2Z" fill="${accent}" stroke="#fff" stroke-opacity=".16" stroke-width="1"/>`);
+      g.push(`<path d="M70.4 46C78.6 45.4 87.2 46.8 92 49.8 89.6 52 82.4 52.6 74.6 52.2Z" fill="${accent}" stroke="#fff" stroke-opacity=".2" stroke-width="1"/>`);
+      g.push(`<circle cx="55.6" cy="31.6" r="1.7" fill="${accent}" stroke="#fff" stroke-opacity=".2" stroke-width=".8"/>`);
+      g.push(`<path d="M56 32.4C54 39 53 46 53.4 52.6" stroke="#fff" stroke-opacity=".1" stroke-width="1" fill="none"/>`);
+      g.push(`<path d="M60.4 43.6l9.4-.6" stroke="#F6F4EF" stroke-width="1.7" stroke-linecap="round"/>`);
+      break;
+    }
     case 'eagle':
     case 'vulture': {
       const isEagle = id === 'eagle';

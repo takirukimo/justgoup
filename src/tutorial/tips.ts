@@ -1,5 +1,5 @@
 // Steini's climbing tips: short, genuinely useful technique advice in the voice of the CHIRAL HQ
-// head setter. Shown on the route preview, after falls (results screen) and on loading beats.
+// instructor. Shown on the route preview, after falls (results screen) and on loading beats.
 //
 //   TIPS            every tip (string[], stable order)
 //   randomTip(seed) one tip; deterministic for a given seed, random without one

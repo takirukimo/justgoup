@@ -34,8 +34,8 @@ const CSS = /* css */ `
   transform-origin: 0 50%; transform: scaleX(0);
 }
 .jgt-scrim {
-  position: absolute; left: 0; right: 0; top: 0; height: 46%;
-  background: linear-gradient(180deg, rgba(13,14,16,.74) 0%, rgba(13,14,16,.38) 48%, rgba(13,14,16,0) 100%);
+  position: absolute; left: 0; right: 0; top: 0; height: 54%;
+  background: linear-gradient(180deg, rgba(13,14,16,.86) 0%, rgba(13,14,16,.66) 44%, rgba(13,14,16,0) 100%);
   opacity: 0; transition: opacity 1.1s var(--jgt-ease);
 }
 .jgt.card-on .jgt-scrim { opacity: 1; }
@@ -74,7 +74,11 @@ const CSS = /* css */ `
 }
 .jgt-spec b {
   font: 600 17px/1 var(--jgt-display); letter-spacing: .1em; color: var(--c-bone, ${PALETTE.bone}); white-space: nowrap;
+  text-shadow: 0 1px 2px rgba(0,0,0,.8), 0 0 14px rgba(0,0,0,.6);
 }
+.jgt-spec small, .jgt-eyebrow { text-shadow: 0 1px 2px rgba(0,0,0,.85); }
+/* Steini's bubble sits above the bottom letterbox bar while the cinematic is up */
+.jgu-ui:has(.jgt.on) .guide-layer { --gb-bottom: calc(7.2cqh + 14px); }
 .jgt-tap { position: absolute; inset: 0; pointer-events: none; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .jgt.tap-wait .jgt-tap { pointer-events: auto; }
 /* reveal: each row wipes in from the left, staggered */

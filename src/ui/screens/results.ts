@@ -31,7 +31,9 @@ export function outfitSwatch(id: ColorwayId): HTMLElement {
   fig.style.setProperty('--bottom', c.bottom);
   fig.style.setProperty('--shoe', c.shoe);
   fig.style.setProperty('--acc', c.shoeAccent);
-  fig.append(el('i', 'of-top'), el('i', 'of-bottom'), el('i', 'of-shoe'));
+  fig.style.setProperty('--print', c.accent);
+  // every colourway is a CHIRAL SPORTS tee: the small mark on the chest in the print colour
+  fig.append(el('i', 'of-top', el('i', 'of-mark')), el('i', 'of-bottom'), el('i', 'of-shoe'));
   return fig;
 }
 
@@ -89,7 +91,7 @@ export function createResults(ctx: UICtx, props: P): ScreenView<P> {
     const list = el('div', 'bd-rows');
     for (const b of p.breakdown) {
       const val = el('b', 'bd-val t-num', '0');
-      const row = el('div', 'bd-row', el('span', 'bd-lbl', b.label), el('i', 'bd-leader'), val);
+      const row = el('div', `bd-row${b.value < 0 ? ' bd-neg' : ''}`, el('span', 'bd-lbl', b.label), el('i', 'bd-leader'), val);
       rows.push({ val, value: b.value, row });
       list.appendChild(row);
     }

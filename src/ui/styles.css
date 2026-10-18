@@ -1169,7 +1169,9 @@
   display: flex;
   align-items: center;
   gap: 14px;
-  animation: cta-pulse 1.8s ease-in-out infinite;
+  animation:
+    splash-fade 0.8s var(--ease) 1.4s both,
+    cta-pulse 2.2s ease-in-out 2.2s infinite;
 }
 .cta-txt {
   font-family: var(--f-display);
@@ -1190,12 +1192,14 @@
     opacity: 1;
   }
   50% {
-    opacity: 0.35;
+    opacity: 0.5;
   }
 }
 .splash-legal {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
+  gap: 6px 16px;
   width: 100%;
   padding: 0 8px;
 }
@@ -1821,7 +1825,7 @@
   font-size: var(--hr-fs, 18px);
   font-weight: 700;
   line-height: 1;
-  letter-spacing: 0.06em;
+  letter-spacing: var(--hr-ls, 0.06em);
   text-transform: uppercase;
   color: var(--c-chalk);
   white-space: nowrap;
@@ -2412,7 +2416,7 @@
   animation: crit 0.32s ease-in-out infinite alternate;
 }
 /* Danger is never colour-only: a warning glyph appears next to the critical readout. */
-.inst-alert {
+.jgu-ui .inst-alert {
   display: none;
   width: 12px !important;
   height: 12px !important;
@@ -2422,14 +2426,14 @@
 .inst-pump .inst-alert {
   margin-left: auto;
 }
-.inst-pump.st-crit .inst-alert {
+.jgu-ui .inst-pump.st-crit .inst-alert {
   display: block;
   animation: alert-pop 0.32s var(--ease-spring) both;
 }
 .inst-pump.st-crit .pump-pct {
   margin-left: 4px;
 }
-.inst-ten.st-crit .inst-alert {
+.jgu-ui .inst-ten.st-crit .inst-alert {
   display: block;
   align-self: center;
   margin-right: -2px;
@@ -2679,8 +2683,17 @@
 .pv-back {
   z-index: 2;
 }
+.pv-start {
+  transition: transform 0.18s var(--ease), opacity 0.3s var(--ease);
+}
 .pv-go .pv-start {
   transform: scale(0.97);
+}
+/* After TAP TO START the overlay steps back smoothly while the camera moves in. */
+.pv-go .pv-card,
+.pv-go .pv-tip-slot {
+  opacity: 0.4;
+  transition: opacity 0.3s var(--ease);
 }
 
 /* ───────────────────────────── pause ───────────────────────────── */
@@ -2806,7 +2819,8 @@
 .scr-results {
   pointer-events: auto;
   padding-bottom: calc(var(--safe-b) + 14px);
-  background: linear-gradient(180deg, rgba(13, 14, 16, 0.42) 0%, rgba(13, 14, 16, 0.84) 34%, rgba(11, 12, 14, 0.96) 70%);
+  /* dark enough at the top that the stamp reads over bright gym signage behind it */
+  background: linear-gradient(180deg, rgba(13, 14, 16, 0.64) 0%, rgba(13, 14, 16, 0.86) 32%, rgba(11, 12, 14, 0.96) 70%);
 }
 .res-bg {
   position: absolute !important;
@@ -2900,10 +2914,17 @@
 }
 .stamp-sub .t-label {
   color: currentColor;
-  opacity: 0.9;
+  opacity: 1;
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.26em;
+}
+/* the small line under the stamp uses the lifted tints so it stays AA on the dark scrim */
+.stamp-sub .t-label {
+  color: var(--c-signal-ink);
+}
+.stamp-bad .stamp-sub .t-label {
+  color: var(--c-bad-ink);
 }
 .stamp-bad {
   color: var(--c-bad);
@@ -3050,6 +3071,10 @@
   font-size: 15px;
   font-weight: 600;
   color: var(--c-chalk);
+}
+/* penalties (falls on the tower) read as a deduction */
+.bd-neg .bd-val {
+  color: var(--c-bad-ink);
 }
 .bd-total {
   display: flex;
@@ -3259,6 +3284,17 @@
   height: 4px;
   border-radius: 0 0 50% 50%;
   background: rgba(0, 0, 0, 0.3);
+}
+.of-mark {
+  position: absolute;
+  left: 50%;
+  top: 9px;
+  width: 9px;
+  height: 5px;
+  margin-left: -4.5px;
+  background: var(--print, #fff);
+  -webkit-mask: var(--mark-mask) center / contain no-repeat;
+  mask: var(--mark-mask) center / contain no-repeat;
 }
 .of-bottom {
   left: 9px;
@@ -5165,6 +5201,11 @@
 }
 
 @container ui (max-width: 370px) {
+  /* narrow phones: the two legal lines stack, centred, instead of running into each other */
+  .splash-legal {
+    flex-direction: column;
+    align-items: center;
+  }
   .screens,
   .guide-layer {
     --gut: 14px;
@@ -5200,7 +5241,11 @@
   .pf-name {
     font-size: 28px;
   }
-  /* Narrow phones: the problem card keeps angle + plays; hold count is the least useful spec. */
+}
+
+/* Problem cards keep wall + plays on most phones; the hold count is the least useful spec and only
+   fits next to a long wall label ("OVERHANG 25°") on wide screens. */
+@container ui (max-width: 419px) {
   .cm-specs span:nth-child(2) {
     display: none;
   }
