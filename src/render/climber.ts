@@ -1552,32 +1552,38 @@ export class BodyRig {
   }
 
   private buildBag(b: MeshBuilder, rest: THREE.Matrix4[]): void {
-    // bag-local: origin = belt attach point, +y up, +z away from the body; the bag hangs below
+    // bag-local: origin = belt attach point, +y up, +z away from the body; the bag hangs below.
+    // A soft fabric bucket: a touch wider at the base than at the collar, the back flattened against
+    // the hip, a rounded bottom, a slim fleece collar and a drawstring with a toggle at the front.
     const st = b.vertexCount;
     capsule(b, {
-      y0: -0.1,
+      y0: -0.104,
       y1: -0.012,
-      cap0: 0.026,
+      cap0: 0.03,
       cap1: 0.0,
       rows: 10,
       capRows: 4,
       cols: 22,
-      sec: (y) => ({ rx: 0.043 + (y + 0.1) * 0.035, rz: 0.04 + (y + 0.1) * 0.035, oz: 0.046, e: 2.05 }),
+      sec: (y) => {
+        const k = (y + 0.104) / 0.092; // 0 bottom … 1 collar
+        const r = 0.047 - 0.006 * k + 0.003 * Math.sin(Math.PI * Math.min(1, k * 1.4));
+        return { rx: r, rz: r * 0.9, oz: 0.044, e: 2.1 };
+      },
       uvRect: ATLAS_RECTS.bag,
       attrib: (p, n, v, u, out) => attr(REGION.bag, BONE.bag, sstep(-0.04, -0.012, p.y) * 0.25, 1)(p, n, v, u, out),
     });
-    // fleece rim (chalk colour) — a fat torus around the opening
+    // fleece collar (chalk colour): a slim roll around the opening
     capsule(b, {
-      y0: -0.012,
-      y1: 0.006,
-      cap0: 0.009,
-      cap1: 0.009,
+      y0: -0.01,
+      y1: 0.003,
+      cap0: 0.0065,
+      cap1: 0.0065,
       rows: 3,
       capRows: 4,
       cols: 24,
-      sec: () => ({ rx: 0.048, rz: 0.045, oz: 0.046, e: 2 }),
+      sec: () => ({ rx: 0.0435, rz: 0.039, oz: 0.044, e: 2 }),
       uvRect: ATLAS_RECTS.blank,
-      attrib: attr(REGION.bagRim, BONE.bag, 0, 1),
+      attrib: attr(REGION.bagRim, BONE.bag, 0, 0.92),
     });
     // opening (dark interior disc)
     loft(b, {
@@ -1585,28 +1591,40 @@ export class BodyRig {
       cols: 22,
       point: (v, u, out) => {
         const a = u * Math.PI * 2;
-        const r = (1 - v) * 0.041;
-        out.set(Math.sin(a) * r, 0.004 - v * 0.004, 0.046 + Math.cos(a) * r * 0.94);
+        const r = (1 - v) * 0.038;
+        out.set(Math.sin(a) * r, 0.002 - v * 0.004, 0.044 + Math.cos(a) * r * 0.9);
       },
       attrib: attr(REGION.webbing, BONE.bag, 0.3, 0.35),
       uvRect: ATLAS_RECTS.blank,
     });
-    // brush holder loop on the side
+    // drawstring: a short cord out of the collar at the front with a barrel toggle
     {
       const s2 = b.vertexCount;
       capsule(b, {
-        y0: -0.03,
-        y1: 0.03,
-        cap0: 0.006,
-        cap1: 0.006,
-        rows: 4,
-        capRows: 3,
-        cols: 8,
-        sec: () => ({ rx: 0.006, rz: 0.004 }),
+        y0: -0.026,
+        y1: 0.0,
+        cap0: 0.0022,
+        cap1: 0.0022,
+        rows: 3,
+        capRows: 2,
+        cols: 6,
+        sec: () => ({ rx: 0.0022, rz: 0.0022 }),
         uvRect: ATLAS_RECTS.blank,
         attrib: attr(REGION.webbing, BONE.bag, 0, 1),
       });
-      b.transform(new THREE.Matrix4().makeTranslation(0.047, -0.055, 0.046), s2);
+      capsule(b, {
+        y0: -0.03,
+        y1: -0.016,
+        cap0: 0.004,
+        cap1: 0.004,
+        rows: 2,
+        capRows: 2,
+        cols: 8,
+        sec: () => ({ rx: 0.0052, rz: 0.0052 }),
+        uvRect: ATLAS_RECTS.blank,
+        attrib: attr(REGION.webbing, BONE.bag, 0, 0.8),
+      });
+      b.transform(new THREE.Matrix4().makeRotationX(0.18).setPosition(0.012, -0.004, 0.044 + 0.041), s2);
     }
     b.transform(rest[BONE.bag], st);
   }

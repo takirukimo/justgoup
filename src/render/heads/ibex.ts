@@ -16,21 +16,38 @@ export interface IbexOptions {
 
 /** Natural coat palette (from the reference photo). */
 export const IBEX_COLORS = {
-  coat: '#51473D',
-  dark: '#342D27',
-  warm: '#625242',
-  muzzle: '#A09482',
-  throat: '#8F8272',
+  coat: '#453D36',
+  dark: '#2F2924',
+  warm: '#5A4B3D',
+  muzzle: '#9C9183',
+  throat: '#867A6C',
   nose: '#2A2521',
-  hornBase: '#62584B',
+  hornBase: '#5B5246',
   hornTip: '#353029',
-  hornRidge: '#93866F',
-  iris: '#C98B2C',
-  irisRing: '#6E430E',
+  hornRidge: '#887B65',
+  iris: '#B27A2C',
+  irisRing: '#5A360C',
 } as const;
 
 const EYE_C: [number, number, number] = [0.0575, 0.224, 0.056];
-const EYE_R = 0.0162;
+const EYE_R = 0.0152;
+
+/**
+ * The long ibex face: everything in front of the eyes is stretched forward by FACE_S (a smooth
+ * piecewise-linear warp of z), so the muzzle reads long and straight like the reference instead of
+ * a short, round goat snout. `faceZ` maps a model z to the field's z; `faceZInv` the other way.
+ */
+const FACE_Z0 = 0.09;
+const FACE_S = 1.14;
+const faceZ = (z: number): number => {
+  if (z <= FACE_Z0 - 0.03) return z;
+  const lin1 = FACE_Z0 + (z - FACE_Z0) / FACE_S;
+  if (z >= FACE_Z0 + 0.03) return lin1;
+  // C1 blend over ±3 cm
+  const u = (z - (FACE_Z0 - 0.03)) / 0.06;
+  return z + (lin1 - z) * u * u * (3 - 2 * u);
+};
+const faceZInv = (z: number): number => (z <= FACE_Z0 ? z : FACE_Z0 + (z - FACE_Z0) * FACE_S);
 
 /** Ibex skull field (the chamois / goat / ram share its proportions as a reference). */
 export function ibexSdf(): Sdf {
@@ -47,7 +64,8 @@ export function ibexSdf(): Sdf {
   const cheek = mirrorX(ellipsoid([0.05, 0.196, 0.034], [0.02, 0.027, 0.046]));
   const browR = mirrorX(ellipsoid([0.049, 0.24, 0.056], [0.025, 0.012, 0.026], [0, 0, 0.3]));
   const pedicle = mirrorX(ellipsoid([0.026, 0.266, 0.036], [0.03, 0.022, 0.032]));
-  return (x, y, z) => {
+  return (x, y, zm) => {
+    const z = faceZ(zm);
     let d = cranium(x, y, z);
     d = smin(d, brow(x, y, z), 0.04);
     d = smin(d, muzzle(x, y, z), 0.045);
@@ -66,9 +84,12 @@ export function ibexSdf(): Sdf {
     d = smax(d, -sdRoundCone(ax, y, z, 0.026, 0.137, 0.11, 0.012, 0.136, 0.178, 0.002, 0.0028), 0.004);
     // nostrils: comma slits angled up and back
     d = smax(d, -sdEllipsoid(ax - 0.0145, y - 0.163, z - 0.211, 0.0062, 0.0042, 0.009), 0.005);
-    return d;
+    // the warp shrinks distances in front of the eyes by up to 1/FACE_S: keep the field conservative
+    return zm > FACE_Z0 - 0.03 ? d * FACE_S : d;
   };
 }
+
+const _pw = new THREE.Vector3();
 
 export function buildIbex(opts: IbexOptions = {}): THREE.Group {
   const C = IBEX_COLORS;
@@ -85,10 +106,11 @@ export function buildIbex(opts: IbexOptions = {}): THREE.Group {
   addSkull(kit, {
     sdf,
     a: [0, 0.205, -0.06],
-    b: [0, 0.16, 0.176],
+    b: [0, 0.16, faceZInv(0.176)],
     rows: 52,
     cols: 44,
-    paint: (p, n, out) => {
+    paint: (pm, n, out) => {
+      const p = _pw.set(pm.x, pm.y, faceZ(pm.z));
       const ax = Math.abs(p.x);
       // coat with a soft mottled variation (natural, not flat)
       const nz = noise3(p.x * 60, p.y * 60, p.z * 60) * 0.5 + noise3(p.x * 140, p.y * 140, p.z * 140) * 0.25;
@@ -143,10 +165,10 @@ export function buildIbex(opts: IbexOptions = {}): THREE.Group {
     const a = golden(i) * Math.PI * 2;
     const rr = 0.012 * Math.sqrt((i + 0.5) / 12);
     const bx = Math.cos(a) * rr;
-    const bz = 0.135 + Math.sin(a) * rr;
+    const bz = faceZInv(0.135) + Math.sin(a) * rr;
     addLock(kit, {
       base: [bx, 0.114, bz],
-      dir: [bx * 1.4, -1, 0.42 + (bz - 0.135) * 3],
+      dir: [bx * 1.4, -1, 0.42 + (bz - faceZInv(0.135)) * 3],
       length: 0.034 + 0.012 * (1 - rr / 0.012) + 0.005 * Math.sin(i * 7.1),
       width: 0.024,
       flat: 0.7,
@@ -168,19 +190,20 @@ export function buildIbex(opts: IbexOptions = {}): THREE.Group {
   ];
   addHorns(kit, {
     ctrl: [
-      H(0.023, 0.262, 0.038),
-      H(0.028, 0.33, 0.03),
-      H(0.036, 0.405, 0.002),
-      H(0.048, 0.468, -0.05),
-      H(0.064, 0.51, -0.124),
-      H(0.082, 0.524, -0.207),
-      H(0.102, 0.508, -0.287),
-      H(0.122, 0.474, -0.352),
-      H(0.142, 0.428, -0.398),
+      H(0.024, 0.262, 0.038),
+      H(0.03, 0.334, 0.031),
+      H(0.04, 0.412, 0.004),
+      H(0.055, 0.477, -0.048),
+      H(0.075, 0.52, -0.123),
+      H(0.099, 0.535, -0.207),
+      H(0.124, 0.519, -0.288),
+      H(0.149, 0.484, -0.354),
+      H(0.172, 0.436, -0.4),
     ],
-    samples: 72,
-    cols: 14,
-    radius: (t) => 0.0285 * Math.pow(1 - t, 0.78) + 0.0034,
+    samples: 76,
+    cols: 16,
+    // heavy at the root (the two bases nearly touch on the crown), tapering to a slim worn tip
+    radius: (t) => 0.0318 * Math.pow(1 - t, 0.82) + 0.0034,
     section: (ang, t) => {
       // round at the root, then D-shaped: a broad flat front (the knob face) and a rounded back
       const c = Math.cos(ang);
@@ -192,10 +215,12 @@ export function buildIbex(opts: IbexOptions = {}): THREE.Group {
       return m;
     },
     ridges: {
-      count: 14,
-      amp: 0.78,
-      sharp: 4.5,
-      mask: (ang) => Math.pow(Math.max(0, Math.cos(ang)), 0.75),
+      // knobs only across the broad front face: from the front they read as transverse bars, from
+      // the side as a row of teeth along the leading edge; the sides and back of the horn stay smooth
+      count: 13,
+      amp: 0.66,
+      sharp: 4.2,
+      mask: (ang) => Math.pow(Math.max(0, Math.cos(ang)), 1.5),
       start: 0.07,
       end: 0.8,
       taper: (t) => 1 - 0.6 * sstep(0.1, 0.8, t),
