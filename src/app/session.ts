@@ -342,7 +342,9 @@ export class ClimbSession {
     this.overview = false;
     controls.setEnabled(false);
     this.clearHint();
-    renderer.setCameraMode('fall');
+    // On the rope the follow camera keeps tracking the climber down to the catch; the wide, low
+    // 'fall' shot would put the belayer between the lens and the climber.
+    renderer.setCameraMode(this.rope ? 'follow' : 'fall');
     if (this.rope) {
       this.phase = 'hang';
       return;

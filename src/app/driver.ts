@@ -99,6 +99,11 @@ export class SimDriver {
 
   // ───────────────────────────── feedback ─────────────────────────────
 
+  /** Camera kick, much calmer with the reduced-motion setting. */
+  private kick(amount: number): void {
+    this.svc.renderer.fx.cameraShake(this.svc.profile().settings.reducedMotion ? amount * 0.15 : amount);
+  }
+
   private pan(x: number): number {
     return clamp(x / 2.4, -1, 1) * 0.7;
   }
@@ -134,7 +139,7 @@ export class SimDriver {
         break;
       case 'slip':
         audio.play('slip', { pan: this.pan(st.limbs[e.limb].pos.x) });
-        renderer.fx.cameraShake(0.38);
+        this.kick(0.38);
         audio.haptic([22, 30, 22]);
         break;
       case 'overload':
@@ -153,19 +158,19 @@ export class SimDriver {
       case 'fall':
         audio.play('fall');
         audio.haptic(40);
-        renderer.fx.cameraShake(0.2);
+        this.kick(0.2);
         break;
       case 'land': {
         const k = clamp(e.impact / 7, 0.35, 1);
         audio.play('land', { volume: k });
         renderer.fx.dust({ x: st.com.x, y: GAME.padHeight }, 0.5 + k * 0.9);
-        renderer.fx.cameraShake(clamp(e.impact / 9, 0.2, 0.8));
+        this.kick(clamp(e.impact / 9, 0.2, 0.8));
         audio.haptic(Math.round(30 + 40 * k));
         break;
       }
       case 'caught':
         audio.play('rope-catch', { volume: clamp(0.6 + e.fallDistance / 8, 0.6, 1) });
-        renderer.fx.cameraShake(clamp(0.3 + e.fallDistance / 8, 0.3, 0.9));
+        this.kick(clamp(0.3 + e.fallDistance / 8, 0.3, 0.9));
         audio.haptic([36, 30, 64]);
         break;
       case 'top-touch':

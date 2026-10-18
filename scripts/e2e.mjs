@@ -5,7 +5,7 @@
 //   baseUrl defaults to http://localhost:5207 (start the dev server first:
 //   VITE_CACHE_DIR=node_modules/.vite-integration npx vite --config dev/e2e.vite.config.mjs --port 5207 --strictPort
 //   — that config never reloads the page mid-run; restart it after source changes)
-//   steps: onboarding, sendtrain, leaderboard, locker, settings, community, editor, daily, communityplay, lead
+//   steps: onboarding, sendtrain, leaderboard, locker, settings, profile, community, editor, daily, communityplay, lead
 //   --only runs a subset (later steps seed a returning-player profile when onboarding is skipped).
 import { chromium } from 'playwright-core';
 import { mkdirSync } from 'node:fs';
@@ -262,6 +262,33 @@ async function dragMove(limb, holdId) {
   return `miss(${after.on})`;
 }
 
+/** Rope: clip the next quickdraw as soon as a hand can reach it (what a lead climber does). */
+async function tryClip() {
+  const c = await page.evaluate(async () => {
+    const sim = window.__jgu.sim;
+    const b = sim?.boulder;
+    if (!b || b.mode !== 'rope' || !b.quickdraws) return null;
+    const st = sim.getState();
+    if (st.phase !== 'climbing') return null;
+    const next = b.quickdraws.find((q) => !st.clipped.includes(q.id));
+    if (!next) return null;
+    const { clipPoint } = await import('/src/game/holds.ts');
+    const cp = clipPoint(next, { x: 0, y: 0 });
+    for (const l of ['LH', 'RH']) {
+      const L = st.limbs[l];
+      if (L.busy || !L.holdId) continue;
+      if (sim.clipCandidate(l, cp)) return { limb: l, id: next.id };
+    }
+    return null;
+  });
+  if (!c) return false;
+  const r = await dragMove(c.limb, c.id);
+  log(`  clip ${c.id} with ${c.limb}: ${r}`);
+  if (r !== 'ok') return false;
+  await waitFor(() => !Object.values(window.__jgu.sim.getState().limbs).some((l) => l.busy), 'clip to finish', 30000);
+  return true;
+}
+
 /** Plan from the live stance (planBetaDetailed through the page) and execute it move by move. */
 async function autoClimb({ until, maxMoves = 60, label }) {
   let moves = 0;
@@ -293,6 +320,9 @@ async function autoClimb({ until, maxMoves = 60, label }) {
     let replan = false;
     for (const step of plan) {
       if (await until()) return true;
+      if (await tryClip()) {
+        if (await until()) return true;
+      }
       if (step.holdId === 'smear') continue;
       const r = await dragMove(step.limb, step.holdId);
       moves++;
@@ -373,6 +403,27 @@ if (want('sendtrain')) {
   await tap('.pv-hit', 'TAP TO START');
   await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'climb start (02)', 60000);
   await page.waitForTimeout(600);
+  // a hint: highlighted hold + ghost leader from the limb
+  await tap('.hud-hint', 'HINT');
+  await page.waitForTimeout(900);
+  const ghost = await page.evaluate(() => !!document.querySelector('.jga-ghost:not(.off)'));
+  ok(ghost, 'HINT shows the ghost leader to the suggested hold');
+  await shot('hint');
+  // route overview toggles the preview camera and back
+  await tap('.hud-eye', 'LOOK');
+  await page.waitForTimeout(400);
+  ok((await page.evaluate(() => window.__jgu.renderer.cameraMode)) === 'preview', 'LOOK switches to the route overview');
+  await page.waitForTimeout(1500);
+  await shot('overview');
+  await tap('.hud-eye', 'LOOK');
+  await page.waitForTimeout(400);
+  ok((await page.evaluate(() => window.__jgu.renderer.cameraMode)) === 'follow', 'LOOK again returns to the follow camera');
+  // pause + resume
+  await tap('.hud-pause', 'pause');
+  await waitScreen('pause');
+  await tapText('RESUME');
+  await waitScreen('hud');
+  ok((await page.evaluate(() => window.__jgu.controls.enabled)) === true, 'RESUME re-enables the limb controls');
   await page.evaluate(() => window.__jgu.sim.forceFall());
   await page.waitForTimeout(700);
   await shot('fall');
@@ -448,6 +499,15 @@ if (want('settings')) {
   ok((await page.evaluate(() => window.__jgu.renderer.getQuality())) === 'high', 'settings: renderer switched to HIGH');
   await tapText('LOW');
   await page.waitForTimeout(400);
+  await tap('.btn-back', 'back');
+  await waitScreen('title');
+}
+
+if (want('profile')) {
+  await tapText('PROFILE');
+  await waitScreen('profile');
+  await page.waitForTimeout(1200);
+  await shot('profile');
   await tap('.btn-back', 'back');
   await waitScreen('title');
 }
@@ -600,6 +660,38 @@ if (want('lead')) {
   ok(clipped && clips.length > 0, `Lead Tower: clipped a quickdraw by touch (${clips.join(',') || 'none'})`);
   await page.waitForTimeout(500);
   await shot('lead-clipped');
+
+  // climb on until a fall would be caught by the rope, then take a whipper (forced: QA shortcut)
+  const safe = () =>
+    page.evaluate(async () => {
+      const sim = window.__jgu.sim;
+      const st = sim?.getState();
+      if (!st || st.phase !== 'climbing' || !st.clipped.length) return false;
+      const { RopeSystem } = await import('/src/game/rope.ts');
+      const r = new RopeSystem(sim.boulder);
+      for (const id of st.clipped) r.clip(id);
+      return !r.fallOutcome(st.pelvis).groundFall;
+    });
+  const high = await autoClimb({ label: 'lead-up', maxMoves: 24, until: async () => (await safe()) || (await page.evaluate(() => window.__jgu.sim?.getState().phase !== 'climbing')) });
+  if (ok(high && (await safe()), 'Lead Tower: climbed above the clip to where a fall is caught')) {
+    await page.evaluate(() => {
+      window.__e2eRope = [];
+      window.__jgu.bus.on('sim:event', (e) => {
+        if (e.type === 'caught' || e.type === 'ground-fall') window.__e2eRope.push(e.type);
+      });
+      window.__jgu.sim.forceFall();
+    });
+    await waitFor(() => window.__e2eRope.length > 0, 'rope catch', 60000);
+    await page.waitForTimeout(400);
+    await shot('lead-whipper');
+    const kind = await page.evaluate(() => window.__e2eRope[0]);
+    ok(kind === 'caught', `Lead Tower: the rope catches the fall (${kind})`);
+    await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing' && !document.querySelector('.jga-veil.on'), 'respawn on the wall', 90000);
+    await page.waitForTimeout(1200);
+    const lives = await page.evaluate(() => window.__jgu.app.activeSession?.cfg.lives?.left ?? -1);
+    ok(lives === 2, `Lead Tower: respawned after the catch with one life fewer (${lives} left)`);
+    await shot('lead-respawn');
+  }
   await tap('.hud-pause', 'pause');
   await waitScreen('pause');
   await page.waitForTimeout(500);

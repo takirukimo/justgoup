@@ -47,7 +47,7 @@ export function createPreview(ctx: UICtx, props: P): ScreenView<P> {
         : b.author
           ? `BY ${b.author.toUpperCase()}`
           : b.mode === 'rope'
-            ? `${b.height} M · ${b.quickdraws?.length ?? 0} DRAWS`
+            ? `${b.quickdraws?.length ?? 0} DRAWS`
             : run.mode === 'boulder'
               ? `BOULDER ${String(run.streak + 1).padStart(2, '0')}`
               : 'CHIRAL HQ';
@@ -60,10 +60,10 @@ export function createPreview(ctx: UICtx, props: P): ScreenView<P> {
         'pv-specs',
         specCell('FONT', fontG(b.grade), undefined, 'spec-sm'),
         specCell(ang.kind.toUpperCase(), ang.value, undefined, 'spec-sm'),
-        specCell('HOLDS', String(routeHolds), undefined, 'spec-sm'),
+        b.mode === 'rope' ? specCell('HEIGHT', `${b.height} M`, undefined, 'spec-sm') : specCell('HOLDS', String(routeHolds), undefined, 'spec-sm'),
         specCell('COLOUR', el('span', 'pv-col', swatch(b.color), colourName(b.color)), undefined, 'spec-sm'),
       ),
-      el('div', 'pv-legend', el('span', 'lg lg-start', el('i'), 'START'), el('span', 'lg lg-top', el('i'), 'TOP · MATCH BOTH HANDS'), el('span', 'pv-word', gradeWord(b.grade).toUpperCase())),
+      el('div', 'pv-legend', el('span', 'lg lg-start', el('i'), 'START'), el('span', 'lg lg-top', el('i'), b.mode === 'rope' ? 'TOP · CLIP THE ANCHOR' : 'TOP · MATCH BOTH HANDS'), el('span', 'pv-word', gradeWord(b.grade).toUpperCase())),
     );
     setChildren(tipSlot, p.tip ? steiniTip(ctx.portraits, p.tip, 'pv-tip stg') : null);
   };
