@@ -99,9 +99,9 @@ const CSS = /* css */ `
 .jgl-h.is-busy .jgl-spin { opacity: 1; animation: jgl-spin .9s linear infinite; }
 .jgl-h.is-busy .jgl-g { opacity: .5; }
 .jgl-h.is-armed .jgl-disc {
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.18), inset 0 0 0 1.5px ${PALETTE.signal}, 0 0 0 3px rgba(255,79,31,.22);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.18), inset 0 0 0 1.5px ${PALETTE.signal}, 0 0 0 3px rgba(213,64,81,.22);
 }
-.jgl-h.is-armed .jgl-key { background: ${PALETTE.signal}; color: ${PALETTE.basalt}; box-shadow: none; }
+.jgl-h.is-armed .jgl-key { background: ${PALETTE.signal}; color: #fff; box-shadow: none; }
 
 .jgl-h.is-focus .jgl-b::after {
   content: ''; position: absolute; inset: 3px; border-radius: 50%; pointer-events: none;
@@ -134,9 +134,9 @@ const CSS = /* css */ `
 .jgl-tag b { font-weight: 700; }
 .jgl-tag span { color: rgba(185,190,197,.92); font-weight: 500; }
 .jgl-tag span:empty { display: none; }
-.jgl-tag.is-clip { background: ${PALETTE.signal}; color: ${PALETTE.basalt}; box-shadow: 0 8px 18px -8px rgba(255,79,31,.75); }
-.jgl-tag.is-clip i { background: ${PALETTE.basalt}; box-shadow: none; }
-.jgl-tag.is-clip span { color: rgba(13,14,16,.72); }
+.jgl-tag.is-clip { background: ${PALETTE.signal}; color: ${PALETTE.basalt}; box-shadow: 0 8px 18px -8px rgba(213,64,81,.75); }
+.jgl-tag.is-clip i { background: #fff; box-shadow: none; }
+.jgl-tag.is-clip span { color: rgba(255,255,255,.92); }
 .jgl.no-assist .jgl-tag, .jgl.no-assist .jgl-side { display: none; }
 
 @keyframes jgl-pulse { from { transform: scale(1); } to { transform: scale(1.085); } }

@@ -1438,7 +1438,7 @@ export class LimbControls implements LimbControlsAPI {
 
     const q = this.clip;
     if (q && this.homo.map(q.x, q.y - SIM.quickdrawDrop, this.s1)) {
-      this.setTagText(this.clipTag, 'CLIP', state.clipped.length === 0 ? 'FIRST' : '', PALETTE.basalt);
+      this.setTagText(this.clipTag, 'CLIP', state.clipped.length === 0 ? 'FIRST' : '', '#FFFFFF');
       this.placeTag(this.clipTag, this.s1.x, this.s1.y, 0.09 * this.homo.scaleAt(q.x, q.y, this.s2, this.s3), h.x, h.y);
       this.setTag(this.clipTag, true);
     } else this.setTag(this.clipTag, false);
