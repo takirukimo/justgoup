@@ -7,10 +7,18 @@ import { gradeWord } from '../../game/grades';
 import { backButton, el, label, setChildren } from '../dom';
 import { icon } from '../icons';
 import { fontG, modeTitle, wallAngle } from '../format';
-import { gradeChip, screenRoot, specCell, steiniTip, swatch } from '../parts';
+import { gradeChip, screenRoot, specCell, steiniTip, swatch, tapeChip } from '../parts';
 import type { ScreenView, UICtx } from '../screen';
 
 type P = ScreenProps['preview'];
+
+/** Route name, a size smaller for long names so it rarely needs an ellipsis. */
+function nameEl(name: string): HTMLElement {
+  const h = el('h2', 'pv-name', name);
+  const n = name.length;
+  if (n > 13) h.style.setProperty('--pv-fs', n > 18 ? '20px' : '23px');
+  return h;
+}
 
 function colourName(hex: string): string {
   const h = hex.toLowerCase();
@@ -56,7 +64,7 @@ export function createPreview(ctx: UICtx, props: P): ScreenView<P> {
     setChildren(
       card,
       el('div', 'pv-row1', label(`${mode} · ${runBits}`, 'pv-kicker'), el('span', 'pv-read', icon('eye'), 'READ THE LINE')),
-      el('div', 'pv-row2', el('h2', 'pv-name', b.name), gradeChip(b.grade, { size: 'lg' })),
+      el('div', 'pv-row2', nameEl(b.name), gradeChip(b.grade, { size: 'lg' })),
       el(
         'div',
         'pv-specs',
@@ -65,7 +73,13 @@ export function createPreview(ctx: UICtx, props: P): ScreenView<P> {
         b.mode === 'rope' ? specCell('HEIGHT', `${b.height} M`, undefined, 'spec-sm') : specCell('HOLDS', String(routeHolds), undefined, 'spec-sm'),
         specCell('COLOUR', el('span', 'pv-col', swatch(b.color), colourName(b.color)), undefined, 'spec-sm'),
       ),
-      el('div', 'pv-legend', el('span', 'lg lg-start', el('i'), 'START'), el('span', 'lg lg-top', el('i'), b.mode === 'rope' ? 'TOP · CLIP THE ANCHOR' : 'TOP · MATCH BOTH HANDS'), el('span', 'pv-word', gradeWord(b.grade).toUpperCase())),
+      el(
+        'div',
+        'pv-legend',
+        el('span', 'lg', tapeChip('START', b.color)),
+        el('span', 'lg', tapeChip('TOP', b.color), b.mode === 'rope' ? 'CLIP THE ANCHOR' : 'MATCH BOTH HANDS'),
+        el('span', 'pv-word', gradeWord(b.grade).toUpperCase()),
+      ),
     );
     setChildren(tipSlot, p.tip ? steiniTip(ctx.portraits, p.tip, 'pv-tip stg') : null);
   };

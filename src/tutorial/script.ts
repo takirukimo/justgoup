@@ -64,57 +64,57 @@ export interface LessonCopy {
 const BY_HOLD: Record<string, Omit<LessonCopy, 'pos'>> = {
   'hand:RH:tut-hand-1': {
     instruct: L('Drag your right hand up onto the glowing jug.', 'point'),
-    nudge: L('Grab the right-hand ring and pull it up to the pulsing hold.', 'point'),
+    nudge: L('Grab your right-hand ring and drag it up onto the glowing hold.', 'point'),
     success: L('Allez! That’s your first move.', 'cheer'),
   },
   'foot:RF:tut-foot-2': {
     instruct: L('Now your right foot. Step it up onto the glowing foothold.', 'point'),
-    nudge: L('Right foot ring, up onto the pulsing foothold. Legs do the work.', 'point'),
+    nudge: L('Right-foot ring up onto the glowing foothold. Legs do the work.', 'point'),
     success: L('Nice footwork. Legs are stronger than arms, so use them.', 'cheer'),
   },
   'hand:LH:tut-hand-2': {
     instruct: L('Left hand next. Reach for the jug up and to the left.', 'point'),
-    nudge: L('Left hand ring, up to the pulsing jug. You’ve got this.', 'point'),
+    nudge: L('Left-hand ring up to the glowing jug. You’ve got this.', 'point'),
     success: L('Hopp! Smooth as fondue.', 'cheer'),
   },
   'foot:LF:tut-foot-3': {
     instruct: L('Left foot up onto the glowing hold. Small steps are fine.', 'point'),
-    nudge: L('Left foot ring, onto the pulsing foothold.', 'point'),
+    nudge: L('Left-foot ring onto the glowing foothold.', 'point'),
     success: L('Good. Three limbs on, one moving. Always.', 'cheer'),
   },
   'shake:RH:tut-hand-3': {
     instruct: L('Big one now. Stretch your right hand out to that far edge.', 'point'),
-    nudge: L('Right hand, all the way out to the pulsing edge. Reach!', 'point'),
+    nudge: L('Right hand, all the way out to the glowing edge. Reach!', 'point'),
     success: L('Got it! Hold on…', 'warn'),
   },
   'foot:RF:tut-foot-4': {
     instruct: L('Fix it with your feet. Right foot up, under that hand.', 'point'),
-    nudge: L('Right foot ring onto the pulsing foothold. Feet calm the shakes.', 'point'),
+    nudge: L('Right-foot ring onto the glowing foothold. Feet calm the shakes.', 'point'),
     success: L('See? Shaking’s gone. Good feet fix almost everything.', 'cheer'),
   },
   'hand:LH:tut-hand-4': {
     instruct: L('Left hand to the big jug in the middle. You’re climbing now!', 'point'),
-    nudge: L('Left hand ring, up to the pulsing jug.', 'point'),
+    nudge: L('Left-hand ring up to the glowing jug.', 'point'),
     success: L('Look at you. A natural. Almost an ibex.', 'cheer'),
   },
   'foot:LF:tut-foot-5': {
     instruct: L('Left foot up. Keep your hips close to the wall.', 'point'),
-    nudge: L('Left foot ring onto the pulsing foothold.', 'point'),
+    nudge: L('Left-foot ring onto the glowing foothold.', 'point'),
     success: L('Hips in, arms long. Perfect.', 'cheer'),
   },
   'foot:RF:tut-foot-6': {
     instruct: L('Right foot high. Then stand up into it.', 'point'),
-    nudge: L('Right foot ring up onto the pulsing foothold.', 'point'),
+    nudge: L('Right-foot ring up onto the glowing foothold.', 'point'),
     success: L('Strong legs, easy top. Almost there!', 'cheer'),
   },
   'match:LH:tut-top': {
     instruct: L('There’s the TOP. Left hand up onto the big one!', 'point'),
-    nudge: L('Left hand ring onto the TOP hold.', 'point'),
+    nudge: L('Left-hand ring onto the TOP hold.', 'point'),
     success: L('One hand on TOP…', 'cheer'),
   },
   'match:RH:tut-top': {
     instruct: L('Now match it. Right hand on TOP too, and hold it.', 'point'),
-    nudge: L('Right hand ring onto TOP. Both hands on it to finish.', 'point'),
+    nudge: L('Right-hand ring onto TOP. Both hands on it to finish.', 'point'),
     success: L('Hold it… hold it…', 'cheer'),
   },
 };
@@ -128,17 +128,18 @@ export function lessonCopy(step: TutorialStep, index: number, isFinalMatch: bool
   if (own) return { ...own, pos };
   const name = LIMB_NAME[step.limb];
   const cap = name.charAt(0).toUpperCase() + name.slice(1);
+  const ring = `${cap.replace(' ', '-')} ring`;
   if (step.teach === 'match') {
     return {
       instruct: L(isFinalMatch ? `Match it: ${name} on TOP too, and hold.` : `${cap} onto the TOP hold!`, 'point'),
-      nudge: L(`${cap} ring onto the TOP hold.`, 'point'),
+      nudge: L(`${ring} onto the TOP hold.`, 'point'),
       success: L(isFinalMatch ? 'Hold it… hold it…' : 'One hand on TOP…', 'cheer'),
       pos,
     };
   }
   return {
     instruct: L(`${cap} next. Move it onto the glowing hold.`, 'point'),
-    nudge: L(`${cap} ring onto the pulsing hold.`, 'point'),
+    nudge: L(`${ring} onto the glowing hold.`, 'point'),
     success: PRAISE[index % PRAISE.length],
     pos,
   };
@@ -159,7 +160,7 @@ export const HIPS = {
 
 export const SHAKE = {
   felt: L('Feel the shaking? That’s tension. Stretched out like this, you pump out fast.', 'warn'),
-  concept: L('Stretched like this, tension climbs. Past the notch on the gauge, you start shaking.', 'think'),
+  concept: L('That gauge at the bottom is your tension. Past the notch, you start to shake.', 'think'),
   pump: L('Shaking fills your pump bar. Full pump means you fall. So don’t hang around.', 'warn'),
   calmInstruct: L('Now bring your right foot up, under that hand.', 'point'),
   calmSuccess: L('Solid. Good feet fix almost everything.', 'cheer'),
@@ -170,17 +171,17 @@ export const SHAKE = {
 export type MistakeKind = 'wrong' | 'short' | 'return' | 'smear' | 'blocked' | 'struggle' | 'off-top';
 
 export const MISTAKES: Record<MistakeKind, readonly Line[]> = {
-  wrong: [L('Close! Wrong hold though. Aim for the pulsing ring.', 'think'), L('Not that one. The glowing hold, please.', 'think')],
-  short: [L('Drag it all the way to the glowing hold.', 'think'), L('Further! Right onto the pulsing hold.', 'think')],
-  return: [L('Let go right on the hold. Wait for the ring to light up.', 'think'), L('Missed! Release when the ring turns green.', 'think')],
-  smear: [L('That’s a smear: rubber on blank wall. Handy, but use the hold.', 'think'), L('Smearing works, but this time, the glowing foothold.', 'think')],
-  blocked: [L('Not that one yet. Move the glowing ring.', 'think'), L('One limb at a time. Just the glowing one for now.', 'think')],
-  struggle: [L('Tip: drag right onto the ring and hold still. Let go when it turns green.', 'think')],
+  wrong: [L('Close! Wrong hold, though. Aim for the glowing one.', 'think'), L('Not that one. The glowing hold, please.', 'think')],
+  short: [L('Drag it all the way to the glowing hold.', 'think'), L('Further! Right onto the glowing hold.', 'think')],
+  return: [L('Let go right on the hold, once it lights up.', 'think'), L('Missed! Let go when the hold lights up green.', 'think')],
+  smear: [L('That’s a smear: rubber on blank wall. Handy, but use the hold.', 'think'), L('Smearing works, but this time use the glowing foothold.', 'think')],
+  blocked: [L('Not that one yet. Move the bright ring.', 'think'), L('One limb at a time. Just the bright ring for now.', 'think')],
+  struggle: [L('Tip: drag onto the glowing hold, pause, and let go when it lights up green.', 'think')],
   'off-top': [L('Both hands on TOP, and keep them there a moment.', 'warn')],
 };
 
 export const DRAG_TIPS = {
-  firstDrag: L('Aim for the ring. Green means a good grip.', 'point'),
+  firstDrag: L('Aim for the glowing hold. Green means a good grip.', 'point'),
   letGo: L('That’s the one. Let go!', 'cheer'),
   stretch: L('Full stretch! Keep holding. Your body leans into the reach.', 'point'),
 } as const;

@@ -4,8 +4,9 @@ import type { ScreenProps } from '../../core/contracts';
 import { bus } from '../../core/events';
 import type { LeaderboardMode, ScoreEntry } from '../../core/types';
 import { button, el, label, setChildren, stagger } from '../dom';
+import { icon } from '../icons';
 import { fmtDateKey, fmtInt, grade, pad2 } from '../format';
-import { emptyState, header, onlineBadge, screenRoot, segmented, skeletons, topoLayer } from '../parts';
+import { backendBadge, backendKind, backendNote, emptyState, header, screenRoot, segmented, skeletons, topoLayer } from '../parts';
 import type { ScreenView, UICtx } from '../screen';
 
 type P = ScreenProps['leaderboard'];
@@ -18,11 +19,16 @@ const TABS: { id: LeaderboardMode; label: string }[] = [
 
 const MEDAL = ['m-1', 'm-2', 'm-3'];
 
+/** The offline board is seeded with fictional pace-setters; their ids start with 'ghost-' (src/net/ghosts.ts). */
+const isGhost = (e: ScoreEntry): boolean => typeof e.id === 'string' && e.id.startsWith('ghost-');
+
 export function createLeaderboard(ctx: UICtx, props: P): ScreenView<P> {
   const root = screenRoot('leaderboard', 'scr-panel');
   let cur = props;
   const badgeSlot = el('div', 'lb-badge');
-  const sub = el('div', 'lb-sub');
+  const meta = el('span', 'lb-meta');
+  const sub = el('div', 'lb-sub', badgeSlot, meta);
+  const note = el('p', 'board-note');
   const body = el('div', 'lb-body scroll');
 
   const isMe = (e: ScoreEntry, me: string): boolean => !!me && e.player.trim().toLowerCase() === me.trim().toLowerCase();
@@ -33,12 +39,15 @@ export function createLeaderboard(ctx: UICtx, props: P): ScreenView<P> {
   const render = (p: P): void => {
     cur = p;
     tabs.set(p.mode);
-    setChildren(badgeSlot, onlineBadge(p.isGlobal));
-    setChildren(
-      sub,
-      label(p.mode === 'daily' ? `DAILY BOULDER · ${fmtDateKey(p.dailyKey)}` : p.mode === 'rope' ? 'LEAD TOWER · 15 M · ALL TIME' : 'SEND TRAIN · ENDLESS · ALL TIME'),
-      label(p.entries ? `${p.entries.length} CLIMBERS` : 'LOADING'),
-    );
+    const label0 = ctx.backendLabel(p.isGlobal);
+    const kind = backendKind(label0);
+    setChildren(badgeSlot, backendBadge(label0));
+    const scope = p.mode === 'daily' ? fmtDateKey(p.dailyKey) : 'ALL TIME';
+    const n = p.entries?.length ?? 0;
+    meta.textContent = p.entries ? `${scope} · ${n} ${n === 1 ? 'CLIMBER' : 'CLIMBERS'}` : `${scope} · LOADING`;
+    // Offline is the case worth explaining; a live board needs no footnote.
+    note.hidden = kind !== 'offline';
+    setChildren(note, icon('offline', 'bn-ic'), el('span', null, backendNote(kind, 'scores')));
 
     if (p.entries === null) {
       setChildren(body, el('div', 'lb-skel', ...skeletons(7, 'skel-row')));
@@ -50,8 +59,13 @@ export function createLeaderboard(ctx: UICtx, props: P): ScreenView<P> {
         body,
         emptyState({
           icon: 'podium',
-          title: 'No scores yet',
-          body: p.mode === 'daily' ? 'Nobody has sent today’s boulder. Be the first name on the board.' : 'The board is empty. Send something and claim the top spot.',
+          title: p.mode === 'daily' ? 'No sends today' : 'No scores yet',
+          body:
+            p.mode === 'daily'
+              ? 'Nobody has sent today’s boulder yet. Be the first name on the board.'
+              : p.mode === 'rope'
+                ? 'Nobody has climbed the tower yet. Clip a few draws and the top spot is yours.'
+                : 'The board is empty. Send a few boulders and claim the top spot.',
           action: button({
             label: p.mode === 'daily' ? 'CLIMB TODAY’S BOULDER' : p.mode === 'rope' ? 'CLIMB THE TOWER' : 'START A SEND TRAIN',
             icon: 'play',
@@ -70,10 +84,16 @@ export function createLeaderboard(ctx: UICtx, props: P): ScreenView<P> {
         const col = el(
           'div',
           `pd-col pd-${idx + 1} ${isMe(e, p.me) ? 'is-me' : ''}`,
-          el('div', 'pd-pt', ctx.portraits.frame(e.head, `pt-pd ${MEDAL[idx]}`), el('span', `pd-rank ${MEDAL[idx]}`, String(idx + 1))),
+          el(
+            'div',
+            'pd-pt',
+            ctx.portraits.frame(e.head, `pt-pd ${MEDAL[idx]}`),
+            el('span', `pd-rank ${MEDAL[idx]}`, String(idx + 1)),
+            isMe(e, p.me) ? el('i', 'you-tag pd-you', 'YOU') : null,
+          ),
           el('span', 'pd-name', e.player),
           el('b', 'pd-score t-num', fmtInt(e.score)),
-          el('div', 'pd-block', label(subline(e, p.mode).split(' · ').pop() ?? '')),
+          el('div', 'pd-block', label(`${isGhost(e) ? 'GHOST · ' : ''}${subline(e, p.mode).split(' · ').pop() ?? ''}`)),
         );
         podium.appendChild(stagger(col, k));
       });
@@ -86,10 +106,15 @@ export function createLeaderboard(ctx: UICtx, props: P): ScreenView<P> {
       const me = isMe(e, p.me);
       const row = el(
         'li',
-        `lb-row ${rank <= 3 ? MEDAL[rank - 1] : ''} ${me ? 'is-me' : ''}`.trim(),
+        `lb-row ${rank <= 3 ? MEDAL[rank - 1] : ''} ${me ? 'is-me' : ''} ${isGhost(e) ? 'is-ghost' : ''}`.trim(),
         el('span', 'lb-rank t-num', pad2(rank)),
         ctx.portraits.frame(e.head, 'pt-row'),
-        el('span', 'lb-who', el('span', 'lb-name', e.player, me ? el('i', 'you-tag', 'YOU') : null), label(subline(e, p.mode))),
+        el(
+          'span',
+          'lb-who',
+          el('span', 'lb-name', el('span', 'lb-player', e.player), me ? el('i', 'you-tag', 'YOU') : isGhost(e) ? el('i', 'ghost-tag', 'GHOST') : null),
+          label(subline(e, p.mode)),
+        ),
         el('b', 'lb-score t-num', fmtInt(e.score)),
       );
       list.appendChild(stagger(row, 3 + Math.min(i, 12)));
@@ -109,8 +134,8 @@ export function createLeaderboard(ctx: UICtx, props: P): ScreenView<P> {
 
   root.append(
     topoLayer('panel-topo'),
-    header({ title: 'Leaderboard', kicker: 'RANKINGS', right: badgeSlot }),
-    stagger(el('div', 'lb-controls', tabs.el, sub), 1),
+    header({ title: 'Leaderboard', kicker: 'RANKINGS' }),
+    stagger(el('div', 'lb-controls', tabs.el, sub, note), 1),
     body,
   );
   render(props);

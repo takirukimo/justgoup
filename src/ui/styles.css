@@ -31,7 +31,7 @@
   /* surfaces */
   --glass: rgba(13, 14, 16, 0.72);
   --glass-2: rgba(23, 25, 29, 0.74);
-  --glass-hud: rgba(13, 14, 16, 0.6);
+  --glass-hud: rgba(13, 14, 16, 0.74);
   --hair: rgba(255, 255, 255, 0.08);
   --hair-2: rgba(255, 255, 255, 0.14);
   --hair-3: rgba(255, 255, 255, 0.22);
@@ -254,7 +254,7 @@
 .btn-primary:disabled {
   opacity: 1;
   background: rgba(255, 255, 255, 0.06);
-  color: var(--c-steel);
+  color: #5d646e;
   box-shadow: inset 0 0 0 1px var(--hair);
 }
 .btn .btn-ic {
@@ -361,42 +361,47 @@
 
 /* ───────────────────────────── badges + chips ───────────────────────────── */
 
+/* Backend badge: GLOBAL (green), CLAUDE SHARED (glacier), OFFLINE (neutral), CONNECTING. */
 .badge {
+  --bdg: var(--c-good);
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   height: 28px;
-  padding: 0 11px 0 10px;
+  padding: 0 11px 0 8px;
   border-radius: 999px;
   border: 1px solid var(--hair-2);
-  background: rgba(13, 14, 16, 0.66);
+  border-color: color-mix(in srgb, var(--bdg) 38%, transparent);
+  background: rgba(13, 14, 16, 0.78);
   font-family: var(--f-mono);
   font-size: 9.5px;
-  font-weight: 500;
-  letter-spacing: 0.16em;
-  color: var(--c-mist);
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: var(--c-bone);
   white-space: nowrap;
 }
-.badge-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--c-good);
-  box-shadow: 0 0 0 3px rgba(79, 209, 139, 0.18);
-  animation: dot-pulse 2.4s var(--ease) infinite;
+.badge .badge-ic {
+  width: 14px;
+  height: 14px;
+  color: var(--bdg);
 }
-.badge-shared .badge-dot {
-  background: var(--c-glacier);
-  box-shadow: 0 0 0 3px rgba(154, 212, 222, 0.18);
+.badge-txt {
+  position: relative;
+  top: 0.05em;
 }
-.badge-off {
-  color: var(--c-fog);
+.badge-shared {
+  --bdg: var(--c-glacier);
 }
-.badge-off .badge-dot {
-  background: transparent;
-  border: 1.5px solid var(--c-fog);
-  box-shadow: none;
-  animation: none;
+.badge-offline {
+  --bdg: var(--c-fog);
+  color: var(--c-mist);
+}
+.badge-pending {
+  --bdg: var(--c-mist);
+  color: var(--c-mist);
+}
+.badge-pending .badge-ic {
+  animation: spin 1.4s linear infinite;
 }
 
 .grade {
@@ -625,8 +630,8 @@
   -webkit-appearance: none;
   appearance: none;
   width: 100%;
-  height: 30px;
-  margin: 2px 0 -6px;
+  height: 40px;
+  margin: -3px 0 -11px;
   background: transparent;
   cursor: pointer;
   --v: 50%;
@@ -1152,8 +1157,7 @@
 }
 .splash-legal .t-label {
   font-size: 8.5px;
-  color: var(--c-steel);
-  color: rgba(139, 146, 156, 0.7);
+  color: var(--c-fog);
 }
 .splash-hit {
   position: absolute !important;
@@ -1180,9 +1184,10 @@
 }
 .title-top {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 4px 10px;
 }
 .title-chip-slot {
   min-width: 0;
@@ -1239,8 +1244,24 @@
   height: 16px !important;
   color: var(--c-fog);
 }
+/* A long name plus a wide badge (CLAUDE SHARED) wraps the badge to its own line instead of truncating the name. */
 .title-badge-slot {
   flex: none;
+  margin-left: auto;
+}
+/* 44px hit area around the 28px badge. */
+.title-badge {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 0 0 6px;
+}
+.title-badge::after {
+  display: none;
+}
+.title-badge.is-pressed .badge {
+  border-color: var(--hair-3);
+  background: rgba(35, 39, 46, 0.9);
 }
 .title-lockup {
   display: flex;
@@ -1249,6 +1270,14 @@
 }
 .title-flex {
   flex: 1;
+}
+/* The small lockup lines sit over the live wall: give them a soft shadow to read on bright holds. */
+.title-lockup .lk-kicker,
+.title-lockup .lk-tag {
+  color: var(--c-mist);
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.9),
+    0 0 12px rgba(0, 0, 0, 0.7);
 }
 .title-bottom {
   display: flex;
@@ -1275,7 +1304,7 @@
 }
 .title-play .play-kicker .t-label {
   font-size: 8.5px;
-  color: rgba(13, 14, 16, 0.62);
+  color: rgba(13, 14, 16, 0.8);
   letter-spacing: 0.2em;
 }
 .title-play .btn-ic {
@@ -1390,7 +1419,7 @@
   border-radius: 4px;
   border: 1px solid var(--hair-2);
   font-family: var(--f-mono);
-  font-size: 7.5px;
+  font-size: 8.5px;
   font-weight: 700;
   letter-spacing: 0.16em;
   color: var(--c-mist);
@@ -1556,7 +1585,7 @@
   padding-right: 34px;
 }
 .idc-bottom .t-label {
-  font-size: 8px;
+  font-size: 8.5px;
 }
 .name-field {
   display: flex;
@@ -1596,7 +1625,7 @@
   touch-action: manipulation;
 }
 .name-input::placeholder {
-  color: var(--c-steel);
+  color: #7d848e;
 }
 .name-count {
   font-size: 11px;
@@ -1666,9 +1695,29 @@
 }
 .hud-glass {
   background: var(--glass-hud);
-  border: 1px solid rgba(255, 255, 255, 0.075);
+  border: 1px solid rgba(255, 255, 255, 0.09);
   border-radius: 16px;
   box-shadow: var(--hi), 0 8px 24px -14px rgba(0, 0, 0, 0.8);
+}
+/* Soft scrims keep the HUD readable over bright, busy walls without boxing in the climb. */
+.hud-scrim {
+  position: absolute !important;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+}
+.hud-scrim-top {
+  top: 0;
+  height: calc(var(--safe-t) + 124px);
+  background: linear-gradient(180deg, rgba(13, 14, 16, 0.5) 0%, rgba(13, 14, 16, 0.22) 55%, rgba(13, 14, 16, 0) 100%);
+}
+.is-rope .hud-scrim-top {
+  height: calc(var(--safe-t) + 150px);
+}
+.hud-scrim-bottom {
+  bottom: 0;
+  height: calc(var(--safe-b) + 132px);
+  background: linear-gradient(0deg, rgba(13, 14, 16, 0.55) 0%, rgba(13, 14, 16, 0.25) 50%, rgba(13, 14, 16, 0) 100%);
 }
 .hud-vig {
   position: absolute !important;
@@ -1718,7 +1767,7 @@
 .hr-name {
   min-width: 0;
   font-family: var(--f-display);
-  font-size: 18px;
+  font-size: var(--hr-fs, 18px);
   font-weight: 700;
   line-height: 1;
   letter-spacing: 0.06em;
@@ -1769,7 +1818,7 @@
   padding: 0 12px;
 }
 .hud-score .t-label {
-  font-size: 8px;
+  font-size: 8.5px;
 }
 .hs-val {
   font-size: 19px;
@@ -1925,11 +1974,23 @@
 .hud-alt {
   display: none;
   position: absolute !important;
-  left: calc(var(--safe-l) + 8px);
+  left: calc(var(--safe-l) + 10px);
   top: 30%;
   bottom: 30%;
   width: 34px;
   pointer-events: none;
+}
+/* Backplate so the scale reads over bright holds. */
+.hud-alt::before {
+  content: '';
+  position: absolute;
+  left: -6px;
+  right: 2px;
+  top: -12px;
+  bottom: -12px;
+  border-radius: 10px;
+  background: rgba(13, 14, 16, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 .is-rope .hud-alt {
   display: block;
@@ -1953,8 +2014,8 @@
   position: absolute;
   left: 12px;
   transform: translateY(50%);
-  font-size: 8.5px;
-  color: rgba(185, 190, 197, 0.7);
+  font-size: 9px;
+  color: var(--c-mist);
 }
 .alt-marker {
   position: absolute;
@@ -2046,11 +2107,14 @@
   gap: 6px;
 }
 .hb-btn .t-label {
-  font-size: 8px;
-  color: rgba(185, 190, 197, 0.75);
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--c-mist);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
 }
+/* No hints in this mode (tutorial, test climbs): the instruments take the space. */
 .hb-btn.hidden {
-  visibility: hidden;
+  display: none;
 }
 .hud-hint,
 .hud-eye {
@@ -2271,9 +2335,9 @@
   white-space: nowrap;
 }
 .tg-lbl {
-  font-size: 7.5px;
-  letter-spacing: 0.2em;
-  color: rgba(139, 146, 156, 0.85);
+  font-size: 8.5px;
+  letter-spacing: 0.18em;
+  color: var(--c-fog);
 }
 .tg-state {
   font-family: var(--f-mono);
@@ -2363,7 +2427,7 @@
 .pv-name {
   min-width: 0;
   font-family: var(--f-display);
-  font-size: 28px;
+  font-size: var(--pv-fs, 28px);
   font-weight: 800;
   line-height: 1;
   letter-spacing: 0.04em;
@@ -2403,17 +2467,28 @@
 .lg {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
 }
-.lg i {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  border: 1.5px solid var(--c-chalk);
-}
-.lg-top i {
-  border-color: var(--c-signal);
+/* Route-colour tape, like the START / TOP strips on the wall. */
+.tape {
+  display: inline-block;
+  padding: 3px 6px 2px;
   border-radius: 2px;
+  background: var(--route, var(--c-bone));
+  color: var(--c-chalk);
+  font-family: var(--f-display);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: 0.14em;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.18);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.25);
+}
+.tape-light {
+  color: var(--c-basalt);
+  text-shadow: none;
 }
 .pv-word {
   margin-left: auto;
@@ -2464,7 +2539,7 @@
 }
 .st-name i {
   font-family: var(--f-mono);
-  font-size: 8px;
+  font-size: 8.5px;
   font-weight: 500;
   font-style: normal;
   letter-spacing: 0.16em;
@@ -2516,7 +2591,7 @@
   margin-right: -0.26em;
 }
 .pv-start .t-label {
-  color: rgba(13, 14, 16, 0.6);
+  color: rgba(13, 14, 16, 0.8);
   font-size: 8.5px;
 }
 .pv-back {
@@ -3153,11 +3228,61 @@
   gap: 10px;
   margin-bottom: 8px;
 }
-.lb-sub {
+.lb-sub,
+.cm-subrow {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
+  min-width: 0;
   padding: 0 2px;
+}
+.lb-meta,
+.cm-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--f-mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  color: var(--c-mist);
+  white-space: nowrap;
+}
+/* One kind line under a board when scores stay on this device. */
+.board-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px 11px;
+  border-radius: 14px;
+  background: rgba(23, 25, 29, 0.74);
+  border: 1px solid var(--hair);
+  font-size: 12.5px;
+  line-height: 1.42;
+  color: var(--c-mist);
+}
+.board-note[hidden] {
+  display: none;
+}
+.board-note .bn-ic {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  color: var(--c-fog);
+}
+.ghost-tag {
+  flex: none;
+  padding: 2px 5px 1px;
+  border-radius: 4px;
+  border: 1px solid var(--hair-3);
+  font-family: var(--f-mono);
+  font-size: 8.5px;
+  font-weight: 600;
+  font-style: normal;
+  letter-spacing: 0.12em;
+  color: var(--c-fog);
 }
 .lb-body {
   flex: 1;
@@ -3231,6 +3356,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
 .pd-score {
   font-size: 15px;
   font-weight: 700;
@@ -3263,11 +3389,18 @@
 .pd-3 .pd-block {
   height: 32px;
 }
-.pd-col.is-me .pd-name::after {
-  content: ' · YOU';
+/* Your podium spot: signal ring + a YOU tag on the portrait (the name may be truncated). */
+.pd-col.is-me .pt-pd {
+  --medal: var(--c-signal);
+}
+.pd-you {
+  position: absolute;
+  top: -6px;
+  right: -8px;
+  box-shadow: 0 0 0 2px var(--c-basalt);
+}
+.pd-col.is-me .pd-name {
   color: var(--c-signal);
-  font-family: var(--f-mono);
-  font-size: 9px;
 }
 .lb-list {
   list-style: none;
@@ -3328,8 +3461,14 @@
   font-weight: 600;
   color: var(--c-chalk);
   white-space: nowrap;
+}
+.lb-player {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.lb-row.is-ghost .lb-name {
+  color: var(--c-bone);
 }
 .you-tag {
   flex: none;
@@ -3487,10 +3626,15 @@
   gap: 14px;
   z-index: 1;
 }
-.lk-title {
+.lkr-title {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
+}
+.lkr-title .hdr-h,
+.lkr-title .t-label {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
 }
 .lk-sheet {
   position: absolute !important;
@@ -3661,7 +3805,7 @@
 }
 .lk-blurb {
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
   margin-top: 4px;
@@ -3748,7 +3892,7 @@
   align-items: center;
   gap: 4px;
   font-family: var(--f-mono);
-  font-size: 8px;
+  font-size: 8.5px;
   letter-spacing: 0.1em;
   color: var(--c-fog);
 }
@@ -3844,7 +3988,7 @@
   font-size: 8.5px;
 }
 .cr-copy {
-  color: var(--c-steel) !important;
+  color: var(--c-fog) !important;
 }
 
 /* ───────────────────────────── community ───────────────────────────── */
@@ -3869,15 +4013,10 @@
   height: 18px;
 }
 .cm-subrow {
-  display: flex;
-  justify-content: space-between;
-  margin: 0 2px 4px;
+  margin-bottom: 8px;
 }
-.cm-meta {
-  font-family: var(--f-mono);
-  font-size: 9.5px;
-  letter-spacing: 0.16em;
-  color: var(--c-mist);
+.scr-community .board-note {
+  margin-bottom: 8px;
 }
 .cm-body {
   flex: 1;
@@ -3975,6 +4114,11 @@
   white-space: nowrap;
   overflow: hidden;
 }
+.cm-by {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .cm-author .ic {
   width: 12px;
   height: 12px;
@@ -3997,7 +4141,7 @@
   gap: 5px;
 }
 .cm-specs .t-label {
-  font-size: 8px;
+  font-size: 8.5px;
 }
 .cm-specs b {
   font-size: 11.5px;
@@ -4010,7 +4154,7 @@
   gap: 8px;
 }
 .cm-rate .t-label {
-  font-size: 8px;
+  font-size: 8.5px;
 }
 .cm-rate-bar {
   flex: 1;
@@ -4194,7 +4338,7 @@
   min-width: 0;
 }
 .pb .t-label {
-  font-size: 8px;
+  font-size: 8.5px;
 }
 .pb b {
   font-size: 16px;
@@ -4231,14 +4375,29 @@
 /* ───────────────────────────── guide bubble ───────────────────────────── */
 
 .guide-layer {
+  /* Placement: in the HUD the bubble clears the top bar / bottom instruments; elsewhere it hugs
+     the safe area. The SKIP chip sits just under the HUD top bar (or at the top edge). */
+  --gb-top: calc(var(--safe-t) + 78px);
+  --gb-bottom: calc(var(--safe-b) + 108px);
+  --gb-skip-top: calc(var(--safe-t) + 74px);
   position: absolute;
   inset: 0;
   display: none;
   pointer-events: none;
   z-index: 3;
 }
-.guide-layer.on {
+.jgu-ui:not([data-screen='hud']) .guide-layer {
+  --gb-top: calc(var(--safe-t) + 16px);
+  --gb-bottom: calc(var(--safe-b) + 24px);
+  --gb-skip-top: calc(var(--safe-t) + 14px);
+}
+.guide-layer.on,
+.guide-layer.has-skip {
   display: block;
+}
+/* The layer stays up for the SKIP chip between lines: no line, no card. */
+.guide-layer:not(.on) .gb-card {
+  visibility: hidden;
 }
 .gb-catcher {
   position: absolute;
@@ -4272,16 +4431,14 @@
   pointer-events: auto;
 }
 .at-bottom .gb-card {
-  bottom: calc(var(--safe-b) + 108px);
-}
-.jgu-ui:not([data-screen='hud']) .at-bottom .gb-card {
-  bottom: calc(var(--safe-b) + 24px);
+  bottom: var(--gb-bottom);
 }
 .at-top .gb-card {
-  top: calc(var(--safe-t) + 78px);
+  top: var(--gb-top);
 }
-.jgu-ui:not([data-screen='hud']) .at-top .gb-card {
-  top: calc(var(--safe-t) + 16px);
+/* A top bubble drops below the SKIP chip (44px chip + 10px gap) instead of sliding under it. */
+.has-skip.at-top .gb-card {
+  top: calc(var(--gb-skip-top) + 54px);
 }
 .mood-point {
   --mood: var(--c-signal);
@@ -4349,7 +4506,7 @@
   color: var(--mood);
 }
 .gb-tag .t-label {
-  font-size: 8px;
+  font-size: 8.5px;
 }
 .gb-text {
   font-size: 15.5px;
@@ -4456,7 +4613,7 @@
 }
 .gb-skip {
   position: absolute;
-  top: calc(var(--safe-t) + 74px);
+  top: var(--gb-skip-top);
   right: calc(var(--safe-r) + 12px);
   display: none;
   min-height: 44px;
@@ -4473,12 +4630,6 @@
 }
 .has-skip .gb-skip {
   display: inline-flex;
-}
-.guide-layer.has-skip {
-  display: block;
-}
-.jgu-ui:not([data-screen='hud']) .gb-skip {
-  top: calc(var(--safe-t) + 14px);
 }
 
 /* ───────────────────────────── modal ───────────────────────────── */
@@ -4615,8 +4766,9 @@
 .co-bad {
   --co: var(--c-bad);
 }
+/* Neutral callouts (lives left, countdown) get a dark band so white type holds up over bright holds. */
 .co-neutral {
-  --co: transparent;
+  --co: rgba(13, 14, 16, 0.78);
 }
 .co-stripe {
   position: absolute;
@@ -4661,6 +4813,9 @@
 }
 .co-count .co-txt {
   font-size: clamp(120px, 42cqw, 200px);
+  text-shadow:
+    0 4px 0 rgba(13, 14, 16, 0.45),
+    0 0 46px rgba(0, 0, 0, 0.7);
   animation: co-count 0.8s var(--ease) both;
 }
 .co-count .co-stripe {
@@ -4719,47 +4874,63 @@
 }
 .toasts {
   position: absolute;
-  top: calc(var(--safe-t) + 80px);
-  left: 0;
-  right: 0;
+  /* HUD: just under the top bar. */
+  top: calc(var(--safe-t) + 74px);
+  left: calc(var(--safe-l) + 16px);
+  right: calc(var(--safe-r) + 16px);
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 6px;
 }
+/* Lead Tower: below the lives / height / clip row. */
+.jgu-ui:has(.scr-hud.is-rope) .toasts {
+  top: calc(var(--safe-t) + 116px);
+}
 .jgu-ui:not([data-screen='hud']) .toasts {
-  top: calc(var(--safe-t) + 16px);
+  top: calc(var(--safe-t) + 14px);
 }
 .toast {
   display: inline-flex;
   align-items: center;
-  gap: 9px;
-  max-width: calc(100% - 48px);
-  height: 38px;
-  padding: 0 16px 0 14px;
-  border-radius: 999px;
-  background: rgba(13, 14, 16, 0.9);
+  gap: 10px;
+  max-width: 100%;
+  min-height: 40px;
+  padding: 9px 18px 9px 15px;
+  border-radius: 20px;
+  background: rgba(15, 16, 19, 0.96);
   border: 1px solid var(--hair-2);
-  box-shadow: 0 12px 30px -12px rgba(0, 0, 0, 0.7);
+  box-shadow:
+    var(--hi),
+    0 14px 34px -12px rgba(0, 0, 0, 0.85);
   font-family: var(--f-mono);
   font-size: 10.5px;
   font-weight: 600;
-  letter-spacing: 0.12em;
+  line-height: 1.45;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--c-bone);
+  color: var(--c-chalk);
   animation: toast-in 0.36s var(--ease-spring) both;
 }
+/* Long messages wrap to a second line instead of being cut off. */
 .toast span {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .toast-dot {
   flex: none;
+  align-self: flex-start;
   width: 6px;
   height: 6px;
+  margin-top: 4.6px;
   border-radius: 50%;
   background: var(--c-signal);
+}
+.toast-good .toast-dot {
+  background: var(--c-good);
+}
+.toast-warn .toast-dot {
+  background: var(--c-warn);
 }
 .toast-out {
   animation: toast-out 0.24s var(--ease-in) forwards;
@@ -4774,11 +4945,6 @@
   to {
     opacity: 0;
     transform: translateY(-8px) scale(0.96);
-  }
-}
-@keyframes dot-pulse {
-  50% {
-    box-shadow: 0 0 0 5px rgba(79, 209, 139, 0);
   }
 }
 
@@ -4829,7 +4995,7 @@
     font-size: 22px;
   }
   .pv-name {
-    font-size: 24px;
+    font-size: calc(var(--pv-fs, 28px) - 4px);
   }
   .pv-specs {
     gap: 13px;
@@ -4841,7 +5007,7 @@
     min-width: 84px;
   }
   .hr-name {
-    font-size: 16px;
+    font-size: calc(var(--hr-fs, 18px) - 2px);
   }
   .lk-equipped {
     gap: 12px;
@@ -4865,6 +5031,10 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
   }
+  /* The countdown keyframes end faded out; without motion the digit simply shows until it is removed. */
+  .jgu-ui .co-count .co-txt {
+    animation: none !important;
+  }
 }
 .jgu-ui.reduced-motion *,
 .jgu-ui.reduced-motion *::before,
@@ -4873,4 +5043,7 @@
   animation-delay: 0ms !important;
   animation-iteration-count: 1 !important;
   transition-duration: 0.001ms !important;
+}
+.jgu-ui.reduced-motion .co-count .co-txt {
+  animation: none !important;
 }

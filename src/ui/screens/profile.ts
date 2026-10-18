@@ -4,7 +4,7 @@ import type { ScreenProps } from '../../core/contracts';
 import { CHALKS, COLORWAYS, HEADS } from '../../config/skins';
 import { button, el, label, setChildren, stagger } from '../dom';
 import { icon } from '../icons';
-import { fmtInt, grade, pad2 } from '../format';
+import { fmtInt, grade, pad2, pct } from '../format';
 import { header, screenRoot, specCell, topoLayer } from '../parts';
 import type { ScreenView, UICtx } from '../screen';
 
@@ -55,7 +55,7 @@ export function createProfile(ctx: UICtx, props: P): ScreenView<P> {
       ['LONGEST STREAK', fmtInt(st.longestStreak)],
       ['QUICKDRAWS CLIPPED', fmtInt(st.clips)],
       ['FALLS', fmtInt(st.falls)],
-      ['TOTAL SCORE', fmtInt(st.totalScore)],
+      ['SEND RATE', pct(st.sends, st.sends + st.falls)],
     ];
     const grid = el(
       'div',

@@ -2,6 +2,7 @@
 
 import type { ScreenProps } from '../../core/contracts';
 import { bus } from '../../core/events';
+import { GAME } from '../../config/tuning';
 import { button, el, label, setChildren, stagger } from '../dom';
 import { icon } from '../icons';
 import { fmtInt, modeTitle } from '../format';
@@ -18,19 +19,19 @@ export function createPause(ctx: UICtx, props: P): ScreenView<P> {
 
   const render = (p: P): void => {
     const r = p.run;
+    // Only the numbers that mean something in this mode.
+    const stats: [string, string][] = [];
+    if (r.mode === 'boulder') stats.push(['RUN SCORE', fmtInt(r.score)], ['STREAK', `×${r.streak}`]);
+    else if (r.mode === 'rope') {
+      stats.push(['SCORE', fmtInt(r.score)], ['HEIGHT', `${(r.heightM ?? 0).toFixed(1)} m`]);
+      if (r.lives !== undefined) stats.push(['LIVES', `${r.lives}/${GAME.ropeLives}`]);
+    }
+    if (r.hintsLeft !== undefined && r.mode !== 'tutorial') stats.push(['HINTS LEFT', String(r.hintsLeft)]);
     setChildren(
       info,
       label(`${(modeTitle[r.mode] ?? r.mode).toUpperCase()} · ON THE WALL`),
       el('div', 'pz-route', el('span', 'pz-name', r.boulderName), gradeChip(r.grade)),
-      r.mode !== 'tutorial'
-        ? el(
-            'div',
-            'pz-stats',
-            el('span', null, label('SCORE'), el('b', 't-num', fmtInt(r.score))),
-            el('span', null, label('STREAK'), el('b', 't-num', `×${r.streak}`)),
-            r.mode === 'rope' ? el('span', null, label('HEIGHT'), el('b', 't-num', `${(r.heightM ?? 0).toFixed(1)} m`)) : null,
-          )
-        : null,
+      stats.length ? el('div', 'pz-stats', ...stats.map(([k, v]) => el('span', null, label(k), el('b', 't-num', v)))) : null,
     );
   };
   render(props);
@@ -74,7 +75,8 @@ export function createPause(ctx: UICtx, props: P): ScreenView<P> {
       el(
         'div',
         'pz-row',
-        button({ label: 'RETRY', icon: 'retry', variant: 'glass', onTap: () => bus.emit('ui:retry') }),
+        // In a run, restarting means a new run; on a single problem it restarts that climb.
+        button({ label: props.run.mode === 'boulder' || props.run.mode === 'rope' ? 'NEW RUN' : 'RESTART', icon: 'retry', variant: 'glass', onTap: () => bus.emit('ui:retry') }),
         button({ label: 'QUIT', icon: 'home', variant: 'glass', onTap: () => bus.emit('ui:quit') }),
       ),
       3,

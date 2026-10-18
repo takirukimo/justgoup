@@ -6,18 +6,19 @@ import type { CommunityProblem } from '../../core/types';
 import { button, el, label, setChildren, stagger } from '../dom';
 import { icon } from '../icons';
 import { fmtAge, fmtInt, pct, wallAngle } from '../format';
-import { emptyState, gradeChip, header, onlineBadge, routeThumb, screenRoot, segmented, skeletons, topoLayer } from '../parts';
+import { backendBadge, backendKind, backendNote, emptyState, gradeChip, header, routeThumb, screenRoot, segmented, skeletons, topoLayer } from '../parts';
 import type { ScreenView, UICtx } from '../screen';
 
 type P = ScreenProps['community'];
 type Sort = P['sort'];
 
-export function createCommunity(_ctx: UICtx, props: P): ScreenView<P> {
+export function createCommunity(ctx: UICtx, props: P): ScreenView<P> {
   const root = screenRoot('community', 'scr-panel');
   let cur = props;
   const badge = el('div', 'cm-badge');
   const body = el('div', 'cm-body scroll');
   const meta = el('span', 'cm-meta');
+  const note = el('p', 'board-note');
 
   const card = (pr: CommunityProblem, i: number): HTMLElement => {
     const b = pr.boulder;
@@ -33,7 +34,7 @@ export function createCommunity(_ctx: UICtx, props: P): ScreenView<P> {
         'span',
         'cm-info',
         el('span', 'cm-row1', el('span', 'cm-name', pr.name), gradeChip(pr.grade, { size: 'sm' })),
-        el('span', 'cm-author', icon('user'), pr.author || 'Anonymous', el('i', 'cm-dot'), fmtAge(pr.createdAt)),
+        el('span', 'cm-author', icon('user'), el('span', 'cm-by', pr.author || 'Anonymous'), el('i', 'cm-dot'), fmtAge(pr.createdAt)),
         el(
           'span',
           'cm-specs',
@@ -41,7 +42,7 @@ export function createCommunity(_ctx: UICtx, props: P): ScreenView<P> {
           el('span', null, label('HOLDS'), el('b', 't-num', String(holds))),
           el('span', null, label('PLAYS'), el('b', 't-num', fmtInt(pr.plays))),
         ),
-        el('span', 'cm-rate', label(`SEND RATE ${rate}`), el('span', 'cm-rate-bar', bar)),
+        el('span', 'cm-rate', label(pr.plays ? `SEND RATE ${rate}` : 'NO ATTEMPTS YET'), el('span', 'cm-rate-bar', bar)),
       ),
       el('span', 'cm-play', icon('play')),
     );
@@ -54,8 +55,13 @@ export function createCommunity(_ctx: UICtx, props: P): ScreenView<P> {
   const render = (p: P): void => {
     cur = p;
     sort.set(p.sort);
-    setChildren(badge, onlineBadge(p.isGlobal));
-    meta.textContent = p.problems ? `${p.problems.length} PROBLEMS` : 'LOADING';
+    const label0 = ctx.backendLabel(p.isGlobal);
+    const kind = backendKind(label0);
+    setChildren(badge, backendBadge(label0));
+    const n = p.problems?.length ?? 0;
+    meta.textContent = p.problems ? `${n} ${n === 1 ? 'PROBLEM' : 'PROBLEMS'}` : 'LOADING';
+    note.hidden = kind !== 'offline';
+    setChildren(note, icon('offline', 'bn-ic'), el('span', null, backendNote(kind, 'problems')));
     if (p.problems === null) {
       setChildren(body, el('div', 'cm-list', ...skeletons(5, 'skel-card')));
       return;
@@ -66,7 +72,7 @@ export function createCommunity(_ctx: UICtx, props: P): ScreenView<P> {
         emptyState({
           icon: 'holds',
           title: 'No problems yet',
-          body: p.isGlobal ? 'The community wall is blank. Set the first problem and see who can send it.' : 'You are offline, so only problems on this device show up. Set one in the editor.',
+          body: p.isGlobal ? 'The community wall is blank. Set the first problem and see who can send it.' : 'Nothing saved on this device yet. Set a problem in the editor and it shows up here.',
           action: create(),
         }),
       );
@@ -90,9 +96,10 @@ export function createCommunity(_ctx: UICtx, props: P): ScreenView<P> {
 
   root.append(
     topoLayer('panel-topo'),
-    header({ title: 'Community', kicker: 'PLAYER-SET PROBLEMS', right: badge }),
+    header({ title: 'Community', kicker: 'PLAYER-SET PROBLEMS' }),
     stagger(el('div', 'cm-controls', sort.el, create()), 1),
-    stagger(el('div', 'cm-subrow', meta, label('TAP A CARD TO CLIMB')), 1),
+    stagger(el('div', 'cm-subrow', badge, meta), 1),
+    stagger(note, 1),
     body,
   );
   render(props);

@@ -40,15 +40,43 @@ export function header(o: HeaderOpts): HTMLElement {
   );
 }
 
-/** Backend badge from a BackendAPI label ('GLOBAL' / 'CLAUDE SHARED' / 'OFFLINE'). */
-export function backendBadge(text: string): HTMLElement {
+export type BackendKind = 'global' | 'shared' | 'offline' | 'pending';
+
+/** Classify a BackendAPI label ('GLOBAL' / 'CLAUDE SHARED' / 'OFFLINE', or the app's 'CONNECTING'). */
+export function backendKind(text: string): BackendKind {
   const t = text.toUpperCase();
-  const kind = t.includes('OFFLINE') || t.includes('LOCAL') ? 'off' : t.includes('CLAUDE') || t.includes('SHARED') ? 'shared' : 'on';
-  return el('span', `badge badge-${kind}`, el('i', 'badge-dot'), el('span', null, t));
+  if (t.includes('OFFLINE') || t.includes('LOCAL')) return 'offline';
+  if (t.includes('CLAUDE') || t.includes('SHARED')) return 'shared';
+  if (!t.trim() || t.includes('CONNECT')) return 'pending';
+  return 'global';
 }
 
-export function onlineBadge(isGlobal: boolean): HTMLElement {
-  return backendBadge(isGlobal ? 'GLOBAL' : 'OFFLINE');
+const BADGE: Record<BackendKind, { text: string; icon: IconName; help: string }> = {
+  global: { text: 'GLOBAL', icon: 'globe', help: 'Global leaderboard: your scores count worldwide.' },
+  shared: { text: 'CLAUDE SHARED', icon: 'community', help: 'Claude shared: scores are shared with everyone playing this game in claude.ai.' },
+  offline: { text: 'OFFLINE', icon: 'offline', help: 'Offline: scores are saved on this device only.' },
+  pending: { text: 'CONNECTING', icon: 'refresh', help: 'Connecting to the leaderboard…' },
+};
+
+/** Backend badge from a BackendAPI label: GLOBAL (Supabase), CLAUDE SHARED (claude.ai), OFFLINE. */
+export function backendBadge(text: string): HTMLElement {
+  const kind = backendKind(text);
+  const b = BADGE[kind];
+  const badge = el('span', `badge badge-${kind}`, icon(b.icon, 'badge-ic'), el('span', 'badge-txt', b.text));
+  badge.title = b.help;
+  badge.setAttribute('role', 'status');
+  badge.setAttribute('aria-label', b.help);
+  return badge;
+}
+
+/** One line on what the current backend means for the player's scores. */
+export function backendNote(kind: BackendKind, what: 'scores' | 'problems'): string {
+  if (kind === 'offline')
+    return what === 'scores'
+      ? 'You’re offline, so this board shows runs saved on this device. Open the game online to compete worldwide.'
+      : 'You’re offline, so only problems saved on this device show up. Open the game online to see what others set.';
+  if (kind === 'shared') return what === 'scores' ? 'Shared with everyone playing this game in claude.ai.' : 'Problems shared by everyone playing this game in claude.ai.';
+  return what === 'scores' ? 'Worldwide board. Every run you finish counts.' : 'Set by climbers around the world.';
 }
 
 export function gradeChip(g: number, opts: { font?: boolean; size?: 'sm' | 'md' | 'lg' } = {}): HTMLElement {
@@ -208,6 +236,16 @@ export function routeThumb(b: BoulderDef, cls = ''): SVGSVGElement {
     if (h.role === 'start' || h.role === 'top') svg.appendChild(svgEl('circle', { cx: h.x, cy: -h.y, r: r + 0.13, class: `th-ring th-ring-${h.role}` }));
   }
   return svg;
+}
+
+/**
+ * START / TOP tape chip in the route colour: the same tape the setter sticks under those holds on
+ * the wall (src/render/textures.ts), so the legend matches what the player sees.
+ */
+export function tapeChip(text: string, routeHex: string): HTMLElement {
+  const t = el('b', `tape${luminance(routeHex) > 0.55 ? ' tape-light' : ''}`, text);
+  t.style.setProperty('--route', routeHex);
+  return t;
 }
 
 /** Relative luminance (0..1) of a #rrggbb colour. */

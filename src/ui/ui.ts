@@ -13,6 +13,7 @@ import { GuideBubble } from './guide-bubble';
 import { Modal } from './modal';
 import { Portraits } from './portraits';
 import type { ScreenFactory, ScreenView, UICtx } from './screen';
+import { backendKind } from './parts';
 import { svgUrl, topoSvg } from './topo';
 import { createCommunity } from './screens/community';
 import { createHud, HudView, type HudRunInfo } from './screens/hud';
@@ -71,6 +72,8 @@ export class GameUI implements UIAPI {
   private nameReturn: ScreenProps['profile'] | null = null;
   private motionQuery: MediaQueryList | null = null;
   private pressed: HTMLElement | null = null;
+  /** Last backend label seen (title props or setBackendLabel); boards only receive isGlobal. */
+  private backendName = '';
   private readonly ctx: UICtx;
 
   readonly hud: UIAPI['hud'] = {
@@ -113,6 +116,13 @@ export class GameUI implements UIAPI {
       commitSettings: (s) => {
         this.settings = { ...s };
         bus.emit('ui:settings-changed', { settings: { ...s } });
+      },
+      get backendName() {
+        return self.backendName;
+      },
+      backendLabel: (isGlobal) => {
+        if (!isGlobal) return 'OFFLINE';
+        return backendKind(this.backendName) === 'shared' ? 'CLAUDE SHARED' : 'GLOBAL';
       },
     };
   }
@@ -248,6 +258,11 @@ export class GameUI implements UIAPI {
     this.portraits.setProvider(fn);
   }
 
+  /** Optional: tell the UI which backend is live ('GLOBAL' / 'CLAUDE SHARED' / 'OFFLINE'); boards use it for their badge. */
+  setBackendLabel(label: string): void {
+    this.backendName = label;
+  }
+
   /** Optional: tell the UI the current settings (used by pause quick toggles + motion/quality classes). */
   setSettings(s: Settings): void {
     this.settings = { ...s };
@@ -260,8 +275,10 @@ export class GameUI implements UIAPI {
   private lastProps: unknown = null;
 
   private absorbProps(props: unknown): void {
-    const p = props as { profile?: Profile } | null;
-    if (p && typeof p === 'object' && p.profile && p.profile.settings) this.setSettings(p.profile.settings);
+    const p = props as { profile?: Profile; backendLabel?: unknown } | null;
+    if (!p || typeof p !== 'object') return;
+    if (p.profile && p.profile.settings) this.setSettings(p.profile.settings);
+    if (typeof p.backendLabel === 'string' && backendKind(p.backendLabel) !== 'pending') this.backendName = p.backendLabel;
   }
 
   private isReduced(): boolean {

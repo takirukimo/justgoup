@@ -24,6 +24,13 @@ export interface UICtx {
   getSettings(): Settings;
   /** Remember + emit 'ui:settings-changed' with the full Settings. */
   commitSettings(s: Settings): void;
+  /**
+   * Backend label for a board that reports only `isGlobal`: 'OFFLINE' when not global, else the
+   * last label the app gave the title ('GLOBAL' or 'CLAUDE SHARED'), defaulting to 'GLOBAL'.
+   */
+  backendLabel(isGlobal: boolean): string;
+  /** Last known backend label ('' until the app reports one). */
+  readonly backendName: string;
 }
 
 export interface ScreenView<P> {

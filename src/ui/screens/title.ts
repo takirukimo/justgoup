@@ -7,10 +7,17 @@ import { button, el, label, setChildren, stagger } from '../dom';
 import { icon } from '../icons';
 import { fmtInt } from '../format';
 import { gameLockup } from '../logo';
-import { backendBadge, screenRoot } from '../parts';
+import { backendBadge, backendKind, screenRoot, type BackendKind } from '../parts';
 import type { ScreenView, UICtx } from '../screen';
 
 type P = ScreenProps['title'];
+
+const BADGE_TOAST: Record<BackendKind, string> = {
+  global: 'GLOBAL · YOUR SCORES COUNT WORLDWIDE',
+  shared: 'CLAUDE SHARED · SCORES SHARED WITH EVERYONE PLAYING IN CLAUDE.AI',
+  offline: 'OFFLINE · SCORES STAY ON THIS DEVICE',
+  pending: 'CONNECTING TO THE LEADERBOARD…',
+};
 
 export function createTitle(ctx: UICtx, props: P): ScreenView<P> {
   const root = screenRoot('title');
@@ -37,7 +44,16 @@ export function createTitle(ctx: UICtx, props: P): ScreenView<P> {
       icon('chevron', 'pc-chev'),
     );
     setChildren(chipSlot, chip);
-    setChildren(badgeSlot, backendBadge(p.backendLabel));
+    // The badge is tappable: a toast says what it means for your scores.
+    const kind = backendKind(p.backendLabel);
+    const badgeBtn = button({
+      variant: 'plain',
+      cls: 'title-badge',
+      aria: 'Leaderboard status',
+      onTap: () => ctx.toast(BADGE_TOAST[kind]),
+    });
+    badgeBtn.appendChild(backendBadge(p.backendLabel));
+    setChildren(badgeSlot, badgeBtn);
   };
   renderTop(props);
 

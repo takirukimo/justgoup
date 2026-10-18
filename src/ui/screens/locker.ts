@@ -25,11 +25,30 @@ export function createLocker(ctx: UICtx, props: P): ScreenView<P> {
 
   const isUnlocked = (kind: Tab, id: string): boolean => (profile.unlocked[kind] as string[]).includes(id);
 
+  /** What to do to earn an item, as an instruction ("Reach 1,500 lifetime points"). */
+  const howToUnlock = (u: Unlock): string => {
+    switch (u.kind) {
+      case 'points':
+        return `Reach ${u.points.toLocaleString('en-US')} lifetime points`;
+      case 'streak':
+        return `Send ${u.streak} in one run`;
+      case 'clips':
+        return `Clip ${u.clips} quickdraws`;
+      case 'flashes':
+        return `Flash ${u.flashes} problems`;
+      default:
+        return unlockLabel(u);
+    }
+  };
+
+  const ariaFor = (name: string, sel: boolean, un: boolean, u: Unlock): string =>
+    sel ? `${name}, equipped` : un ? `Equip ${name}` : `${name}, locked. ${howToUnlock(u)}`;
+
   const lockedTap = (card: HTMLElement, u: Unlock): void => {
     card.classList.remove('nope');
     void card.offsetWidth;
     card.classList.add('nope');
-    ctx.toast(`LOCKED · ${unlockLabel(u).toUpperCase()}`);
+    ctx.toast(`LOCKED · ${howToUnlock(u).toUpperCase()}`);
   };
 
   const stateTag = (sel: boolean, unlocked: boolean, u: Unlock): HTMLElement =>
@@ -62,7 +81,7 @@ export function createLocker(ctx: UICtx, props: P): ScreenView<P> {
       cards = HEADS.map((h, i) => {
         const un = isUnlocked('heads', h.id);
         const sel = profile.head === h.id;
-        const card = button({ variant: 'plain', cls: `lk-card lk-head ${sel ? 'sel' : ''} ${un ? '' : 'locked'}`, aria: h.name });
+        const card = button({ variant: 'plain', cls: `lk-card lk-head ${sel ? 'sel' : ''} ${un ? '' : 'locked'}`, aria: ariaFor(h.name, sel, un, h.unlock) });
         card.append(
           el('span', 'lk-art', topoLayer('lk-art-topo'), ctx.portraits.frame(h.id, 'pt-lk'), un ? null : el('span', 'lk-lock', icon('lock'))),
           el('span', 'lk-meta', el('span', 'lk-name', h.name), label(h.local, 'lk-local'), el('span', 'lk-blurb', h.blurb)),
@@ -81,7 +100,7 @@ export function createLocker(ctx: UICtx, props: P): ScreenView<P> {
       cards = COLORWAYS.map((c, i) => {
         const un = isUnlocked('colorways', c.id);
         const sel = profile.colorway === c.id;
-        const card = button({ variant: 'plain', cls: `lk-card lk-cw ${sel ? 'sel' : ''} ${un ? '' : 'locked'}`, aria: c.name });
+        const card = button({ variant: 'plain', cls: `lk-card lk-cw ${sel ? 'sel' : ''} ${un ? '' : 'locked'}`, aria: ariaFor(c.name, sel, un, c.unlock) });
         const chips = el('span', 'cw-chips');
         for (const [k, hex] of [['TOP', c.top], ['PANT', c.bottom], ['SHOE', c.shoe]] as const) {
           const chip = el('span', 'cw-chip', el('i'), k);
@@ -106,7 +125,7 @@ export function createLocker(ctx: UICtx, props: P): ScreenView<P> {
       cards = CHALKS.map((c, i) => {
         const un = isUnlocked('chalks', c.id);
         const sel = profile.chalk === c.id;
-        const card = button({ variant: 'plain', cls: `lk-card lk-chalk ${sel ? 'sel' : ''} ${un ? '' : 'locked'}`, aria: c.name });
+        const card = button({ variant: 'plain', cls: `lk-card lk-chalk ${sel ? 'sel' : ''} ${un ? '' : 'locked'}`, aria: ariaFor(c.name, sel, un, c.unlock) });
         card.append(
           el('span', 'lk-art lk-art-chalk', chalkSwatch(c.id as ChalkId), un ? null : el('span', 'lk-lock', icon('lock'))),
           el('span', 'lk-meta', el('span', 'lk-name', c.name), label(c.color.toUpperCase(), 'lk-local')),
@@ -141,7 +160,7 @@ export function createLocker(ctx: UICtx, props: P): ScreenView<P> {
 
   root.append(
     el('div', 'scrim scrim-top scrim-soft'),
-    el('div', 'lk-top', backButton(), el('div', 'lk-title stg', label('LOCKER · LOADOUT'), el('h2', 'hdr-h', 'Locker'))),
+    el('div', 'lk-top', backButton(), el('div', 'lkr-title stg', label('YOUR LOADOUT', 'hdr-kicker'), el('h2', 'hdr-h', 'Locker'))),
     el('div', 'lk-flex'),
     el(
       'div',

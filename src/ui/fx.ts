@@ -4,6 +4,9 @@ import { el } from './dom';
 
 export type CalloutStyle = 'good' | 'bad' | 'neutral';
 
+const WARN = /unavailable|failed|couldn|could not|\blocked\b|no hints|no clear|slipped|offline|try again/i;
+const GOOD = /unlocked|saved|is live|complete|published|reset$/i;
+
 export class FxLayer {
   readonly el: HTMLElement;
   private calloutEl: HTMLElement | null = null;
@@ -45,7 +48,9 @@ export class FxLayer {
 
   toast(text: string): void {
     while (this.toasts.children.length >= 3) this.toasts.firstElementChild?.remove();
-    const t = el('div', 'toast', el('i', 'toast-dot'), el('span', null, text));
+    // The dot carries the tone: green for good news, amber for problems, signal for everything else.
+    const tone = WARN.test(text) ? ' toast-warn' : GOOD.test(text) ? ' toast-good' : '';
+    const t = el('div', `toast${tone}`, el('i', 'toast-dot'), el('span', null, text));
     this.toasts.appendChild(t);
     setTimeout(() => {
       t.classList.add('toast-out');

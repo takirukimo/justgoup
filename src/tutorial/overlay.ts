@@ -96,12 +96,6 @@ const CSS = /* css */ `
   .jgt *, .jgt { transition-duration: .01ms !important; transition-delay: 0ms !important; }
 }
 .reduced-motion .jgt *, .reduced-motion .jgt { transition-duration: .01ms !important; transition-delay: 0ms !important; }
-/* The guide layer stays displayed while its SKIP chip is on; keep the empty speech card hidden
-   between lines (the bubble only shows when a line is up). */
-.guide-layer.has-skip:not(.on) .gb-card { visibility: hidden; }
-/* A top-placed bubble would sit under the SKIP chip: drop it just below the chip instead. */
-.jgu-ui[data-screen='hud'] .guide-layer.has-skip.at-top .gb-card { top: calc(var(--safe-t, 0px) + 126px); }
-.jgu-ui:not([data-screen='hud']) .guide-layer.has-skip.at-top .gb-card { top: calc(var(--safe-t, 0px) + 68px); }
 `;
 
 /** Inject the tutorial/intro stylesheet once per document. */

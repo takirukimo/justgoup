@@ -190,6 +190,8 @@ export class HudView implements ScreenView<P> {
     });
 
     root.append(
+      el('div', 'hud-scrim hud-scrim-top'),
+      el('div', 'hud-scrim hud-scrim-bottom'),
       this.vig,
       el('div', 'hud-top', pause, route, this.scoreBox),
       this.ropeRow,
@@ -216,6 +218,9 @@ export class HudView implements ScreenView<P> {
     if (run.boulderName !== q.name) {
       q.name = run.boulderName;
       setText(this.nameEl, run.boulderName);
+      // Long route names step down a size before they need an ellipsis.
+      const n = run.boulderName.length;
+      this.nameEl.style.setProperty('--hr-fs', n > 18 ? '14px' : n > 13 ? '16px' : '18px');
     }
     if (run.grade !== q.grade) {
       q.grade = run.grade;
@@ -247,6 +252,7 @@ export class HudView implements ScreenView<P> {
       toggle(this.hintBtn.parentElement!, 'hidden', hints < 0);
       this.hintBtn.disabled = hints === 0;
       setText(this.hintCount, hints < 0 ? '' : String(hints));
+      this.hintBtn.setAttribute('aria-label', hints < 0 ? 'Hint' : hints === 0 ? 'No hints left' : `Hint, ${hints} left`);
     }
     if (run.mode === 'rope') {
       const lives = run.lives ?? GAME.ropeLives;

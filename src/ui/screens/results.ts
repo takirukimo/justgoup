@@ -8,7 +8,7 @@ import { CHALKS, COLORWAYS } from '../../config/skins';
 import { button, el, label, stagger, type Child } from '../dom';
 import { icon } from '../icons';
 import { fmtDuration, fmtInt, fmtSigned, modeTitle } from '../format';
-import { gradeChip, screenRoot, steiniTip, topoLayer } from '../parts';
+import { backendKind, gradeChip, screenRoot, steiniTip, topoLayer } from '../parts';
 import type { ScreenView, UICtx } from '../screen';
 
 type P = ScreenProps['results'];
@@ -119,7 +119,10 @@ export function createResults(ctx: UICtx, props: P): ScreenView<P> {
       ),
     );
     if (q.rank !== undefined && q.rank !== null) {
-      out.push(sg(el('div', 'res-rank', icon('podium'), el('span', null, 'BOARD RANK'), el('b', 't-num', `#${fmtInt(q.rank)}`)), 5));
+      // Say which board the rank is on: worldwide, the claude.ai shared board, or this device.
+      const kind = backendKind(ctx.backendName);
+      const where = kind === 'offline' ? 'RANK ON THIS DEVICE' : kind === 'shared' ? 'SHARED BOARD RANK' : kind === 'global' ? 'GLOBAL RANK' : 'BOARD RANK';
+      out.push(sg(el('div', 'res-rank', icon('podium'), el('span', null, where), el('b', 't-num', `#${fmtInt(q.rank)}`)), 5));
     }
     if (q.tip && (q.kind === 'fall' || q.kind === 'run-over')) out.push(sg(steiniTip(ctx.portraits, q.tip, 'res-tip'), 6));
     if (q.unlocks && q.unlocks.length) {
@@ -146,7 +149,9 @@ export function createResults(ctx: UICtx, props: P): ScreenView<P> {
 
   // ── actions ──
   const actions = el('div', 'res-actions');
-  const retryLabel = p.kind === 'run-over' ? 'NEW RUN' : p.kind === 'send' || p.kind === 'topped-rope' ? 'RETRY' : 'TRY AGAIN';
+  // Name what the button does: in a run (Send Train / Lead Tower) it starts a new run; on a single
+  // problem (daily, community, test) it climbs the same problem again.
+  const retryLabel = p.kind === 'run-over' || p.canContinue ? 'NEW RUN' : p.kind === 'send' || p.kind === 'topped-rope' ? 'CLIMB AGAIN' : 'TRY AGAIN';
   if (p.canContinue) {
     actions.append(
       stagger(button({ label: p.kind === 'topped-rope' ? 'NEXT ROUTE' : 'NEXT BOULDER', icon: 'arrow', iconAfter: true, variant: 'primary', cls: 'btn-xl', onTap: () => bus.emit('ui:next') }), 12),

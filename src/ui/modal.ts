@@ -4,6 +4,7 @@ import { button, el } from './dom';
 import { icon } from './icons';
 
 export class Modal {
+  private static seq = 0;
   readonly el: HTMLElement;
   private pending: ((v: boolean) => void) | null = null;
 
@@ -45,6 +46,9 @@ export class Modal {
       card.setAttribute('role', 'alertdialog');
       card.setAttribute('aria-modal', 'true');
       card.setAttribute('aria-label', title);
+      const bodyId = `modal-p-${++Modal.seq}`;
+      card.querySelector('.modal-p')?.setAttribute('id', bodyId);
+      card.setAttribute('aria-describedby', bodyId);
       const wrap = el('div', 'modal', backdrop, card);
       this.el.appendChild(wrap);
       if (matchMedia('(pointer: fine)').matches) setTimeout(() => (danger ? cancelBtn : okBtn).focus({ preventScroll: true }), 60);
