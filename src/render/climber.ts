@@ -3343,6 +3343,12 @@ export class ClimberModel extends THREE.Group {
   /** Per foot: how narrow the stance is next to the other foot (1 = matched); drives the hips out. */
   private narrow = [0, 0];
   private sNarrow = 0;
+  /**
+   * Crossed feet (a cross-through: the left foot right of the right foot, on another hold): blend and
+   * the foot whose leg passes in front (0 left, 1 right).
+   */
+  private crossK = 0;
+  private crossFront = 0;
   /** Body right axis in the wall plane (wall-local, from the last pose). */
   private bRx = 1;
   private bRy = 0;
@@ -3446,6 +3452,11 @@ export class ClimberModel extends THREE.Group {
     return out.copy(this.rig.joints.tieIn);
   }
 
+  /** QA: the body's right axis in the wall plane (wall-local, from the last pose). */
+  get bodyRight(): Vec2 {
+    return { x: this.bRx, y: this.bRy };
+  }
+
   getLimbWorld(limb: LimbId, out: THREE.Vector3): THREE.Vector3 {
     return out.copy(this.limbWorld[limb]);
   }
@@ -3514,6 +3525,30 @@ export class ClimberModel extends THREE.Group {
     const nar = onWall ? Math.min(this.narrow[0], this.narrow[1]) : 0;
     this.sNarrow += (nar - this.sNarrow) * (snap ? 1 : dampK(4, d));
     sit = Math.max(sit, 0.15 * this.sNarrow);
+    // crossed feet: one leg passes in front of the other (the sim's layer says which; else the foot
+    // that crossed further past the hips). Its hip turns out from the wall and the hips sit out a
+    // little, so the front thigh and shin clear the back leg instead of merging into an X
+    {
+      let cross = 0;
+      const lf = state.limbs.LF;
+      const rf = state.limbs.RF;
+      if (onWall && (lf.holdId !== null || lf.smearing) && (rf.holdId !== null || rf.smearing) && lf.holdId !== rf.holdId) {
+        const dx = (rf.pos.x - lf.pos.x) * bRx + (rf.pos.y - lf.pos.y) * bRy;
+        cross = sstep(0, -0.12, dx);
+        if (cross > 0) {
+          const la = layerOf(lf);
+          const lb = layerOf(rf);
+          if (la !== lb) this.crossFront = la > lb ? 0 : 1;
+          else {
+            const aL = (lf.pos.x - state.pelvis.x) * bRx + (lf.pos.y - state.pelvis.y) * bRy;
+            const aR = -((rf.pos.x - state.pelvis.x) * bRx + (rf.pos.y - state.pelvis.y) * bRy);
+            if (this.crossK < 0.05) this.crossFront = aL >= aR ? 0 : 1;
+          }
+        }
+      }
+      this.crossK += (cross - this.crossK) * (snap ? 1 : dampK(6, d));
+      sit = Math.max(sit, 0.12 * this.crossK);
+    }
     this.sSit += (sit - this.sSit) * (snap ? 1 : dampK(5, d));
     this.sHike += (hike - this.sHike) * (snap ? 1 : dampK(5, d));
 
@@ -3665,6 +3700,8 @@ export class ClimberModel extends THREE.Group {
       this.dropK[s] += (this.dropRaw[s] - this.dropK[s]) * (snap ? 1 : dampK(8, d));
       dk -= SIGN[s] * this.dropK[s] * 0.42;
     }
+    // crossed feet: the front leg's hip turns out from the wall (the opposite of a drop knee)
+    dk += SIGN[this.crossFront] * 0.34 * this.crossK;
     this.sDrop += (dk - this.sDrop) * (snap ? 1 : dampK(8, d));
     this.q.setFromAxisAngle(this.U, -(this.sYaw * 0.75 + this.sDrop));
     g.pelvisRight.copy(this.Rb).applyQuaternion(this.q);
@@ -4183,6 +4220,15 @@ export class ClimberModel extends THREE.Group {
         if (heel) fg.target.addScaledVector(dir, 0.234 * hk).addScaledVector(up, -0.016 * hk);
         else fg.target.addScaledVector(dir, 0.018 * hk).addScaledVector(up, -0.036 * hk);
         fg.autoPoint = false;
+      }
+      // crossed feet: the front leg's knee comes forward and across, the back leg's knee stays out to
+      // its own side and low, so the shins pass one in front of the other
+      const xk = this.crossK;
+      if (xk > 0.001 && mode === 'hold' && hk < 0.5) {
+        if (s === this.crossFront) this.v2.copy(Nw).multiplyScalar(0.9).addScaledVector(Uw, 0.3).addScaledVector(Rw, -side * 0.25).normalize();
+        else this.v2.copy(Nw).multiplyScalar(0.2).addScaledVector(Rw, side * 0.75).addScaledVector(Uw, -0.25).normalize();
+        pole.normalize().lerp(this.v2, xk * 0.8);
+        if (s === this.crossFront) fg.layer = Math.max(fg.layer, 1);
       }
     } else if (mode === 'drag') {
       dir.copy(Nw).multiplyScalar(-0.85).addScaledVector(Uw, -0.15).addScaledVector(Rw, side * 0.25).normalize();

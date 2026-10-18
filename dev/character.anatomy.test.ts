@@ -184,6 +184,14 @@ function run(b: BoulderDef, T: Tally, opts: { secs: number; fallAt?: number; tag
     if (m.pen > PEN_BAD) {
       T.penFrames++;
       ph.pen++;
+      if (/shin|thigh/.test(m.what) && !/belly|chest|head|fore|upper/.test(m.what)) {
+        // leg ↔ leg: are the feet crossed (left foot right of the right foot, along the body's right)?
+        const lf = st.limbs.LF.pos;
+        const rf = st.limbs.RF.pos;
+        const dx = (rf.x - lf.x) * model.bodyRight.x + (rf.y - lf.y) * model.bodyRight.y;
+        const k = dx < 0 ? 'legs:crossed' : dx < 0.16 ? 'legs:narrow' : 'legs:apart';
+        T.pairs[k] = (T.pairs[k] ?? 0) + 1;
+      }
       if (T.penLog.length < (process.env.PENLOG ? +process.env.PENLOG : 0) && i % 15 === 0) {
         const lim = (['LH', 'RH', 'LF', 'RF'] as LimbId[]).map((id) => { const L = st.limbs[id]; return `${id}:${L.pos.x.toFixed(2)},${L.pos.y.toFixed(2)}${L.holdId ? '' : L.dragging ? 'd' : 'f'}${L.footMode && L.footMode !== 'edge' ? '/' + L.footMode : ''}${L.layer ? '^' + L.layer : ''}`; }).join(' ');
         T.penLog.push(`${(m.pen * 100).toFixed(1)}cm ${m.what} ${where} P=${st.pelvis.x.toFixed(2)},${st.pelvis.y.toFixed(2)} d=${st.pelvisDepth.toFixed(2)} ${lim}`);
