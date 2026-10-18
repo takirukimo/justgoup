@@ -530,8 +530,9 @@ export function createOutfitAtlas(style: OutfitStyle, section: (y: number) => To
   g.globalCompositeOperation = 'source-over';
   const [mvw, mvh] = BRAND.markViewBox;
   const prints: TorsoPrint[] = [];
-  // chest: the mark, small and centred (≈ a quarter of the way down from the collar)
-  const markW = style === 'staff' ? 0.078 : 0.072;
+  // chest: the mark, small and centred (≈ a quarter of the way down from the collar; ≈ 1/6 of the
+  // chest width like the reference tees)
+  const markW = style === 'staff' ? 0.07 : 0.064;
   const markH = (markW * mvh) / mvw;
   const markTop = style === 'staff' ? 0.425 : 0.41;
   const markArt = artwork(640, (640 * mvh) / mvw, (g2) => {
@@ -539,26 +540,30 @@ export function createOutfitAtlas(style: OutfitStyle, section: (y: number) => To
     g2.fill(markPath());
   });
   prints.push({ art: markArt, centre: 'front', top: markTop, width: markW, height: markH });
-  // back: CHIRAL SPORTS down the spine, starting just under the yoke
+  // back: CHIRAL SPORTS down the spine, starting a little under the collar (the visible tee runs
+  // from ≈ 0.48 at the collar to ≈ 0.12 at the waistband / harness belt; the reference wordmark
+  // starts ≈ 1/6 of the way down and covers a bit under half of it)
   const [wvw, wvh] = BRAND.wordmarkViewBox;
-  const wmLen = style === 'staff' ? 0.2 : 0.215;
-  const wmTop = 0.445;
+  const wmLen = style === 'staff' ? 0.17 : 0.188;
+  const wmTop = style === 'staff' ? 0.452 : 0.447;
   const wmW = (wmLen * wvh) / wvw;
   prints.push({ art: verticalArt(wordmarkPath(), wvw, 1200 / wvw), centre: 'back', top: wmTop, width: wmW, height: wmLen });
   if (style === 'staff') {
-    const run = glyphRun('INSTRUCTOR', 26);
-    // chest: small caps under the mark
+    // chest: small spaced caps under the mark
+    const chestRun = glyphRun('INSTRUCTOR', 26);
     const capH = 0.0098;
-    const chestW = (capH * run.width) / GLYPH_H;
-    const chestArt = artwork(900, (900 * GLYPH_H) / run.width, (g2) => {
-      g2.scale(900 / run.width, 900 / run.width);
-      g2.fill(run.path);
+    const chestW = (capH * chestRun.width) / GLYPH_H;
+    const chestArt = artwork(900, (900 * GLYPH_H) / chestRun.width, (g2) => {
+      g2.scale(900 / chestRun.width, 900 / chestRun.width);
+      g2.fill(chestRun.path);
     });
     prints.push({ art: chestArt, centre: 'front', top: markTop - markH - 0.016, width: chestW, height: capH });
-    // back: continues down the spine under the wordmark, smaller
-    const backH = wmW * 0.62;
-    const backLen = (backH * run.width) / GLYPH_H;
-    prints.push({ art: verticalArt(run.path, run.width, 900 / run.width), centre: 'back', top: wmTop - wmLen - 0.022, width: backH, height: backLen });
+    // back: continues down the spine under the wordmark at 70 % of its cap height, tighter tracking,
+    // ending well above the waistband / harness belt (never cut off)
+    const backRun = glyphRun('INSTRUCTOR', 18);
+    const backH = wmW * 0.7;
+    const backLen = (backH * backRun.width) / GLYPH_H;
+    prints.push({ art: verticalArt(backRun.path, backRun.width, 900 / backRun.width), centre: 'back', top: wmTop - wmLen - 0.018, width: backH, height: backLen });
   }
   paintTorsoPrints(g, section, prints);
 

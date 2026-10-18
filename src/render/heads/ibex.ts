@@ -25,8 +25,8 @@ export const IBEX_COLORS = {
   hornBase: '#5B5246',
   hornTip: '#353029',
   hornRidge: '#887B65',
-  iris: '#B27A2C',
-  irisRing: '#5A360C',
+  iris: '#A06C2C',
+  irisRing: '#4A2C0C',
 } as const;
 
 const EYE_C: [number, number, number] = [0.0575, 0.224, 0.056];
@@ -53,15 +53,15 @@ const faceZInv = (z: number): number => (z <= FACE_Z0 ? z : FACE_Z0 + (z - FACE_
 export function ibexSdf(): Sdf {
   const cranium = ellipsoid([0, 0.214, -0.014], [0.064, 0.07, 0.07]);
   const brow = ellipsoid([0, 0.232, 0.03], [0.061, 0.05, 0.062], [-0.26, 0, 0]);
-  const muzzleC = roundCone([0, 0.2, 0.058], [0, 0.158, 0.182], 0.05, 0.028);
+  const muzzleC = roundCone([0, 0.2, 0.058], [0, 0.157, 0.182], 0.05, 0.031);
   // narrower across than deep, like a real goat muzzle
-  const muzzle: Sdf = (x, y, z) => muzzleC(x * 1.16, y, z);
+  const muzzle: Sdf = (x, y, z) => muzzleC(x * 1.12, y, z);
   const ridge = ellipsoid([0, 0.192, 0.112], [0.029, 0.03, 0.082], [0.36, 0, 0]);
-  const nose = ellipsoid([0, 0.157, 0.188], [0.023, 0.023, 0.021]);
-  const lip = ellipsoid([0, 0.143, 0.178], [0.024, 0.015, 0.024]);
-  const jaw = mirrorX(ellipsoid([0.037, 0.155, 0.018], [0.029, 0.054, 0.064], [0.3, 0, 0]));
+  const nose = ellipsoid([0, 0.157, 0.188], [0.025, 0.023, 0.017]);
+  const lip = ellipsoid([0, 0.143, 0.181], [0.026, 0.016, 0.024]);
+  const jaw = mirrorX(ellipsoid([0.034, 0.157, 0.016], [0.025, 0.05, 0.062], [0.3, 0, 0]));
   const chin = roundCone([0, 0.128, 0.028], [0, 0.132, 0.163], 0.03, 0.018);
-  const cheek = mirrorX(ellipsoid([0.05, 0.196, 0.034], [0.02, 0.027, 0.046]));
+  const cheek = mirrorX(ellipsoid([0.047, 0.198, 0.036], [0.018, 0.025, 0.046]));
   const browR = mirrorX(ellipsoid([0.049, 0.24, 0.056], [0.025, 0.012, 0.026], [0, 0, 0.3]));
   const pedicle = mirrorX(ellipsoid([0.026, 0.266, 0.036], [0.03, 0.022, 0.032]));
   return (x, y, zm) => {
@@ -149,15 +149,15 @@ export function buildIbex(opts: IbexOptions = {}): THREE.Group {
   // ears: pointed, angled out to the sides and a little back, pale inside with a dark rim
   addEars(kit, {
     base: [0.05, 0.258, -0.032],
-    dir: [1, 0.62, -0.55],
+    dir: [1, 0.8, -0.68],
     open: [0.35, 0.1, 1],
-    length: 0.086,
-    width: 0.04,
+    length: 0.08,
+    width: 0.036,
     cup: 0.85,
-    point: 0.72,
+    point: 0.8,
     outer: C.coat,
-    inner: '#B8A894',
-    rim: '#2E2721',
+    inner: '#C4B9AA',
+    rim: '#241E19',
   });
 
   // short chin beard (billy goatee): soft clumped locks, darker at the tips
@@ -180,7 +180,8 @@ export function buildIbex(opts: IbexOptions = {}): THREE.Group {
     });
   }
 
-  // horns: rise from the top of the skull, then a big backward arc; tips diverge slightly
+  // horns: rise steeply from the top of the skull, then a tall backward arc that ends above the neck
+  // (the reference's upright lyre, not a low sweep); tips diverge slightly
   const hs = opts.horn ?? 1;
   const base: [number, number, number] = [0.023, 0.262, 0.038];
   const H = (x: number, y: number, z: number): [number, number, number] => [
@@ -191,14 +192,14 @@ export function buildIbex(opts: IbexOptions = {}): THREE.Group {
   addHorns(kit, {
     ctrl: [
       H(0.024, 0.262, 0.038),
-      H(0.03, 0.334, 0.031),
-      H(0.04, 0.412, 0.004),
-      H(0.055, 0.477, -0.048),
-      H(0.075, 0.52, -0.123),
-      H(0.099, 0.535, -0.207),
-      H(0.124, 0.519, -0.288),
-      H(0.149, 0.484, -0.354),
-      H(0.172, 0.436, -0.4),
+      H(0.03, 0.338, 0.033),
+      H(0.04, 0.418, 0.012),
+      H(0.054, 0.49, -0.03),
+      H(0.073, 0.545, -0.092),
+      H(0.096, 0.573, -0.165),
+      H(0.12, 0.572, -0.24),
+      H(0.144, 0.548, -0.306),
+      H(0.165, 0.508, -0.352),
     ],
     samples: 76,
     cols: 16,
@@ -239,7 +240,7 @@ export function buildIbex(opts: IbexOptions = {}): THREE.Group {
     radius: EYE_R,
     gaze: [0.8, 0.07, 0.6],
     style: { iris: C.iris, ring: C.irisRing, pupil: 'horizontal', surround: '#1E1812', irisR: 0.47 },
-    lids: { upper: 15, lower: -27, frown: 6, color: C.coat, rim: '#1F1914' },
+    lids: { upper: 13, lower: -27, frown: 3, color: C.coat, rim: '#1F1914' },
   });
 
   return kit.build('ibex', { sheen: '#8A7966', roughness: 0.88 }, { roughness: 0.62, clearcoat: 0.2 });

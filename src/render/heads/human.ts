@@ -304,13 +304,13 @@ function buildCap(): THREE.Mesh {
       b.uv[i * 2 + 1] = crownV0 + (1 - crownV0) * 0.5;
     }
   }
-  // embroidery placement: centre line at crown v = .36, CHIRAL SPORTS across ≈ 0.19 of the
+  // embroidery placement: centre line at crown v = .34, CHIRAL SPORTS across ≈ 0.2 of the
   // circumference, aspect from the local surface derivatives at the front centre
-  const v0 = 0.36;
+  const v0 = 0.34;
   const pA = crownPoint(0.5, v0, new THREE.Vector3());
   const du = crownPoint(0.501, v0, new THREE.Vector3()).sub(pA).length() / 0.001;
   const dv = crownPoint(0.5, v0 + 0.001, new THREE.Vector3()).sub(pA).length() / 0.001;
-  const tex = createCapTexture({ v: v0, widthU: 0.19, vPerU: du / dv });
+  const tex = createCapTexture({ v: v0, widthU: 0.2, vPerU: du / dv });
   const mat = createCapMaterial(tex);
   mat.side = THREE.DoubleSide;
   const mesh = new THREE.Mesh(b.build({ color: true }), mat);
