@@ -21,7 +21,7 @@ export function buildGoat(): THREE.Group {
   const jaw = mirrorX(ellipsoid([0.044, 0.15, 0.03], [0.036, 0.048, 0.06], [0.3, 0, 0]));
   const chin = roundCone([0, 0.122, 0.04], [0, 0.124, 0.148], 0.033, 0.026);
   const ped = mirrorX(ellipsoid([0.026, 0.264, 0.04], [0.022, 0.018, 0.022]));
-  const eyeC = [0.054, 0.214, 0.068];
+  const eyeC = [0.0555, 0.2141, 0.07];
   const sdf = (x: number, y: number, z: number) => {
     let d = skull(x, y, z);
     d = smin(d, brow(x, y, z), 0.04);
@@ -32,7 +32,7 @@ export function buildGoat(): THREE.Group {
     d = smin(d, chin(x, y, z), 0.03);
     d = smin(d, ped(x, y, z), 0.02);
     const ax = Math.abs(x);
-    d = smax(d, -(Math.hypot(ax - eyeC[0], y - eyeC[1], z - eyeC[2]) - 0.021), 0.011);
+    d = smax(d, -(Math.hypot(ax - eyeC[0], y - eyeC[1], z - eyeC[2]) - 0.0177), 0.01);
     d = smax(d, -sdRoundCone(ax, y, z, 0.032, 0.13, 0.108, 0.013, 0.131, 0.168, 0.003, 0.0035), 0.006);
     d = smax(d, -sdEllipsoid(ax - 0.015, y - 0.156, z - 0.194, 0.007, 0.0042, 0.008), 0.006);
     return d;
@@ -142,11 +142,11 @@ export function buildGoat(): THREE.Group {
     });
   }
   kit.addEyes({
-    center: [0.054, 0.214, 0.068],
-    radius: 0.021,
-    gaze: [0.58, 0.05, 0.81],
+    center: [0.0555, 0.2141, 0.07],
+    radius: 0.0165,
+    gaze: [0.74, 0.05, 0.67],
     style: { iris: '#5C4630', ring: '#21170D', pupil: 'horizontal', surround: def.colors.eye, irisR: 0.44 },
-    lids: { upper: 22, lower: -34, frown: 2, color: def.colors.base, rim: '#2B2622' },
+    lids: { upper: 18, lower: -30, frown: 3, color: def.colors.base, rim: '#2B2622' },
   });
   return kit.build('goat', { sheen: '#8C8780', roughness: 0.88 }, { roughness: 0.4, clearcoat: 0.45 });
 }

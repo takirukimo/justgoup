@@ -1,6 +1,7 @@
-// CHARACTER: Steini the ibex — CHIRAL staff guide who runs the intro, the tutorial and belays in
-// rope mode. Same body system as the climber (BodyRig) with the ibex head, a signal-orange CHIRAL
-// STAFF tee, dark pants, approach shoes and a knit beanie pushed back behind the horns.
+// CHARACTER: Steini the ibex — the CHIRAL SPORTS instructor who runs the intro, the tutorial and
+// belays in rope mode. Same body system as the climber (BodyRig) with the ibex head (bare: nothing
+// competes with the horns), a white CHIRAL SPORTS INSTRUCTOR tee with pink prints (chest mark +
+// INSTRUCTOR, CHIRAL SPORTS / INSTRUCTOR down the spine), charcoal pants and approach shoes.
 //
 // Poses: idle (weight shift, breathing, look-arounds), wave, point (at lookAt), clap, cheer,
 // think (hand on chin), belay (guide hand on the rope, brake hand low, device on the harness).
@@ -15,15 +16,16 @@ import type { WallFrame } from './wall-frame';
 import { BONE, BodyRig, createBodyGoal, type BodyGoal, type LimbGoal } from './climber';
 import { createGuideHead, disposeHead, headBlinkWeights, setHeadBlink } from './heads/index';
 
+/** Instructor kit: white tee + pink prints (readable on the dark gym), charcoal pants. */
 const STAFF: ColorwayDef = {
-  id: 'ember',
-  name: 'Staff',
+  id: 'white',
+  name: 'Instructor',
   unlock: { kind: 'free' },
-  top: PALETTE.signal,
+  top: '#F2F0EB',
   bottom: '#24272C',
-  shoe: '#4A4F57',
+  shoe: '#3A3E45',
   shoeAccent: PALETTE.signal,
-  accent: PALETTE.chalk,
+  accent: PALETTE.signal,
 };
 
 const SIGN = [-1, 1] as const;
@@ -98,9 +100,9 @@ export class GuideModel extends THREE.Group {
   constructor() {
     super();
     this.name = 'guide';
-    this.rig = new BodyRig({ style: 'staff', shoe: 'approach', chalkBag: false, belt: false, tieIn: 'device', beanie: true });
+    this.rig = new BodyRig({ style: 'staff', shoe: 'approach', chalkBag: false, belt: false, tieIn: 'device' });
     // no chalk on the guide's hands (chalk colour = skin)
-    this.rig.setPalette(STAFF, SKIN_TONE, { top2: '#2B2D31', harness: PALETTE.signal });
+    this.rig.setPalette(STAFF, SKIN_TONE, { top2: '#2B2D31', harness: '#2B2D31' });
     this.add(this.rig.root);
     this.head = createGuideHead();
     this.head.rotation.y = Math.PI;

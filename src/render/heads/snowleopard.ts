@@ -28,7 +28,7 @@ export function catSdf(o: { muzzleZ: number; cheekW: number; brow: number }): Sd
     d = smin(d, cheek(x, y, z), 0.04);
     d = smin(d, browR(x, y, z), 0.018);
     const ax = Math.abs(x);
-    d = smax(d, -(Math.hypot(ax - eyeC[0], y - eyeC[1], z - eyeC[2]) - 0.0205), 0.01);
+    d = smax(d, -(Math.hypot(ax - eyeC[0], y - eyeC[1], z - eyeC[2]) - 0.019), 0.01);
     // philtrum + mouth line under the pads
     d = smax(d, -sdEllipsoid(x, y - 0.155, z - (o.muzzleZ + 0.038), 0.0025, 0.012, 0.01), 0.004);
     return d;
@@ -140,10 +140,10 @@ export function buildSnowLeopard(): THREE.Group {
   }
   kit.addEyes({
     center: [0.04, 0.207, 0.08],
-    radius: 0.0205,
-    gaze: [0.32, 0.04, 0.95],
+    radius: 0.0178,
+    gaze: [0.36, 0.04, 0.93],
     style: { iris: '#A9D2C4', ring: '#4E7C70', pupil: 'round', surround: '#22201E', irisR: 0.44 },
-    lids: { upper: 22, lower: -32, frown: 6, color: '#3A3836', rim: '#141312' },
+    lids: { upper: 19, lower: -29, frown: 7, color: '#3A3836', rim: '#141312' },
   });
   return kit.build(
     'snowleopard',

@@ -53,7 +53,7 @@ export function buildMarmot(): THREE.Group {
     d = smin(d, noseB(x, y, z), 0.014);
     d = smin(d, chin(x, y, z), 0.02);
     const ax = Math.abs(x);
-    d = smax(d, -(Math.hypot(ax - eyeC[0], y - eyeC[1], z - eyeC[2]) - 0.0158), 0.008);
+    d = smax(d, -(Math.hypot(ax - eyeC[0], y - eyeC[1], z - eyeC[2]) - 0.0152), 0.008);
     // lip split under the nose
     d = smax(d, -sdEllipsoid(x, y - 0.152, z - 0.12, 0.003, 0.012, 0.012), 0.005);
     return d;
@@ -130,10 +130,10 @@ export function buildMarmot(): THREE.Group {
   }
   kit.addEyes({
     center: [0.052, 0.222, 0.058],
-    radius: 0.0158,
-    gaze: [0.62, 0.12, 0.78],
+    radius: 0.0142,
+    gaze: [0.66, 0.12, 0.74],
     style: { iris: '#2E1E12', ring: '#0C0806', pupil: 'round', surround: '#0C0806', irisR: 0.46 },
-    lids: { upper: 34, lower: -40, frown: -4, color: '#5C4632', rim: '#2A1E14' },
+    lids: { upper: 28, lower: -36, frown: -2, color: '#5C4632', rim: '#2A1E14' },
   });
   return kit.build('marmot', { sheen: '#8A7058', roughness: 0.88 }, { roughness: 0.3, clearcoat: 0.6 });
 }

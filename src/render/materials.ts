@@ -11,7 +11,7 @@
 //  • outfit atlas, eye, pattern and rope textures are drawn on canvases at load time.
 
 import * as THREE from 'three';
-import { BRAND, FONTS, PALETTE } from '../config/brand';
+import { BRAND, PALETTE } from '../config/brand';
 
 // ───────────────────────────── canvas helpers ─────────────────────────────
 
@@ -23,35 +23,7 @@ export function makeCanvas(w: number, h: number): HTMLCanvasElement {
 }
 
 function ctx2d(c: HTMLCanvasElement): CanvasRenderingContext2D {
-  return c.getContext('2d') as CanvasRenderingContext2D;
-}
-
-/** CHIRAL logo mark (two mirrored shards) at (x, y) top-left, `size` px square. */
-export function drawLogoMark(g: CanvasRenderingContext2D, x: number, y: number, size: number, style: string): void {
-  g.save();
-  g.translate(x, y);
-  g.scale(size / 64, size / 64);
-  g.fillStyle = style;
-  for (const d of BRAND.logoPaths) g.fill(new Path2D(d));
-  g.restore();
-}
-
-/** Tracked uppercase wordmark, centred on (cx, cy). */
-export function drawWordmark(g: CanvasRenderingContext2D, text: string, cx: number, cy: number, px: number, style: string, tracking = 0.18): void {
-  g.save();
-  g.fillStyle = style;
-  g.font = `800 ${px}px ${FONTS.display}`;
-  g.textBaseline = 'middle';
-  const chars = [...text];
-  const widths = chars.map((ch) => g.measureText(ch).width);
-  const track = px * tracking;
-  const total = widths.reduce((a, b) => a + b, 0) + track * (chars.length - 1);
-  let x = cx - total / 2;
-  for (let i = 0; i < chars.length; i++) {
-    g.fillText(chars[i], x, cy);
-    x += widths[i] + track;
-  }
-  g.restore();
+  return c.getContext('2d', { willReadFrequently: true }) as CanvasRenderingContext2D;
 }
 
 function canvasTexture(c: HTMLCanvasElement, srgb: boolean): THREE.CanvasTexture {
@@ -80,14 +52,104 @@ function injectRim(shader: { uniforms: Record<string, { value: unknown }>; fragm
     .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>\n${RIM_CODE}`);
 }
 
+// ───────────────────────────── brand glyphs (vector, font independent) ─────────────────────────────
+//
+// Every CHIRAL print is drawn from the official outlined paths in BRAND (never a font): the mark,
+// the CHIRAL SPORTS wordmark, and words set from the wordmark's own glyphs (plus N and U drawn to
+// the same 13.1-unit stem, 70-unit cap height geometry) such as INSTRUCTOR.
+
+const WM = BRAND.wordmarkPaths;
+/** Glyph outlines in wordmark units (cap height 70, baseline 70.9) with their horizontal extent. */
+const GLYPHS: Record<string, { d: string; x0: number; x1: number }> = {
+  C: { d: WM[0], x0: 0, x1: 61.2 },
+  H: { d: WM[1], x0: 69.6, x1: 125.8 },
+  I: { d: WM[2], x0: 137.1, x1: 150.2 },
+  R: { d: WM[3], x0: 161.4, x1: 215.7 },
+  A: { d: WM[4], x0: 220, x1: 288.2 },
+  L: { d: WM[5], x0: 295.4, x1: 341.7 },
+  S: { d: WM[6], x0: 371.4, x1: 427.7 },
+  P: { d: WM[7], x0: 437, x1: 490.7 },
+  O: { d: WM[8], x0: 497.39, x1: 563.3 },
+  T: { d: WM[10], x0: 630.09, x1: 684.79 },
+  N: { d: 'M0,.9h13.4l30.6,48.1V.9h13v70h-13.4L13,22.8v48.1H0V.9Z', x0: 0, x1: 57 },
+  U: { d: 'M0,.9h13.1v42.3c0,10.4,5.7,15.6,15.4,15.6s15.4-5.2,15.4-15.6V.9h13.1v43c0,17.7-10.9,28-28.5,28S0,61.6,0,43.9V.9Z', x0: 0, x1: 57 },
+};
+/** Height of a glyph run (wordmark units, including the round overshoot). */
+export const GLYPH_H = 71.9;
+
+/** A word set from the brand glyphs: one Path2D in wordmark units (x from 0), and its width. */
+export function glyphRun(text: string, tracking = 11): { path: Path2D; width: number } {
+  const p = new Path2D();
+  let x = 0;
+  for (const ch of text.toUpperCase()) {
+    const gl = GLYPHS[ch];
+    if (!gl) {
+      x += 34;
+      continue;
+    }
+    p.addPath(new Path2D(gl.d), new DOMMatrix([1, 0, 0, 1, x - gl.x0, 0]));
+    x += gl.x1 - gl.x0 + tracking;
+  }
+  return { path: p, width: Math.max(0, x - tracking) };
+}
+
+/** The official CHIRAL SPORTS wordmark as one Path2D (viewBox units). */
+export function wordmarkPath(): Path2D {
+  const p = new Path2D();
+  for (const d of BRAND.wordmarkPaths) p.addPath(new Path2D(d));
+  return p;
+}
+
+/** The official CHIRAL mark as one Path2D (viewBox units). */
+export function markPath(): Path2D {
+  const p = new Path2D();
+  for (const d of BRAND.markPaths) p.addPath(new Path2D(d));
+  return p;
+}
+
+/** CHIRAL mark at (x, y) top-left, `w` px wide (aspect from the official viewBox). */
+export function drawMark(g: CanvasRenderingContext2D, x: number, y: number, w: number, style: string): void {
+  g.save();
+  g.translate(x, y);
+  const s = w / BRAND.markViewBox[0];
+  g.scale(s, s);
+  g.fillStyle = style;
+  g.fill(markPath());
+  g.restore();
+}
+
+/** Artwork canvas (white on transparent) of w × h px. */
+function artwork(w: number, h: number, draw: (g: CanvasRenderingContext2D) => void): HTMLCanvasElement {
+  const c = makeCanvas(Math.max(1, Math.round(w)), Math.max(1, Math.round(h)));
+  const g = ctx2d(c);
+  g.fillStyle = '#fff';
+  draw(g);
+  return c;
+}
+
+/**
+ * Vertical text artwork: `path` (width × GLYPH_H units) rotated 90° clockwise, so it reads top to
+ * bottom with the letter tops facing right. `px` = pixels per unit.
+ */
+function verticalArt(path: Path2D, width: number, px: number): HTMLCanvasElement {
+  return artwork(GLYPH_H * px, width * px, (g) => {
+    g.translate(GLYPH_H * px, 0);
+    g.rotate(Math.PI / 2);
+    g.scale(px, px);
+    g.fill(path);
+  });
+}
+
 // ───────────────────────────── outfit atlas ─────────────────────────────
 
 /** UV rectangles of the outfit atlas: [u0, v0, u1, v1] (v up, three.js convention). */
 export type UvRect = [number, number, number, number];
 
-const ATLAS = 1024;
+/** Layout space (rects are authored in a 1024 grid); the canvas itself is painted at RES. */
+const LAYOUT = 1024;
+const RES = 2048;
 function rect(x: number, y: number, w: number, h: number): UvRect {
-  return [x / ATLAS, 1 - (y + h) / ATLAS, (x + w) / ATLAS, 1 - y / ATLAS];
+  return [x / LAYOUT, 1 - (y + h) / LAYOUT, (x + w) / LAYOUT, 1 - y / LAYOUT];
 }
 
 /** Atlas layout shared by geometry (uv rects) and the painter. */
@@ -105,17 +167,157 @@ export const ATLAS_RECTS = {
   blank: rect(1000, 1000, 16, 16),
 } as const;
 
+/** 'climber' = CHIRAL SPORTS tee; 'staff' = CHIRAL SPORTS INSTRUCTOR tee (Steini). */
 export type OutfitStyle = 'climber' | 'staff';
 
+/** Torso cross-section at a rest height above the pelvis: half width, front and back depth (m). */
+export interface TorsoSection {
+  hw: number;
+  f: number;
+  b: number;
+}
+
 /**
- * Paints the outfit detail atlas. Channels: R = seam/stitch darkening, G = print (logo, trims)
- * in the print colour, B = shoe-accent print. Black = plain fabric.
+ * The torso tube the atlas wraps (climber.ts builds it): u = 0 front centre → .25 character left →
+ * .5 back centre → .75 right, superellipse sections (exponent TORSO_E) over rest heights
+ * TORSO_Y0 … TORSO_Y1. The print painter uses it to place artwork by real surface distance.
  */
-export function createOutfitAtlas(style: OutfitStyle): THREE.CanvasTexture {
-  const c = makeCanvas(ATLAS, ATLAS);
+export const TORSO_E = 2.35;
+export const TORSO_Y0 = -0.14;
+export const TORSO_Y1 = 0.56;
+
+interface TorsoPrint {
+  art: HTMLCanvasElement;
+  /** Centred on the front or the back centre line. */
+  centre: 'front' | 'back';
+  /** Top edge (rest height above the pelvis, m) and the size on the fabric (m). */
+  top: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Paints artwork into the G (print) channel of the torso rect so that it lands on the fabric at its
+ * true size and aspect: every atlas texel is mapped back to (arc length from the centre line,
+ * height) on the torso surface and the artwork is supersampled there. This undoes the uneven
+ * superellipse parameterisation (prints near the centre lines would otherwise stretch) and wraps
+ * across the u = 0 seam at the front centre.
+ */
+function paintTorsoPrints(g: CanvasRenderingContext2D, section: (y: number) => TorsoSection, prints: TorsoPrint[]): void {
+  const [u0, v0, u1, v1] = ATLAS_RECTS.torso;
+  const X0 = Math.round(u0 * RES);
+  const W = Math.round((u1 - u0) * RES);
+  const Ytop = Math.round((1 - v1) * RES);
+  const H = Math.round((v1 - v0) * RES);
+  const img = g.getImageData(X0, Ytop, W, H);
+  const data = img.data;
+  const N = 720;
+  const table = new Float32Array(N + 1);
+  const pt = (a: number, s: TorsoSection, out: number[]) => {
+    const cz = superCosM(a);
+    out[0] = -superSinM(a) * s.hw;
+    out[1] = -cz * (cz >= 0 ? s.f : s.b);
+  };
+  const p0 = [0, 0];
+  const p1 = [0, 0];
+  const SS = 3; // supersamples per axis
+  for (const pr of prints) {
+    const ag = ctx2d(pr.art);
+    const aw = pr.art.width;
+    const ah = pr.art.height;
+    const ad = ag.getImageData(0, 0, aw, ah).data;
+    const alphaAt = (x: number, y: number): number => {
+      // bilinear sample of the artwork alpha (0 outside)
+      const fx = x - 0.5;
+      const fy = y - 0.5;
+      const ix = Math.floor(fx);
+      const iy = Math.floor(fy);
+      const tx = fx - ix;
+      const ty = fy - iy;
+      const at = (cx: number, cy: number) => (cx < 0 || cy < 0 || cx >= aw || cy >= ah ? 0 : ad[(cy * aw + cx) * 4 + 3]);
+      const a = at(ix, iy) + (at(ix + 1, iy) - at(ix, iy)) * tx;
+      const b = at(ix, iy + 1) + (at(ix + 1, iy + 1) - at(ix, iy + 1)) * tx;
+      return (a + (b - a) * ty) / 255;
+    };
+    for (let py = 0; py < H; py++) {
+      // surface heights covered by this texel row
+      const yA = TORSO_Y0 + (1 - py / H) * (TORSO_Y1 - TORSO_Y0);
+      const yB = TORSO_Y0 + (1 - (py + 1) / H) * (TORSO_Y1 - TORSO_Y0);
+      if (yB > pr.top || yA < pr.top - pr.height) continue;
+      const sec = section((yA + yB) * 0.5);
+      // arc-length table around this section
+      pt(0, sec, p0);
+      table[0] = 0;
+      for (let i = 1; i <= N; i++) {
+        pt((i / N) * Math.PI * 2, sec, p1);
+        table[i] = table[i - 1] + Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+        p0[0] = p1[0];
+        p0[1] = p1[1];
+      }
+      const perim = table[N];
+      const sBack = table[N / 2];
+      const arcAt = (u: number): number => {
+        const f = (((u % 1) + 1) % 1) * N;
+        const i = Math.min(N - 1, Math.floor(f));
+        const s = table[i] + (table[i + 1] - table[i]) * (f - i);
+        if (pr.centre === 'back') return s - sBack;
+        return s > perim * 0.5 ? s - perim : s;
+      };
+      // only columns near the centre line can be covered: bound by the arc width
+      for (let px = 0; px < W; px++) {
+        const uc = (px + 0.5) / W;
+        const sc = arcAt(uc);
+        if (Math.abs(sc) > pr.width * 0.5 + 0.02) continue;
+        let cov = 0;
+        for (let j = 0; j < SS; j++) {
+          const y = yA + (yB - yA) * ((j + 0.5) / SS);
+          const ay = ((pr.top - y) / pr.height) * ah;
+          if (ay < -1 || ay > ah + 1) continue;
+          for (let i = 0; i < SS; i++) {
+            const s = arcAt((px + (i + 0.5) / SS) / W);
+            const ax = (s / pr.width + 0.5) * aw;
+            cov += alphaAt(ax, ay);
+          }
+        }
+        cov /= SS * SS;
+        if (cov <= 0) continue;
+        const k = (py * W + px) * 4 + 1;
+        data[k] = Math.min(255, data[k] + cov * 255);
+      }
+    }
+  }
+  g.putImageData(img, X0, Ytop);
+}
+
+function superCosM(a: number): number {
+  const c = Math.cos(a);
+  return Math.sign(c) * Math.pow(Math.abs(c), 2 / TORSO_E);
+}
+function superSinM(a: number): number {
+  const s = Math.sin(a);
+  return Math.sign(s) * Math.pow(Math.abs(s), 2 / TORSO_E);
+}
+
+const atlasCache = new Map<OutfitStyle, THREE.CanvasTexture>();
+
+/**
+ * Paints the outfit detail atlas (shared per style; never disposed by a rig). Channels: R = seam /
+ * stitch darkening, G = print in the print colour (tee prints, chalk-bag mark in its own colour),
+ * B = shoe-accent print. Black = plain fabric.
+ *
+ * Prints (assets/reference/tee-*.webp): the CHIRAL mark small and centred on the chest; CHIRAL SPORTS
+ * set vertically down the spine (rotated 90° clockwise, reading top to bottom). The staff tee adds
+ * INSTRUCTOR in small caps under the chest mark and under the back wordmark.
+ */
+export function createOutfitAtlas(style: OutfitStyle, section: (y: number) => TorsoSection): THREE.CanvasTexture {
+  const hit = atlasCache.get(style);
+  if (hit) return hit;
+  const c = makeCanvas(RES, RES);
   const g = ctx2d(c);
   g.fillStyle = '#000';
-  g.fillRect(0, 0, ATLAS, ATLAS);
+  g.fillRect(0, 0, RES, RES);
+  // everything below is authored in the 1024 layout grid
+  g.scale(RES / LAYOUT, RES / LAYOUT);
   g.globalCompositeOperation = 'lighter';
   const R = (a: number) => `rgba(255,0,0,${a})`;
   const G = (a: number) => `rgba(0,255,0,${a})`;
@@ -123,10 +325,10 @@ export function createOutfitAtlas(style: OutfitStyle): THREE.CanvasTexture {
 
   // helpers in region space: (u, v) ∈ [0,1]², v up
   const region = (r: UvRect) => {
-    const x0 = r[0] * ATLAS;
-    const x1 = r[2] * ATLAS;
-    const yTop = (1 - r[3]) * ATLAS;
-    const yBot = (1 - r[1]) * ATLAS;
+    const x0 = r[0] * LAYOUT;
+    const x1 = r[2] * LAYOUT;
+    const yTop = (1 - r[3]) * LAYOUT;
+    const yBot = (1 - r[1]) * LAYOUT;
     return {
       X: (u: number) => x0 + (x1 - x0) * u,
       Y: (v: number) => yBot + (yTop - yBot) * v,
@@ -136,9 +338,9 @@ export function createOutfitAtlas(style: OutfitStyle): THREE.CanvasTexture {
       yTop,
     };
   };
-  const line = (pts: [number, number][], style: string, width: number, dash?: number[]) => {
+  const line = (pts: [number, number][], stroke: string, width: number, dash?: number[]) => {
     g.save();
-    g.strokeStyle = style;
+    g.strokeStyle = stroke;
     g.lineWidth = width;
     g.lineCap = 'round';
     g.lineJoin = 'round';
@@ -166,7 +368,7 @@ export function createOutfitAtlas(style: OutfitStyle): THREE.CanvasTexture {
   {
     const r = region(ATLAS_RECTS.torso);
     // geometry: torso tube spans y −0.14 … 0.56 (0.70 m); tee hem at y = 0.07, waistband 0.035…0.07
-    const vy = (y: number) => (y + 0.14) / 0.7;
+    const vy = (y: number) => (y - TORSO_Y0) / (TORSO_Y1 - TORSO_Y0);
     // side seams of the tee (curving slightly forward toward the armpit)
     for (const us of [0.25, 0.75]) {
       const pts: [number, number][] = [];
@@ -176,33 +378,15 @@ export function createOutfitAtlas(style: OutfitStyle): THREE.CanvasTexture {
       }
       seam(pts);
     }
-    // back yoke (curved) and front panel lines — the "technical" look
+    // shoulder yoke seam across the upper back (the spine print starts just below it)
     {
       const pts: [number, number][] = [];
       for (let k = 0; k <= 30; k++) {
         const u = 0.3 + (0.4 * k) / 30;
         const d = (u - 0.5) / 0.2;
-        pts.push([r.X(u), r.Y(vy(0.39 - 0.035 * (1 - d * d)))]);
+        pts.push([r.X(u), r.Y(vy(0.462 - 0.012 * (1 - d * d)))]);
       }
       seam(pts, 0);
-    }
-    for (const side of [-1, 1]) {
-      // front princess lines from the armpit curving to the hem
-      const pts: [number, number][] = [];
-      for (let k = 0; k <= 20; k++) {
-        const t = k / 20;
-        const u = side > 0 ? 0.2 - 0.09 * Math.sin(t * Math.PI * 0.5) : 0.8 + 0.09 * Math.sin(t * Math.PI * 0.5);
-        pts.push([r.X(u), r.Y(vy(0.42 - (0.42 - 0.075) * t))]);
-      }
-      seam(pts);
-      // back panel lines
-      const pb: [number, number][] = [];
-      for (let k = 0; k <= 20; k++) {
-        const t = k / 20;
-        const u = side > 0 ? 0.33 + 0.05 * t : 0.67 - 0.05 * t;
-        pb.push([r.X(u), r.Y(vy(0.355 - (0.355 - 0.075) * t))]);
-      }
-      seam(pb);
     }
     // hem: double needle
     hseam(r, vy(0.083), 0, 1, true);
@@ -223,37 +407,11 @@ export function createOutfitAtlas(style: OutfitStyle): THREE.CanvasTexture {
       g.restore();
       // centre seams (front rise + back rise)
       for (const uc of [0, 0.5, 1]) seam([[r.X(uc), r.Y(vy(-0.12))], [r.X(uc), r.Y(vy(0.03))]], 0);
-      // back pocket seam line + tiny tab
+      // back pocket welts
       for (const uc of [0.43, 0.57]) {
         line([[r.X(uc - 0.04), r.Y(vy(-0.005))], [r.X(uc + 0.04), r.Y(vy(-0.005))]], R(0.4), 2.5);
       }
     }
-    // chest mark (character's left chest: u ≈ 0.1)
-    {
-      const cx = r.X(0.095);
-      const cy = r.Y(vy(0.36));
-      if (style === 'staff') {
-        drawLogoMark(g, cx - 18, cy - 22, 36, G(1));
-        drawWordmark(g, 'STAFF', cx, cy + 26, 15, G(1), 0.3);
-      } else {
-        drawLogoMark(g, cx - 15, cy - 16, 30, G(1));
-      }
-    }
-    // back print: logo mark between the shoulder blades + wordmark (read from the gameplay camera)
-    {
-      const cx = r.X(0.5);
-      if (style === 'staff') {
-        drawWordmark(g, BRAND.name, cx, r.Y(vy(0.35)), 46, G(1), 0.22);
-        drawWordmark(g, BRAND.guideName.toUpperCase() + ' · STAFF', cx, r.Y(vy(0.29)), 19, G(0.95), 0.32);
-        drawLogoMark(g, cx - 14, r.Y(vy(0.24)) - 14, 28, G(1));
-      } else {
-        drawLogoMark(g, cx - 20, r.Y(vy(0.355)) - 20, 40, G(1));
-        drawWordmark(g, BRAND.name, cx, r.Y(vy(0.305)), 22, G(0.95), 0.4);
-      }
-    }
-    // small hem tab (left hip)
-    g.fillStyle = G(1);
-    g.fillRect(r.X(0.77) - 6, r.Y(vy(0.105)) - 10, 12, 20);
   }
 
   // ── sleeve (u around, v: shoulder 1 → elbow 0) ──
@@ -263,14 +421,9 @@ export function createOutfitAtlas(style: OutfitStyle): THREE.CanvasTexture {
     seam([[r.X(0.25), r.Y(0)], [r.X(0.25), r.Y(1)]]);
     // hem (double needle) near the sleeve end
     for (const dv of [0.1, 0.16]) line([[r.X(0), r.Y(dv)], [r.X(1), r.Y(dv)]], R(0.5), 1.3, [4, 3]);
-    // raglan seam near the top
+    // set-in sleeve seam near the top
     line([[r.X(0), r.Y(0.86)], [r.X(1), r.Y(0.86)]], R(0.4), 3);
     line([[r.X(0), r.Y(0.82)], [r.X(1), r.Y(0.82)]], R(0.45), 1.2, [4, 3]);
-    // tiny print stripe on the outer sleeve
-    if (style === 'staff') {
-      g.fillStyle = G(1);
-      g.fillRect(r.X(0.0) - 2, r.Y(0.5) - 12, 4, 24);
-    }
   }
 
   // ── pants: thigh (v: knee 0 → hip 1) and shin (v: ankle 0 → knee 1); u: 0 front, .25 lateral ──
@@ -302,8 +455,6 @@ export function createOutfitAtlas(style: OutfitStyle): THREE.CanvasTexture {
       draw(pts, t);
       draw(pts2, s);
     }
-    // thigh logo (left thigh is mirrored geometry: the mark sits on the lateral side at u = .25)
-    drawLogoMark(g, t.X(0.25) + 10, t.Y(0.82) - 12, 24, G(1));
     // reinforced seat seam at the top of the thigh
     line([[t.X(0.5), t.Y(0.95)], [t.X(1), t.Y(0.95)]], R(0.35), 2.5);
   }
@@ -323,27 +474,32 @@ export function createOutfitAtlas(style: OutfitStyle): THREE.CanvasTexture {
   // ── shoe (u around the foot section: 0 = sole centre, .25 medial…; v: heel 0 → toe 1) ──
   {
     const r = region(ATLAS_RECTS.shoe);
-    // velcro strap teeth texture is geometry; here: rand line stitch + toe patch outline + heel logo
-    for (const vv of [0.02, 0.98]) line([[r.X(0), r.Y(vv)], [r.X(1), r.Y(vv)]], R(0.0), 1);
     // stitching around the upper (follows the rand top): u ≈ .2 and .8 bands
     for (const uu of [0.2, 0.8]) line([[r.X(uu), r.Y(0.05)], [r.X(uu), r.Y(0.96)]], R(0.55), 1.4, [4, 3]);
     // vamp seam across the instep
     line([[r.X(0.3), r.Y(0.58)], [r.X(0.7), r.Y(0.58)]], R(0.4), 2.5);
-    // heel tab logo stripe (shoe accent)
+    // heel tab (shoe accent) with the CHIRAL mark
     g.fillStyle = B(1);
     g.fillRect(r.X(0.44), r.Y(0.12), r.X(0.56) - r.X(0.44), r.Y(0.0) - r.Y(0.12));
-    drawLogoMark(g, r.X(0.5) - 9, r.Y(0.3) - 9, 18, B(1));
-    // side accent swoosh-free stripe: a clean technical band along the lateral midsole
+    drawMark(g, r.X(0.5) - 11, r.Y(0.3) - 6, 22, B(1));
+    // clean technical band along the lateral midsole
     line([[r.X(0.12), r.Y(0.2)], [r.X(0.12), r.Y(0.75)]], B(1), 6);
   }
 
-  // ── chalk bag: logo patch + seam ──
+  // ── chalk bag: one CHIRAL mark centred on the outward face (u = 0, across the seam) + seam ──
   {
     const r = region(ATLAS_RECTS.bag);
     seam([[r.X(0.5), r.Y(0)], [r.X(0.5), r.Y(1)]]);
-    // print sits on the outward face (u = 0)
-    drawLogoMark(g, r.X(0.0) + 4, r.Y(0.62) - 15, 30, G(1));
-    drawLogoMark(g, r.X(1.0) - 34, r.Y(0.62) - 15, 30, G(1));
+    const mw = 0.2 * r.w;
+    const mh = (mw * BRAND.markViewBox[1]) / BRAND.markViewBox[0];
+    for (const ux of [0, 1]) {
+      g.save();
+      g.beginPath();
+      g.rect(r.x0, r.yTop, r.w, r.h);
+      g.clip();
+      drawMark(g, r.X(ux) - mw / 2, r.Y(0.6) - mh / 2, mw, G(1));
+      g.restore();
+    }
     hseam(r, 0.12, 0, 1, false);
   }
   // ── webbing (harness): bar-tack stitching and edges ──
@@ -368,7 +524,50 @@ export function createOutfitAtlas(style: OutfitStyle): THREE.CanvasTexture {
     }
     g.restore();
   }
-  return canvasTexture(c, false);
+
+  // ── tee prints (true size on the fabric) ──
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.globalCompositeOperation = 'source-over';
+  const [mvw, mvh] = BRAND.markViewBox;
+  const prints: TorsoPrint[] = [];
+  // chest: the mark, small and centred (≈ a quarter of the way down from the collar)
+  const markW = style === 'staff' ? 0.078 : 0.072;
+  const markH = (markW * mvh) / mvw;
+  const markTop = style === 'staff' ? 0.425 : 0.41;
+  const markArt = artwork(640, (640 * mvh) / mvw, (g2) => {
+    g2.scale(640 / mvw, 640 / mvw);
+    g2.fill(markPath());
+  });
+  prints.push({ art: markArt, centre: 'front', top: markTop, width: markW, height: markH });
+  // back: CHIRAL SPORTS down the spine, starting just under the yoke
+  const [wvw, wvh] = BRAND.wordmarkViewBox;
+  const wmLen = style === 'staff' ? 0.2 : 0.215;
+  const wmTop = 0.445;
+  const wmW = (wmLen * wvh) / wvw;
+  prints.push({ art: verticalArt(wordmarkPath(), wvw, 1200 / wvw), centre: 'back', top: wmTop, width: wmW, height: wmLen });
+  if (style === 'staff') {
+    const run = glyphRun('INSTRUCTOR', 26);
+    // chest: small caps under the mark
+    const capH = 0.0098;
+    const chestW = (capH * run.width) / GLYPH_H;
+    const chestArt = artwork(900, (900 * GLYPH_H) / run.width, (g2) => {
+      g2.scale(900 / run.width, 900 / run.width);
+      g2.fill(run.path);
+    });
+    prints.push({ art: chestArt, centre: 'front', top: markTop - markH - 0.016, width: chestW, height: capH });
+    // back: continues down the spine under the wordmark, smaller
+    const backH = wmW * 0.62;
+    const backLen = (backH * run.width) / GLYPH_H;
+    prints.push({ art: verticalArt(run.path, run.width, 900 / run.width), centre: 'back', top: wmTop - wmLen - 0.022, width: backH, height: backLen });
+  }
+  paintTorsoPrints(g, section, prints);
+
+  const tex = canvasTexture(c, false);
+  tex.generateMipmaps = true;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.anisotropy = 8;
+  atlasCache.set(style, tex);
+  return tex;
 }
 
 // ───────────────────────────── body material ─────────────────────────────
@@ -399,6 +598,8 @@ export interface BodyUniforms {
   /** x roughness, y sheen, z metalness, w unused */
   uMat: { value: THREE.Vector4[] };
   uPrint: { value: THREE.Color };
+  /** Print colour on the chalk bag (the CHIRAL mark; pink on the black bag by default). */
+  uBagPrint: { value: THREE.Color };
   uAccent2: { value: THREE.Color };
   uChalk: { value: THREE.Color };
   uDetail: { value: THREE.Texture | null };
@@ -420,12 +621,13 @@ export function createBodyMaterial(atlas: THREE.Texture): BodyMaterial {
     uPal: { value: Array.from({ length: REGION_COUNT }, () => new THREE.Color(0.5, 0.5, 0.5)) },
     uMat: { value: Array.from({ length: REGION_COUNT }, () => new THREE.Vector4(0.8, 0.6, 0, 0)) },
     uPrint: { value: new THREE.Color(PALETTE.signal) },
+    uBagPrint: { value: new THREE.Color(PALETTE.signal) },
     uAccent2: { value: new THREE.Color(PALETTE.signal) },
     uChalk: { value: new THREE.Color(PALETTE.chalk) },
     uDetail: { value: atlas },
   };
   mat.userData.body = u;
-  mat.customProgramCacheKey = () => 'jgu-body-v2';
+  mat.customProgramCacheKey = () => 'jgu-body-v3';
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, u);
     injectRim(shader);
@@ -436,7 +638,10 @@ export function createBodyMaterial(atlas: THREE.Texture): BodyMaterial {
         attribute vec4 aAux;
         uniform vec3 uPal[${REGION_COUNT}];
         uniform vec4 uMat[${REGION_COUNT}];
+        uniform vec3 uPrint;
+        uniform vec3 uBagPrint;
         varying vec3 vRegionColor;
+        varying vec3 vPrintColor;
         varying vec4 vMatP;
         varying vec3 vBodyAux;
         varying vec2 vDetailUv;`,
@@ -446,6 +651,7 @@ export function createBodyMaterial(atlas: THREE.Texture): BodyMaterial {
         `#include <uv_vertex>
         int rid = int(aAux.x + 0.5);
         vRegionColor = uPal[rid];
+        vPrintColor = (rid == ${REGION.bag} || rid == ${REGION.bagRim}) ? uBagPrint : uPrint;
         vMatP = uMat[rid];
         vBodyAux = aAux.yzw;
         vDetailUv = uv;`,
@@ -454,11 +660,11 @@ export function createBodyMaterial(atlas: THREE.Texture): BodyMaterial {
       .replace(
         '#include <common>',
         `#include <common>
-        uniform vec3 uPrint;
         uniform vec3 uAccent2;
         uniform vec3 uChalk;
         uniform sampler2D uDetail;
         varying vec3 vRegionColor;
+        varying vec3 vPrintColor;
         varying vec4 vMatP;
         varying vec3 vBodyAux;
         varying vec2 vDetailUv;`,
@@ -467,7 +673,7 @@ export function createBodyMaterial(atlas: THREE.Texture): BodyMaterial {
         '#include <color_fragment>',
         `vec4 det = texture2D(uDetail, vDetailUv);
         vec3 bcol = vRegionColor;
-        bcol = mix(bcol, uPrint, det.g * vBodyAux.z);
+        bcol = mix(bcol, vPrintColor, det.g * vBodyAux.z);
         bcol = mix(bcol, uAccent2, det.b);
         bcol *= 1.0 - det.r * 0.55;
         float chalkAmt = vBodyAux.x;
@@ -502,6 +708,11 @@ export interface FurOptions {
   patternColor?: string;
   /** Pattern scale (repeats per meter). */
   patternScale?: number;
+  /**
+   * Which aux channel masks the fine strand detail: 'z' (default, with the sheen) or 'w' (skin
+   * heads: strands only on hair, sheen still from z; no pattern texture then).
+   */
+  strandMask?: 'z' | 'w';
 }
 
 /**
@@ -517,14 +728,15 @@ export function createFurMaterial(o: FurOptions = {}): THREE.MeshPhysicalMateria
     sheenRoughness: 0.45,
     sheenColor: new THREE.Color(o.sheen ?? '#d9c8b0'),
   });
-  const hasPattern = !!o.pattern;
+  const strandW = o.strandMask === 'w';
+  const hasPattern = !!o.pattern && !strandW;
   const uniforms = {
     uPattern: { value: o.pattern ?? null },
     uPatternColor: { value: new THREE.Color(o.patternColor ?? '#2a2622') },
     uPatternScale: { value: o.patternScale ?? 9 },
     uStrands: { value: createStrandTexture() },
   };
-  mat.customProgramCacheKey = () => `jgu-fur3-${hasPattern ? 1 : 0}`;
+  mat.customProgramCacheKey = () => `jgu-fur4-${hasPattern ? 1 : 0}${strandW ? 'w' : 'z'}`;
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
     injectRim(shader, 1.2);
@@ -564,7 +776,11 @@ export function createFurMaterial(o: FurOptions = {}): THREE.MeshPhysicalMateria
           // fine fur strands: triplanar luminance detail on furry areas (sheen mask)
           vec3 qs = vObjPos * 42.0;
           float st = texture2D(uStrands, qs.zy).r * an.x + texture2D(uStrands, qs.xz).r * an.y + texture2D(uStrands, qs.xy).r * an.z;
-          diffuseColor.rgb *= 1.0 + (st - 0.5) * 0.55 * vFur.z;
+          diffuseColor.rgb *= 1.0 + (st - 0.5) * 0.55 * ${strandW ? 'vFur.w' : 'vFur.z'};
+          // broad, soft coat variation (the same tile magnified: blurred streaks a few cm long)
+          vec3 qm = vObjPos * 3.1;
+          float mo = texture2D(uStrands, qm.zy).r * an.x + texture2D(uStrands, qm.xz).r * an.y + texture2D(uStrands, qm.xy).r * an.z;
+          diffuseColor.rgb *= 1.0 + (mo - 0.5) * 0.4 * ${strandW ? 'vFur.w' : 'vFur.z'};
         }
         ${
           hasPattern
@@ -703,6 +919,163 @@ export function createEyeMaterial(s: EyeStyle): THREE.MeshPhysicalMaterial {
     clearcoatRoughness: 0.04,
     envMapIntensity: 1.4,
   });
+}
+
+// ───────────────────────────── CHIRAL SPORTS cap ─────────────────────────────
+
+/** Cap texture layout: the crown fills rows 0 … CAP_CROWN_ROWS (v = 1 at the top), the brim the rest. */
+export const CAP_TEX = { w: 2048, h: 1024, crownRows: 768 } as const;
+
+export interface CapPrint {
+  /** Crown v (0 band → 1 button) of the embroidery's centre line, its width in u, and v-per-u scale (surface aspect). */
+  v: number;
+  widthU: number;
+  vPerU: number;
+}
+
+let capTex: THREE.CanvasTexture | null = null;
+
+/**
+ * Black six-panel cap (assets/reference/cap-black.webp): cotton twill, six panel seams with top
+ * stitching meeting at the button (front centre seam at u = .5), embroidered eyelets, a stitched
+ * band, a stitched brim, and CHIRAL SPORTS embroidered in white across the two front panels
+ * (official wordmark outlines, satin-stitch shading).
+ */
+export function createCapTexture(print: CapPrint): THREE.CanvasTexture {
+  if (capTex) return capTex;
+  const { w: W, h: H, crownRows: CR } = CAP_TEX;
+  const c = makeCanvas(W, H);
+  const g = ctx2d(c);
+  const fabric = '#17181B';
+  g.fillStyle = fabric;
+  g.fillRect(0, 0, W, H);
+  // twill: fine diagonal ribs at very low contrast
+  g.save();
+  g.globalAlpha = 0.07;
+  g.strokeStyle = '#ffffff';
+  g.lineWidth = 1.2;
+  for (let x = -H; x < W + H; x += 6) {
+    g.beginPath();
+    g.moveTo(x, 0);
+    g.lineTo(x + H * 0.6, H);
+    g.stroke();
+  }
+  g.restore();
+  // soft wear: lighter where the crown is handled (front top) and along the brim edge
+  const crownY = (v: number) => CR * (1 - v);
+  const uX = (u: number) => u * W;
+  const seamLine = (x: number) => {
+    g.save();
+    g.strokeStyle = 'rgba(0,0,0,0.65)';
+    g.lineWidth = 5;
+    g.beginPath();
+    g.moveTo(x, crownY(0));
+    g.lineTo(x, crownY(1));
+    g.stroke();
+    g.strokeStyle = 'rgba(255,255,255,0.10)';
+    g.lineWidth = 1.6;
+    g.setLineDash([7, 5]);
+    for (const off of [-11, 11]) {
+      g.beginPath();
+      g.moveTo(x + off, crownY(0.02));
+      g.lineTo(x + off, crownY(0.97));
+      g.stroke();
+    }
+    g.restore();
+  };
+  for (let k = 0; k <= 6; k++) seamLine(uX(k / 6));
+  // canvas rows per canvas column for equal distances on the fabric
+  const aspect = (print.vPerU * CR) / W;
+  // eyelets: embroidered rings near the top of each panel
+  for (let k = 0; k < 6; k++) {
+    const x = uX((k + 0.5) / 6);
+    const y = crownY(0.8);
+    g.fillStyle = 'rgba(0,0,0,0.75)';
+    g.beginPath();
+    g.ellipse(x, y, 10, 10 * aspect, 0, 0, Math.PI * 2);
+    g.fill();
+    g.strokeStyle = 'rgba(255,255,255,0.14)';
+    g.lineWidth = 3;
+    g.beginPath();
+    g.ellipse(x, y, 12, 12 * aspect, 0, 0, Math.PI * 2);
+    g.stroke();
+  }
+  // band stitching
+  g.save();
+  g.strokeStyle = 'rgba(255,255,255,0.10)';
+  g.lineWidth = 1.6;
+  g.setLineDash([7, 5]);
+  for (const v of [0.035, 0.06]) {
+    g.beginPath();
+    g.moveTo(0, crownY(v));
+    g.lineTo(W, crownY(v));
+    g.stroke();
+  }
+  // brim: concentric stitch rows following the edge (t = 1 at the outer edge)
+  for (let k = 0; k < 7; k++) {
+    const y = CR + (H - CR) * (0.42 + k * 0.08);
+    g.beginPath();
+    g.moveTo(0, y);
+    g.lineTo(W, y);
+    g.stroke();
+  }
+  g.restore();
+  // embroidery: CHIRAL SPORTS centred on the front seam
+  {
+    const [vw, vh] = BRAND.wordmarkViewBox;
+    const tw = print.widthU * W;
+    const sx = tw / vw;
+    const sy = sx * aspect;
+    const th = vh * sy;
+    const x0 = uX(0.5) - tw / 2;
+    const y0 = crownY(print.v) - th / 2;
+    const path = wordmarkPath();
+    g.save();
+    g.translate(x0, y0);
+    g.scale(sx, sy);
+    // raised thread shadow, then the satin fill
+    g.save();
+    g.translate(0, 1.8 / sy);
+    g.fillStyle = 'rgba(0,0,0,0.7)';
+    g.fill(path);
+    g.restore();
+    g.fillStyle = '#F4F2EE';
+    g.fill(path);
+    // satin stitch direction: fine diagonal shading clipped to the letters
+    g.clip(path);
+    g.strokeStyle = 'rgba(120,120,128,0.32)';
+    g.lineWidth = 0.9 / sx;
+    for (let x = -vh; x < vw + vh; x += 3.2 / sx) {
+      g.beginPath();
+      g.moveTo(x, 0);
+      g.lineTo(x + vh * 0.55, vh);
+      g.stroke();
+    }
+    g.restore();
+  }
+  capTex = canvasTexture(c, true);
+  capTex.generateMipmaps = true;
+  capTex.minFilter = THREE.LinearMipmapLinearFilter;
+  capTex.anisotropy = 8;
+  return capTex;
+}
+
+/** Cotton-twill cap material (map from createCapTexture), with the shared character rim. */
+export function createCapMaterial(map: THREE.Texture): THREE.MeshPhysicalMaterial {
+  const mat = new THREE.MeshPhysicalMaterial({
+    map,
+    roughness: 0.94,
+    metalness: 0,
+    specularIntensity: 0.22,
+    sheen: 0.22,
+    sheenRoughness: 0.6,
+    sheenColor: new THREE.Color('#2a2c30'),
+    vertexColors: true,
+  });
+  mat.customProgramCacheKey = () => 'jgu-cap1';
+  // a gentle rim only: the flat bill is often seen edge-on, where a full fresnel rim would grey it out
+  mat.onBeforeCompile = (shader) => injectRim(shader, 0.3);
+  return mat;
 }
 
 // ───────────────────────────── pattern textures (triplanar, R = mask) ─────────────────────────────

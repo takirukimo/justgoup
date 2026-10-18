@@ -22,7 +22,7 @@ export function buildRam(): THREE.Group {
   const jaw = mirrorX(ellipsoid([0.046, 0.15, 0.028], [0.038, 0.048, 0.06], [0.3, 0, 0]));
   const chin = roundCone([0, 0.122, 0.04], [0, 0.126, 0.144], 0.034, 0.028);
   const boss = mirrorX(ellipsoid([0.04, 0.262, 0.03], [0.034, 0.024, 0.034]));
-  const eyeC = [0.056, 0.212, 0.066];
+  const eyeC = [0.0576, 0.2122, 0.0682];
   const sdf = (x: number, y: number, z: number) => {
     let d = skull(x, y, z);
     d = smin(d, brow(x, y, z), 0.04);
@@ -33,7 +33,7 @@ export function buildRam(): THREE.Group {
     d = smin(d, chin(x, y, z), 0.03);
     d = smin(d, boss(x, y, z), 0.025);
     const ax = Math.abs(x);
-    d = smax(d, -(Math.hypot(ax - eyeC[0], y - eyeC[1], z - eyeC[2]) - 0.0215), 0.011);
+    d = smax(d, -(Math.hypot(ax - eyeC[0], y - eyeC[1], z - eyeC[2]) - 0.018), 0.01);
     d = smax(d, -sdRoundCone(ax, y, z, 0.033, 0.13, 0.106, 0.014, 0.131, 0.164, 0.003, 0.0035), 0.006);
     d = smax(d, -sdEllipsoid(ax - 0.016, y - 0.158, z - 0.19, 0.007, 0.0045, 0.008), 0.006);
     return d;
@@ -108,11 +108,11 @@ export function buildRam(): THREE.Group {
     ridgeColor: '#6E5C44',
   });
   kit.addEyes({
-    center: [0.056, 0.212, 0.066],
-    radius: 0.0215,
-    gaze: [0.6, 0.06, 0.8],
+    center: [0.0576, 0.2122, 0.0682],
+    radius: 0.0168,
+    gaze: [0.76, 0.06, 0.65],
     style: { iris: '#D19A3A', ring: '#7A4E12', pupil: 'horizontal', surround: def.colors.eye, irisR: 0.44 },
-    lids: { upper: 20, lower: -34, frown: 7, color: def.colors.base, rim: '#2A2018' },
+    lids: { upper: 16, lower: -30, frown: 6, color: def.colors.base, rim: '#2A2018' },
   });
   return kit.build('ram', { sheen: '#857058', roughness: 0.86 }, { roughness: 0.62, clearcoat: 0.25 });
 }

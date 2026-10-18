@@ -109,10 +109,10 @@ export function buildLynx(): THREE.Group {
   }
   kit.addEyes({
     center: [0.04, 0.207, 0.08],
-    radius: 0.0205,
-    gaze: [0.32, 0.04, 0.95],
+    radius: 0.0178,
+    gaze: [0.36, 0.04, 0.93],
     style: { iris: '#D9AF3A', ring: '#7A5A12', pupil: 'round', surround: '#1A1410', irisR: 0.44 },
-    lids: { upper: 18, lower: -30, frown: 9, color: '#2A1E16', rim: '#0F0B08' },
+    lids: { upper: 17, lower: -28, frown: 9, color: '#2A1E16', rim: '#0F0B08' },
   });
   return kit.build(
     'lynx',

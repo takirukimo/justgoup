@@ -27,7 +27,7 @@ import { PALETTE } from '../config/brand';
 import type { WallFrame } from './wall-frame';
 import { createHead, disposeHead, headBlinkWeights, setHeadBlink } from './heads/index';
 import { MeshBuilder, loft, sstep, superCos, superSin, type AttribFn } from './heads/geo';
-import { ATLAS_RECTS, REGION, createBodyMaterial, createOutfitAtlas, type BodyMaterial, type OutfitStyle, type UvRect } from './materials';
+import { ATLAS_RECTS, REGION, TORSO_E, TORSO_Y0, TORSO_Y1, createBodyMaterial, createOutfitAtlas, type BodyMaterial, type OutfitStyle, type TorsoSection, type UvRect } from './materials';
 
 // ═══════════════════════════════ skeleton layout ═══════════════════════════════
 
@@ -435,9 +435,9 @@ function segSeg(p1: THREE.Vector3, q1: THREE.Vector3, p2: THREE.Vector3, q2: THR
 }
 
 /**
- * Collision spheres for an animal head (skull, snout, ears, beard and horns), fitted once from its
- * geometry with a small k-means: the fur and the keratin (horns / beak) are clustered separately so
- * the ibex's big swept horns get their own chain of spheres. Centres are in the head's PARENT frame
+ * Collision spheres for a head (skull, snout, ears, beard and horns, or the human's cap), fitted once
+ * from its geometry with a small k-means: the fur and the keratin (horns / beak) or cap are clustered
+ * separately so the ibex's big swept horns get their own chain of spheres. Centres are in the head's PARENT frame
  * (the neck bone), so call it with the head's local transform already set. Writes [x, y, z, r] rows
  * into `out` and returns the number of spheres.
  */
@@ -452,7 +452,7 @@ export function fitHeadProxies(head: THREE.Object3D, out: Float32Array): number 
   const v = new THREE.Vector3();
   head.traverse((o) => {
     const m = o as THREE.Mesh;
-    if (!m.isMesh || (m.name !== 'fur' && m.name !== 'keratin')) return;
+    if (!m.isMesh || (m.name !== 'fur' && m.name !== 'keratin' && m.name !== 'cap')) return;
     const pos = m.geometry.getAttribute('position');
     if (!pos) return;
     const g = m.name === 'fur' ? groups[0] : groups[1];
@@ -563,8 +563,6 @@ export interface OutfitOptions {
   belt: boolean;
   /** Harness front: figure-8 tie-in knot (climber) or a belay device on a locker (belayer). */
   tieIn?: 'knot' | 'device';
-  /** Knit beanie sitting behind the horns (guide). */
-  beanie?: boolean;
 }
 
 interface Section {
@@ -707,6 +705,21 @@ const TORSO_ROWS: TorsoRow[] = [
   { y: 0.47, hw: 0, f: 0, b: 0, region: REGION.collar, ao: 0.2 },
 ];
 
+/** Torso cross-section at a rest height (linear between the outer TORSO_ROWS): feeds the print painter. */
+function torsoSection(y: number): TorsoSection {
+  const rows = TORSO_ROWS;
+  let i = 1;
+  // the outer surface rises monotonically up to the collar top; the fold back inside is skipped
+  const last = rows.findIndex((r, k) => k > 0 && r.y < rows[k - 1].y) - 1;
+  const n = last > 0 ? last : rows.length - 1;
+  if (y <= rows[1].y) return { hw: rows[1].hw, f: rows[1].f, b: rows[1].b };
+  while (i < n && rows[i + 1].y < y) i++;
+  const a = rows[i];
+  const c = rows[Math.min(n, i + 1)];
+  const t = c.y > a.y ? clampN((y - a.y) / (c.y - a.y), 0, 1) : 0;
+  return { hw: a.hw + (c.hw - a.hw) * t, f: a.f + (c.f - a.f) * t, b: a.b + (c.b - a.b) * t };
+}
+
 /** Torso skin weights by rest height: pelvis → spine → chest. */
 function torsoWeights(y: number, out: { i: [number, number, number, number]; w: [number, number, number, number] }): void {
   const a = sstep(0.04, 0.2, y); // pelvis → spine
@@ -734,7 +747,6 @@ export class BodyRig {
   readonly harness: THREE.SkinnedMesh;
   readonly material: BodyMaterial;
   readonly outfit: OutfitOptions;
-  private atlas: THREE.Texture;
   private bound = new THREE.Sphere(new THREE.Vector3(), 1.25);
   private boundH = new THREE.Sphere(new THREE.Vector3(), 0.6);
 
@@ -870,8 +882,7 @@ export class BodyRig {
     const restMats = this.bones.map((b) => b.matrix.clone());
     this.skeleton = new THREE.Skeleton(this.bones, inverses);
 
-    this.atlas = createOutfitAtlas(outfit.style);
-    this.material = createBodyMaterial(this.atlas);
+    this.material = createBodyMaterial(createOutfitAtlas(outfit.style, torsoSection));
 
     const body = new MeshBuilder();
     this.buildBody(body, restMats);
@@ -941,7 +952,6 @@ export class BodyRig {
     }
     if (this.outfit.chalkBag) this.buildBag(b, rest);
     if (this.outfit.belt) this.buildBelt(b);
-    if (this.outfit.beanie) this.buildBeanie(b, rest);
   }
 
   private buildTorso(b: MeshBuilder): void {
@@ -981,8 +991,8 @@ export class BodyRig {
     }
     sub.push(rows[rows.length - 1]);
     const n = sub.length;
-    const yMin = -0.14;
-    const yMax = 0.56;
+    const yMin = TORSO_Y0;
+    const yMax = TORSO_Y1;
     const tw = { i: [0, 0, 0, 0] as [number, number, number, number], w: [1, 0, 0, 0] as [number, number, number, number] };
     const pelvisY = 0.96;
     const [u0, v0, u1, v1] = ATLAS_RECTS.torso;
@@ -993,7 +1003,7 @@ export class BodyRig {
       point: (v, u, out) => {
         const r = sub[Math.round(v * (n - 1))];
         const a = u * Math.PI * 2;
-        const e = 2.35;
+        const e = TORSO_E;
         const sx = superSin(a, e);
         const cz = superCos(a, e);
         // u = 0 → front (−z), u = .25 → character left (−x): prints read correctly front + back
@@ -1841,66 +1851,9 @@ export class BodyRig {
     }
   }
 
-  /** Knit beanie (graphite, signal tab, pompom) pushed back on the skull behind the horns. */
-  private buildBeanie(b: MeshBuilder, rest: THREE.Matrix4[]): void {
-    const st = b.vertexCount;
-    // neck-bone frame: +y up, +z back. Skull centre ≈ (0, 0.186, 0.006), radius ≈ 0.09.
-    loft(b, {
-      rows: 14,
-      cols: 28,
-      point: (v, u, out) => {
-        // dome from the cuff (v = 0) to the crown (v = 1)
-        const th = v * (Math.PI / 2);
-        const a = u * Math.PI * 2;
-        const r = 0.094 * Math.cos(th) + (v < 0.18 ? 0.006 : 0);
-        out.set(Math.sin(a) * r, Math.sin(th) * 0.082, Math.cos(a) * r * 1.04);
-      },
-      attrib: (p, n, v, u, out) => {
-        attr(REGION.top2, BONE.neck, 0, v < 0.18 ? 0.85 : 1)(p, n, v, u, out);
-        // rib knit lines on the cuff via AO stripes
-        if (v < 0.18) out.aux[2] = 0.82 + 0.18 * Math.abs(Math.sin(u * Math.PI * 56));
-      },
-      uvRect: ATLAS_RECTS.blank,
-    });
-    // pompom
-    const s2 = b.vertexCount;
-    loft(b, {
-      rows: 10,
-      cols: 14,
-      point: (v, u, out) => {
-        const th = v * Math.PI;
-        const a = u * Math.PI * 2;
-        const r = 0.026 * (1 + 0.12 * Math.sin(a * 5) * Math.sin(th * 4));
-        out.set(Math.sin(th) * Math.cos(a) * r, -Math.cos(th) * r, Math.sin(th) * Math.sin(a) * r);
-      },
-      attrib: attr(REGION.harness, BONE.neck, 0, 1),
-      uvRect: ATLAS_RECTS.blank,
-    });
-    b.transform(new THREE.Matrix4().setPosition(0, 0.09, 0), s2);
-    // brand tab on the cuff (print colour)
-    const s3 = b.vertexCount;
-    capsule(b, {
-      y0: -0.008,
-      y1: 0.008,
-      cap0: 0.003,
-      cap1: 0.003,
-      rows: 3,
-      capRows: 2,
-      cols: 8,
-      sec: () => ({ rx: 0.012, rz: 0.003, e: 4 }),
-      uvRect: ATLAS_RECTS.blank,
-      attrib: attr(REGION.strap, BONE.neck, 0, 1),
-    });
-    b.transform(new THREE.Matrix4().setPosition(0.07, 0.012, 0.066).multiply(new THREE.Matrix4().makeRotationY(0.8)), s3);
-    // tilt the whole hat back behind the horns and place it on the skull
-    const m = new THREE.Matrix4().makeTranslation(0, 0.205, 0.034).multiply(new THREE.Matrix4().makeRotationX(0.62));
-    b.transform(m, st);
-    b.transform(rest[BONE.neck], st);
-  }
-
   // ───────────────────────────── appearance ─────────────────────────────
 
-  setPalette(cw: ColorwayDef, chalk: string, opts: { bagColor?: string; top2?: string; harness?: string } = {}): void {
+  setPalette(cw: ColorwayDef, chalk: string, opts: { bagColor?: string; bagPrint?: string; top2?: string; harness?: string } = {}): void {
     const u = this.material.userData.body;
     const set = (r: number, hex: string, rough: number, sheen: number, metal = 0) => {
       u.uPal.value[r].set(hex);
@@ -1919,16 +1872,19 @@ export class BodyRig {
     set(REGION.shoe, cw.shoe, 0.62, 0.35);
     set(REGION.rubber, '#1B1C1F', 0.72, 0.1);
     set(REGION.strap, cw.shoeAccent, 0.6, 0.4);
-    set(REGION.bag, opts.bagColor ?? cw.shoe, 0.74, 0.7);
+    // chalk bag: black with the CHIRAL mark in pink; the fleece rim carries the chalk colour
+    set(REGION.bag, opts.bagColor ?? '#141518', 0.78, 0.75);
     set(REGION.bagRim, chalk, 0.95, 1);
     set(REGION.webbing, '#25272B', 0.8, 0.5);
-    set(REGION.harness, opts.harness ?? cw.accent, 0.62, 0.55);
+    // harness padding: CHIRAL pink on every colourway (webbing edges stay graphite)
+    set(REGION.harness, opts.harness ?? PALETTE.signal, 0.62, 0.55);
     set(REGION.metal, '#B9BEC6', 0.3, 0, 1);
     set(REGION.rope, PALETTE.signal, 0.75, 0.7);
     // print colour: the accent, nudged for contrast against the top
     const acc = new THREE.Color(cw.accent);
     if (Math.abs(lum(acc) - lum(top)) < 0.12) acc.copy(top).multiplyScalar(lum(top) > 0.35 ? 0.45 : 2.2);
     u.uPrint.value.copy(acc);
+    u.uBagPrint.value.set(opts.bagPrint ?? PALETTE.signal);
     u.uAccent2.value.set(cw.shoeAccent);
     u.uChalk.value.set(chalk);
   }
@@ -2957,8 +2913,8 @@ export class BodyRig {
   dispose(): void {
     this.mesh.geometry.dispose();
     this.harness.geometry.dispose();
+    // the outfit atlas is shared by every rig of the same style (cached in materials.ts)
     this.material.dispose();
-    this.atlas.dispose();
     this.skeleton.dispose();
   }
 }

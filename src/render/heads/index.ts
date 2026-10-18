@@ -1,6 +1,6 @@
-// Procedural animal heads. Contract: createHead(id) → THREE.Group with origin = neck joint,
-// +Y up, facing +Z, oversized ×1.15 for readability on a phone. Each head is ≈3 draw calls
-// (fur with blinking lids, keratin, eyes).
+// Procedural heads (nine animals + the human in the CHIRAL SPORTS cap). Contract: createHead(id) →
+// THREE.Group with origin = neck joint, +Y up, facing +Z, oversized ×1.15 for readability on a
+// phone. Each head is ≈3 draw calls (fur with blinking lids, keratin or the cap, eyes).
 
 import * as THREE from 'three';
 import type { HeadId } from '../../core/types';
@@ -13,6 +13,7 @@ import { buildEagle } from './eagle';
 import { buildLynx } from './lynx';
 import { buildRam } from './ram';
 import { buildVulture } from './vulture';
+import { buildHuman } from './human';
 
 export { HEAD_SCALE } from './parts';
 
@@ -26,8 +27,7 @@ const BUILDERS: Record<HeadId, () => THREE.Group> = {
   lynx: buildLynx,
   ram: buildRam,
   vulture: buildVulture,
-  // TEMPORARY: replaced by the real human head (with CHIRAL SPORTS cap) in Phase A.
-  human: () => buildIbex(),
+  human: buildHuman,
 };
 
 export function createHead(id: HeadId): THREE.Group {

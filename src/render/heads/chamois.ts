@@ -29,7 +29,7 @@ export function buildChamois(): THREE.Group {
   const cheek = mirrorX(ellipsoid([0.05, 0.19, 0.03], [0.02, 0.026, 0.038]));
   const browR = mirrorX(ellipsoid([0.045, 0.242, 0.066], [0.026, 0.012, 0.022], [0, 0, 0.25]));
   const ped = mirrorX(ellipsoid([0.024, 0.266, 0.052], [0.02, 0.017, 0.02]));
-  const eyeC = [0.051, 0.214, 0.072];
+  const eyeC = [0.053, 0.2142, 0.0746];
   const sdf = (x: number, y: number, z: number) => {
     let d = skull(x, y, z);
     d = smin(d, brow(x, y, z), 0.04);
@@ -41,7 +41,7 @@ export function buildChamois(): THREE.Group {
     d = smin(d, browR(x, y, z), 0.02);
     d = smin(d, ped(x, y, z), 0.02);
     const ax = Math.abs(x);
-    d = smax(d, -(Math.hypot(ax - eyeC[0], y - eyeC[1], z - eyeC[2]) - 0.0225), 0.011);
+    d = smax(d, -(Math.hypot(ax - eyeC[0], y - eyeC[1], z - eyeC[2]) - 0.0184), 0.01);
     d = smax(d, -sdRoundCone(ax, y, z, 0.028, 0.134, 0.11, 0.012, 0.135, 0.17, 0.003, 0.0035), 0.006);
     d = smax(d, -sdEllipsoid(ax - 0.014, y - 0.158, z - 0.198, 0.0065, 0.004, 0.008), 0.006);
     return d;
@@ -111,11 +111,11 @@ export function buildChamois(): THREE.Group {
     tip: '#0F0D0C',
   });
   kit.addEyes({
-    center: [0.051, 0.214, 0.072],
-    radius: 0.0225,
-    gaze: [0.6, 0.05, 0.8],
+    center: [0.053, 0.2142, 0.0746],
+    radius: 0.0172,
+    gaze: [0.75, 0.06, 0.66],
     style: { iris: '#8C5A26', ring: '#3E220C', pupil: 'horizontal', surround: def.colors.eye, irisR: 0.44 },
-    lids: { upper: 26, lower: -36, frown: 3, color: '#1E1714', rim: '#120D0A' },
+    lids: { upper: 18, lower: -30, frown: 4, color: '#1E1714', rim: '#120D0A' },
   });
   return kit.build('chamois', { sheen: '#6E604E', roughness: 0.86 }, { roughness: 0.42, clearcoat: 0.45 });
 }

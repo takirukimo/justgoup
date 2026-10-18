@@ -1,10 +1,12 @@
-// Alpine ibex (Steinbock) — the hero head. Long Roman-nosed muzzle, short chin beard, big amber
-// eyes with horizontal pupils, small ears and huge back-sweeping scimitar horns with the
-// characteristic transverse knobs.
+// Alpine ibex (Steinbock) — the hero head, modelled on assets/reference/ibex-reference.png: a long,
+// straight-profiled face with a slightly Roman nose, a dark grey-brown coat with a lighter muzzle,
+// chin and throat, small amber eyes set on the sides of the skull (horizontal pupils, no bulge),
+// ears angled out sideways, a short chin beard, a thick shaggy neck, and long, heavy horns that
+// rise from the top of the skull and sweep back in a big arc, carrying prominent transverse knobs
+// on their front face that shrink toward the smooth, slightly diverging tips.
 
 import * as THREE from 'three';
-import { HEADS } from '../../config/skins';
-import { ellipsoid, lin, mirrorX, mixRGB, roundCone, sdEllipsoid, sdRoundCone, smax, smin, sstep, type RGB, type Sdf } from './geo';
+import { ellipsoid, lin, mirrorX, mixRGB, noise3, roundCone, sdEllipsoid, sdRoundCone, smax, smin, sstep, type RGB, type Sdf } from './geo';
 import { HeadKit, addEars, addHorns, addLock, addNeck, addSkull, golden } from './parts';
 
 export interface IbexOptions {
@@ -12,181 +14,208 @@ export interface IbexOptions {
   horn?: number;
 }
 
-/** Shared ibex skull field (also used by the chamois/goat variants as a base reference). */
+/** Natural coat palette (from the reference photo). */
+export const IBEX_COLORS = {
+  coat: '#51473D',
+  dark: '#342D27',
+  warm: '#625242',
+  muzzle: '#A09482',
+  throat: '#8F8272',
+  nose: '#2A2521',
+  hornBase: '#62584B',
+  hornTip: '#353029',
+  hornRidge: '#93866F',
+  iris: '#C98B2C',
+  irisRing: '#6E430E',
+} as const;
+
+const EYE_C: [number, number, number] = [0.0575, 0.224, 0.056];
+const EYE_R = 0.0162;
+
+/** Ibex skull field (the chamois / goat / ram share its proportions as a reference). */
 export function ibexSdf(): Sdf {
-  const skull = ellipsoid([0, 0.207, -0.016], [0.074, 0.08, 0.083]);
-  const brow = ellipsoid([0, 0.226, 0.04], [0.066, 0.056, 0.058], [-0.3, 0, 0]);
-  const muzzle = roundCone([0, 0.19, 0.06], [0, 0.152, 0.172], 0.052, 0.035);
-  const ridge = ellipsoid([0, 0.186, 0.11], [0.033, 0.03, 0.074], [0.4, 0, 0]);
-  const nose = ellipsoid([0, 0.149, 0.19], [0.033, 0.031, 0.027]);
-  const jaw = mirrorX(ellipsoid([0.042, 0.152, 0.026], [0.033, 0.045, 0.06], [0.32, 0, 0]));
-  const chin = roundCone([0, 0.124, 0.04], [0, 0.125, 0.16], 0.031, 0.023);
-  const cheek = mirrorX(ellipsoid([0.056, 0.192, 0.026], [0.022, 0.03, 0.042]));
-  const browR = mirrorX(ellipsoid([0.047, 0.243, 0.07], [0.031, 0.016, 0.028], [0, 0, 0.25]));
-  const pedicle = mirrorX(ellipsoid([0.031, 0.272, 0.047], [0.029, 0.021, 0.029]));
-  const eyeC = [0.055, 0.214, 0.074];
+  const cranium = ellipsoid([0, 0.214, -0.014], [0.064, 0.07, 0.07]);
+  const brow = ellipsoid([0, 0.232, 0.03], [0.061, 0.05, 0.062], [-0.26, 0, 0]);
+  const muzzleC = roundCone([0, 0.2, 0.058], [0, 0.158, 0.182], 0.05, 0.028);
+  // narrower across than deep, like a real goat muzzle
+  const muzzle: Sdf = (x, y, z) => muzzleC(x * 1.16, y, z);
+  const ridge = ellipsoid([0, 0.192, 0.112], [0.029, 0.03, 0.082], [0.36, 0, 0]);
+  const nose = ellipsoid([0, 0.157, 0.188], [0.023, 0.023, 0.021]);
+  const lip = ellipsoid([0, 0.143, 0.178], [0.024, 0.015, 0.024]);
+  const jaw = mirrorX(ellipsoid([0.037, 0.155, 0.018], [0.029, 0.054, 0.064], [0.3, 0, 0]));
+  const chin = roundCone([0, 0.128, 0.028], [0, 0.132, 0.163], 0.03, 0.018);
+  const cheek = mirrorX(ellipsoid([0.05, 0.196, 0.034], [0.02, 0.027, 0.046]));
+  const browR = mirrorX(ellipsoid([0.049, 0.24, 0.056], [0.025, 0.012, 0.026], [0, 0, 0.3]));
+  const pedicle = mirrorX(ellipsoid([0.026, 0.266, 0.036], [0.03, 0.022, 0.032]));
   return (x, y, z) => {
-    let d = skull(x, y, z);
+    let d = cranium(x, y, z);
     d = smin(d, brow(x, y, z), 0.04);
     d = smin(d, muzzle(x, y, z), 0.045);
     d = smin(d, ridge(x, y, z), 0.03);
     d = smin(d, nose(x, y, z), 0.02);
+    d = smin(d, lip(x, y, z), 0.016);
     d = smin(d, jaw(x, y, z), 0.035);
     d = smin(d, chin(x, y, z), 0.03);
     d = smin(d, cheek(x, y, z), 0.025);
-    d = smin(d, browR(x, y, z), 0.02);
+    d = smin(d, browR(x, y, z), 0.018);
     d = smin(d, pedicle(x, y, z), 0.022);
     const ax = Math.abs(x);
-    // eye sockets
-    d = smax(d, -(Math.hypot(ax - eyeC[0], y - eyeC[1], z - eyeC[2]) - 0.0228), 0.012);
+    // eye sockets: a shallow seat so the small eye sits flush under the brow
+    d = smax(d, -(Math.hypot(ax - EYE_C[0], y - EYE_C[1], z - EYE_C[2]) - (EYE_R + 0.0012)), 0.01);
     // mouth line (a soft groove from the lip corner to the front)
-    d = smax(d, -sdRoundCone(ax, y, z, 0.03, 0.132, 0.12, 0.013, 0.131, 0.178, 0.0022, 0.003), 0.004);
-    // nostrils
-    d = smax(d, -sdEllipsoid(ax - 0.015, y - 0.156, z - 0.215, 0.007, 0.0042, 0.009), 0.006);
+    d = smax(d, -sdRoundCone(ax, y, z, 0.026, 0.137, 0.11, 0.012, 0.136, 0.178, 0.002, 0.0028), 0.004);
+    // nostrils: comma slits angled up and back
+    d = smax(d, -sdEllipsoid(ax - 0.0145, y - 0.163, z - 0.211, 0.0062, 0.0042, 0.009), 0.005);
     return d;
   };
 }
 
 export function buildIbex(opts: IbexOptions = {}): THREE.Group {
-  const def = HEADS.find((h) => h.id === 'ibex')!;
-  const base = lin(def.colors.base);
-  const dark = lin(def.colors.secondary);
-  const light = lin(def.colors.accent);
-  const cream = lin('#E2D6C0');
-  const noseC = lin('#2B231D');
+  const C = IBEX_COLORS;
+  const coat = lin(C.coat);
+  const dark = lin(C.dark);
+  const warm = lin(C.warm);
+  const muzzle = lin(C.muzzle);
+  const throat = lin(C.throat);
+  const noseC = lin(C.nose);
   const kit = new HeadKit();
   const sdf = ibexSdf();
   const tmp: RGB = [0, 0, 0];
 
   addSkull(kit, {
     sdf,
-    a: [0, 0.2, -0.06],
-    b: [0, 0.153, 0.18],
-    rows: 54,
-    cols: 46,
+    a: [0, 0.205, -0.06],
+    b: [0, 0.16, 0.176],
+    rows: 52,
+    cols: 44,
     paint: (p, n, out) => {
       const ax = Math.abs(p.x);
-      // base coat with a darker nasal stripe + darker crown, lighter muzzle tip, cream throat
-      mixRGB(base, dark, sstep(0.034, 0.004, ax) * sstep(0.165, 0.195, p.y) * sstep(0.0, 0.09, p.z) * 0.95, tmp);
-      mixRGB(tmp, dark, sstep(0.24, 0.29, p.y) * 0.5, tmp);
-      // pale ring around the eye
-      const eyeD = Math.hypot(ax - 0.055, p.y - 0.214, p.z - 0.074);
-      mixRGB(tmp, light, sstep(0.04, 0.03, eyeD) * 0.35, tmp);
-      // muzzle tip + lips
-      const lip = sstep(0.15, 0.2, p.z) * sstep(0.16, 0.13, p.y);
-      mixRGB(tmp, light, lip * 0.85, tmp);
-      // underside (chin, jaw, throat)
-      mixRGB(tmp, cream, sstep(-0.2, -0.75, n.y) * sstep(0.18, 0.13, p.y) * 0.7, tmp);
-      // nose pad
-      const nose = sstep(0.19, 0.207, p.z) * sstep(0.137, 0.151, p.y) * sstep(0.03, 0.012, ax);
+      // coat with a soft mottled variation (natural, not flat)
+      const nz = noise3(p.x * 60, p.y * 60, p.z * 60) * 0.5 + noise3(p.x * 140, p.y * 140, p.z * 140) * 0.25;
+      mixRGB(coat, warm, Math.max(0, nz) * 0.6 + sstep(0.04, 0.06, ax) * sstep(0.25, 0.18, p.y) * 0.25, tmp);
+      // darker crown + forehead between the horns, and a dark stripe down the front of the face
+      mixRGB(tmp, dark, sstep(0.235, 0.275, p.y) * 0.75, tmp);
+      mixRGB(tmp, dark, sstep(0.03, 0.006, ax) * sstep(0.15, 0.2, p.y) * sstep(-0.01, 0.06, p.z) * 0.7, tmp);
+      // a faintly paler ring around the eye
+      const eyeD = Math.hypot(ax - EYE_C[0], p.y - EYE_C[1], p.z - EYE_C[2]);
+      mixRGB(tmp, muzzle, sstep(EYE_R + 0.012, EYE_R + 0.004, eyeD) * 0.28, tmp);
+      // pale muzzle: lips, the sides of the nose, the chin; grey-beige throat and jaw underside
+      const lip = sstep(0.135, 0.18, p.z) * sstep(0.172, 0.142, p.y);
+      mixRGB(tmp, muzzle, lip * 0.9, tmp);
+      mixRGB(tmp, throat, sstep(-0.15, -0.7, n.y) * sstep(0.19, 0.14, p.y) * 0.85, tmp);
+      // nose pad (dark, moist)
+      const nose = sstep(0.194, 0.207, p.z) * sstep(0.15, 0.161, p.y) * sstep(0.024, 0.01, ax);
       mixRGB(tmp, noseC, nose, out.color);
-      out.aux[1] = nose * 0.75;
-      out.aux[2] = 1 - nose;
+      out.aux[1] = nose * 0.7;
+      out.aux[2] = 1 - nose * 0.9;
     },
   });
 
   addNeck(kit, {
-    top: [0, 0.175, -0.02],
-    r0: 0.054,
-    r1: 0.058,
-    color: def.colors.base,
+    top: [0, 0.18, -0.024],
+    r0: 0.062,
+    r1: 0.062,
+    front: 1.12,
+    color: C.coat,
     paint: (p, n, out) => {
-      // slightly paler throat high up, darker back stripe; uniform near the collar
-      mixRGB(base, cream, sstep(0.3, 0.95, n.z) * 0.3 * sstep(0.06, 0.13, p.y), tmp);
-      mixRGB(tmp, dark, sstep(-0.4, -0.9, n.z) * 0.45, out.color);
+      // grey-beige throat high up, dark mane down the back of the neck
+      mixRGB(coat, throat, sstep(0.3, 0.95, n.z) * 0.55 * sstep(0.04, 0.13, p.y), tmp);
+      mixRGB(tmp, dark, sstep(-0.3, -0.9, n.z) * 0.65, out.color);
     },
   });
 
+  // ears: pointed, angled out to the sides and a little back, pale inside with a dark rim
   addEars(kit, {
-    base: [0.06, 0.252, -0.012],
-    dir: [1, 0.42, -0.42],
-    open: [0.25, 0.25, 1],
-    length: 0.068,
-    width: 0.034,
-    cup: 0.65,
-    point: 0.55,
-    outer: def.colors.secondary,
-    inner: '#B99878',
-    rim: '#3E3226',
+    base: [0.05, 0.258, -0.032],
+    dir: [1, 0.62, -0.55],
+    open: [0.35, 0.1, 1],
+    length: 0.086,
+    width: 0.04,
+    cup: 0.85,
+    point: 0.72,
+    outer: C.coat,
+    inner: '#B8A894',
+    rim: '#2E2721',
   });
 
-  // chin beard: short pointed goatee (ibex billies) — soft clumped locks
-  for (let i = 0; i < 11; i++) {
+  // short chin beard (billy goatee): soft clumped locks, darker at the tips
+  for (let i = 0; i < 12; i++) {
     const a = golden(i) * Math.PI * 2;
-    const rr = 0.013 * Math.sqrt((i + 0.5) / 11);
+    const rr = 0.012 * Math.sqrt((i + 0.5) / 12);
     const bx = Math.cos(a) * rr;
-    const bz = 0.13 + Math.sin(a) * rr;
+    const bz = 0.135 + Math.sin(a) * rr;
     addLock(kit, {
-      base: [bx, 0.108, bz],
-      dir: [bx * 1.6, -1, 0.5 + (bz - 0.13) * 3],
-      length: 0.046 + 0.016 * (1 - rr / 0.013) + 0.006 * Math.sin(i * 7.1),
-      width: 0.026,
+      base: [bx, 0.114, bz],
+      dir: [bx * 1.4, -1, 0.42 + (bz - 0.135) * 3],
+      length: 0.034 + 0.012 * (1 - rr / 0.012) + 0.005 * Math.sin(i * 7.1),
+      width: 0.024,
       flat: 0.7,
-      color: '#5E4D3A',
-      tipColor: '#3B2F24',
-      bend: [0, 0.05, 0.22],
+      color: '#4A3F35',
+      tipColor: '#2B241F',
+      bend: [0, 0.04, 0.18],
       up: [0, 0, 1],
       ao: 0.6,
     });
   }
-  // a few longer guard hairs along the throat (subtle shag)
-  for (let i = 0; i < 10; i++) {
-    const t = i / 9;
-    const side = i % 2 ? 1 : -1;
-    addLock(kit, {
-      base: [side * 0.012 * (1 - t), 0.11 - t * 0.045, 0.085 - t * 0.04],
-      dir: [side * 0.25, -1, 0.35],
-      length: 0.028,
-      width: 0.022,
-      color: def.colors.base,
-      tipColor: '#6E5C46',
-      up: [0, 0, 1],
-      ao: 0.8,
-    });
-  }
 
-  const hornScale = opts.horn ?? 1;
-  const H = (x: number, y: number, z: number): [number, number, number] => [x, 0.262 + (y - 0.262) * hornScale, 0.05 + (z - 0.05) * hornScale];
+  // horns: rise from the top of the skull, then a big backward arc; tips diverge slightly
+  const hs = opts.horn ?? 1;
+  const base: [number, number, number] = [0.023, 0.262, 0.038];
+  const H = (x: number, y: number, z: number): [number, number, number] => [
+    base[0] + (x - base[0]) * hs,
+    base[1] + (y - base[1]) * hs,
+    base[2] + (z - base[2]) * hs,
+  ];
   addHorns(kit, {
     ctrl: [
-      H(0.03, 0.246, 0.056),
-      H(0.033, 0.31, 0.044),
-      H(0.044, 0.364, 0.012),
-      H(0.06, 0.405, -0.044),
-      H(0.076, 0.428, -0.114),
-      H(0.09, 0.425, -0.192),
-      H(0.1, 0.402, -0.262),
-      H(0.106, 0.368, -0.318),
+      H(0.023, 0.262, 0.038),
+      H(0.028, 0.33, 0.03),
+      H(0.036, 0.405, 0.002),
+      H(0.048, 0.468, -0.05),
+      H(0.064, 0.51, -0.124),
+      H(0.082, 0.524, -0.207),
+      H(0.102, 0.508, -0.287),
+      H(0.122, 0.474, -0.352),
+      H(0.142, 0.428, -0.398),
     ],
-    samples: 60,
-    cols: 15,
-    radius: (t) => 0.0255 * Math.pow(1 - t, 0.72) + 0.0035,
+    samples: 72,
+    cols: 14,
+    radius: (t) => 0.0285 * Math.pow(1 - t, 0.78) + 0.0034,
     section: (ang, t) => {
-      // D-shaped: broad flat front (knob face), rounded back; flattening fades toward the tip
+      // round at the root, then D-shaped: a broad flat front (the knob face) and a rounded back
       const c = Math.cos(ang);
-      // round at the root, D-shaped (flat knob face) from ~10% on
-      const k = sstep(0.08, 0.22, t);
-      const flat = 1.01 - k * (0.22 - 0.15 * t);
+      const k = sstep(0.04, 0.16, t);
+      const flat = 1.01 - k * (0.24 - 0.16 * t);
       let m = c > flat ? flat / c : 1;
-      m *= 1 + 0.1 * Math.abs(Math.sin(ang)) * k * (1 - t);
+      // slightly wider than deep (the knob face is broad)
+      m *= 1 + 0.12 * Math.abs(Math.sin(ang)) * k * (1 - t);
       return m;
     },
-    ridges: { count: 13, amp: 0.34, sharp: 3, mask: (ang) => Math.pow(Math.max(0, Math.cos(ang)), 1.6), start: 0.11, end: 0.84 },
-    rings: { count: 46, amp: 0.022 },
-    twist: 0.55,
+    ridges: {
+      count: 14,
+      amp: 0.78,
+      sharp: 4.5,
+      mask: (ang) => Math.pow(Math.max(0, Math.cos(ang)), 0.75),
+      start: 0.07,
+      end: 0.8,
+      taper: (t) => 1 - 0.6 * sstep(0.1, 0.8, t),
+      crowd: 1.2,
+    },
+    rings: { count: 54, amp: 0.016 },
+    twist: 0.32,
     up: [0, 0, 1],
-    base: '#6E604E',
-    tip: '#3F362D',
-    ridgeColor: def.colors.accent,
+    base: C.hornBase,
+    tip: C.hornTip,
+    ridgeColor: C.hornRidge,
   });
 
   kit.addEyes({
-    center: [0.055, 0.214, 0.074],
-    radius: 0.0228,
-    gaze: [0.56, 0.06, 0.83],
-    style: { iris: '#E0A136', ring: '#8A5512', pupil: 'horizontal', surround: def.colors.eye, irisR: 0.44 },
-    lids: { upper: 19, lower: -34, frown: 8, color: def.colors.base, rim: '#241B14' },
+    center: EYE_C,
+    radius: EYE_R,
+    gaze: [0.8, 0.07, 0.6],
+    style: { iris: C.iris, ring: C.irisRing, pupil: 'horizontal', surround: '#1E1812', irisR: 0.47 },
+    lids: { upper: 15, lower: -27, frown: 6, color: C.coat, rim: '#1F1914' },
   });
 
-  return kit.build('ibex', { sheen: '#7A6650', roughness: 0.86 }, { roughness: 0.55, clearcoat: 0.3 });
+  return kit.build('ibex', { sheen: '#8A7966', roughness: 0.88 }, { roughness: 0.62, clearcoat: 0.2 });
 }

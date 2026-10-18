@@ -3,6 +3,8 @@
 //   ?view=head&id=ibex     single head close-up                  &yaw=<deg> &pitch=<deg> &dist=<m>
 //   ?view=portraits        renderPortrait() output grid
 //   ?view=limits           anatomy QA: extreme / illegal poses, falls, crossovers (see character-limits.ts)
+//   ?view=ref&id=ibex      the head next to assets/reference/ibex-reference.png (same 3/4 view)
+//   ?view=tees             CHIRAL SPORTS tees (black / white / pink) front + back
 //   ?t=<s>                 freeze the clock at t seconds (deterministic screenshots)
 
 import * as THREE from 'three';
@@ -32,9 +34,20 @@ else studio();
 
 /** Studio views (heads, portraits, body, guide, climber poses) on a plain WebGLRenderer. */
 function studio(): void {
+const refView = view === 'ref';
+if (refView) {
+  // reference photo on the left half, the 3D head on the right half
+  const img = document.createElement('img');
+  img.src = '/assets/reference/ibex-reference.png';
+  img.style.cssText = 'position:fixed;left:0;top:0;width:50%;height:100%;object-fit:cover;';
+  document.body.appendChild(img);
+  canvas.style.left = '50%';
+  canvas.style.width = '50%';
+}
+const W = refView ? window.innerWidth / 2 : window.innerWidth;
 const gl = new THREE.WebGLRenderer({ canvas, antialias: true });
 gl.setPixelRatio(Math.min(2, window.devicePixelRatio));
-gl.setSize(window.innerWidth, window.innerHeight, false);
+gl.setSize(W, window.innerHeight, false);
 gl.outputColorSpace = THREE.SRGBColorSpace;
 gl.toneMapping = THREE.ACESFilmicToneMapping;
 gl.toneMappingExposure = 1.0;
@@ -47,7 +60,7 @@ const pmrem = new THREE.PMREMGenerator(gl);
 scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 scene.environmentIntensity = 0.35;
 
-const camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.01, 100);
+const camera = new THREE.PerspectiveCamera(30, W / window.innerHeight, 0.01, 100);
 
 function studioLights(target: THREE.Vector3): void {
   const key = new THREE.DirectionalLight('#ffe2c4', 2.6);
@@ -75,7 +88,7 @@ const heads: THREE.Group[] = [];
 
 function headsView(single: HeadId | null): void {
   const ids: HeadId[] = single ? [single] : (HEADS.map((h) => h.id) as HeadId[]);
-  const cols = single ? 1 : 3;
+  const cols = single ? 1 : 5;
   const sp = 0.62;
   ids.forEach((id, i) => {
     const h = createHead(id);
@@ -95,18 +108,35 @@ function headsView(single: HeadId | null): void {
       (el as HTMLDivElement & { anchor?: THREE.Vector3 }).anchor = h.position.clone().add(new THREE.Vector3(0, -0.04, 0));
     }
   });
-  const center = single ? new THREE.Vector3(0, 0.2, 0) : new THREE.Vector3(0, -sp * 1.05 + 0.2, 0);
+  const nRows = Math.ceil(ids.length / cols);
+  const center = single ? new THREE.Vector3(0, 0.2, 0) : new THREE.Vector3(0, (-(nRows - 1) / 2) * sp * 1.05 + 0.24, 0);
   studioLights(center);
   if (single) {
     const d = num('dist', 1.2);
     camera.position.set(0, 0.24 + num('cy', 0), d);
     camera.lookAt(0, 0.22 + num('cy', 0), 0);
   } else {
-    camera.fov = 34;
-    camera.position.set(0, center.y + 0.05, 3.4);
+    camera.fov = 30;
+    // fit every column and row (heads with horns need ~0.75 m of height per row)
+    const vf = Math.tan((camera.fov * Math.PI) / 360);
+    const hf = vf * camera.aspect;
+    const dist = Math.max((cols * sp) / 2 / hf, (nRows * sp * 1.15) / 2 / vf) + 0.3;
+    camera.position.set(0, center.y + 0.05, num('dist', dist));
     camera.lookAt(center.x, center.y, 0);
   }
   camera.updateProjectionMatrix();
+}
+
+/** The head (on a neck stub) in the reference photo's 3/4 view, on a dusky backdrop. */
+function refHead(id: HeadId): void {
+  scene.background = new THREE.Color('#2a3140');
+  const h = createHead(id);
+  h.rotation.y = (num('yaw', 38) * Math.PI) / 180;
+  h.rotation.x = (num('pitch', 6) * Math.PI) / 180;
+  scene.add(h);
+  heads.push(h);
+  studioLights(new THREE.Vector3(0, 0.25, 0));
+  applyCam([0.05, 0.42, 1.55, 0, 0.27, -0.05, 30]);
 }
 
 /** Free camera from ?cam=px,py,pz,lx,ly,lz[,fov] */
@@ -136,6 +166,29 @@ function bodyView(): void {
   climbers.push(c);
   studioLights(new THREE.Vector3(0, 1, 0));
   applyCam([0, 1.1, 4.2, 0, 0.95, 0, 30]);
+}
+
+/** CHIRAL SPORTS tees: black / white / pink, each from the front and from the back. */
+function teesView(): void {
+  floor();
+  const cws: ColorwayId[] = ['basalt', 'white', 'pink'];
+  const sp = 0.62;
+  const items: { cw: ColorwayId; yaw: number }[] = [];
+  for (const cw of cws) items.push({ cw, yaw: 180 }, { cw, yaw: 0 });
+  items.forEach((it, i) => {
+    const x = (i - (items.length - 1) / 2) * sp;
+    const c = new ClimberModel({ head: (qs.get('id') ?? 'ibex') as HeadId, colorway: it.cw, chalk: 'classic' });
+    c.position.set(x, 0, 0);
+    c.rotation.y = (it.yaw * Math.PI) / 180;
+    scene.add(c);
+    climbers.push(c);
+    const el = document.createElement('div');
+    el.textContent = `${it.cw} ${it.yaw === 180 ? 'front' : 'back'}`;
+    labels.appendChild(el);
+    (el as HTMLDivElement & { anchor?: THREE.Vector3 }).anchor = new THREE.Vector3(x, 0.98, 0.3);
+  });
+  studioLights(new THREE.Vector3(0, 1.3, 0));
+  applyCam([0, 1.32, 5.2, 0, 1.3, 0, 22]);
 }
 
 function colorwaysView(): void {
@@ -223,7 +276,9 @@ else if (view === 'portraits') portraitsView();
 else if (view === 'body') bodyView();
 else if (view === 'guide') guideView();
 else if (view === 'colorways') colorwaysView();
+else if (view === 'tees') teesView();
 else if (view === 'head') headsView((qs.get('id') ?? 'ibex') as HeadId);
+else if (view === 'ref') refHead((qs.get('id') ?? 'ibex') as HeadId);
 
 let t = 0;
 let last = performance.now();

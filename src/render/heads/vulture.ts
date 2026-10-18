@@ -31,7 +31,7 @@ export function buildVulture(): THREE.Group {
     d = smin(d, browR(x, y, z), 0.018);
     d = smin(d, throat(x, y, z), 0.03);
     const ax = Math.abs(x);
-    d = smax(d, -(Math.hypot(ax - eyeC[0], y - eyeC[1], z - eyeC[2]) - 0.0168), 0.008);
+    d = smax(d, -(Math.hypot(ax - eyeC[0], y - eyeC[1], z - eyeC[2]) - 0.0164), 0.008);
     return d;
   };
   const tmp: RGB = [0, 0, 0];
@@ -116,8 +116,8 @@ export function buildVulture(): THREE.Group {
   });
   kit.addEyes({
     center: [0.034, 0.218, 0.064],
-    radius: 0.0168,
-    gaze: [0.5, 0.03, 0.87],
+    radius: 0.0155,
+    gaze: [0.52, 0.03, 0.85],
     style: { iris: '#F4E3A2', ring: '#C9A85A', pupil: 'round', surround: def.colors.eye, irisR: 0.36 },
     lids: { upper: 16, lower: -36, frown: 8, color: '#E6CFA8', rim: def.colors.eye },
   });

@@ -322,8 +322,20 @@ export interface HornSpec {
   radius: (t: number) => number;
   /** Cross-section: angle → radius multiplier (shape). Angle 0 = curve normal (front/outer side). */
   section?: (ang: number, t: number) => number;
-  /** Ridge bumps: count along the length, amplitude (fraction of radius), angular mask. */
-  ridges?: { count: number; amp: number; sharp?: number; mask?: (ang: number) => number; start?: number; end?: number };
+  /**
+   * Ridge bumps: count along the length, amplitude (fraction of radius), angular mask. `taper` scales
+   * the amplitude along t (knobs shrink toward the tip); `crowd` > 1 packs them tighter toward the tip.
+   */
+  ridges?: {
+    count: number;
+    amp: number;
+    sharp?: number;
+    mask?: (ang: number) => number;
+    start?: number;
+    end?: number;
+    taper?: (t: number) => number;
+    crowd?: number;
+  };
   /** Fine growth rings. */
   rings?: { count: number; amp: number };
   /** Section twist over the length (radians). */
@@ -347,13 +359,13 @@ export function addHorns(kit: HeadKit, h: HornSpec): void {
     const s0 = h.ridges.start ?? 0.04;
     const s1 = h.ridges.end ?? 0.9;
     if (t < s0 || t > s1) return 0;
-    const ph = ((t - s0) / (s1 - s0)) * h.ridges.count;
+    const ph = Math.pow((t - s0) / (s1 - s0), 1 / (h.ridges.crowd ?? 1)) * h.ridges.count;
     const f = ph - Math.floor(ph);
     // asymmetric ridge: steep on the tip side, gentle toward the base
     const k = h.ridges.sharp ?? 6;
     const bump = Math.pow(Math.max(0, Math.sin(Math.PI * Math.pow(f, 0.7))), k);
     const fade = sstep(s0, s0 + 0.06, t) * (1 - sstep(s1 - 0.12, s1, t));
-    return bump * fade;
+    return bump * fade * (h.ridges.taper ? h.ridges.taper(t) : 1);
   };
   const start = kit.ker.vertexCount;
   addTube(

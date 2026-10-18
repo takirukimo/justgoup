@@ -26,7 +26,7 @@ export function buildEagle(): THREE.Group {
     d = smin(d, browR(x, y, z), 0.02);
     d = smin(d, throat(x, y, z), 0.03);
     const ax = Math.abs(x);
-    d = smax(d, -(Math.hypot(ax - eyeC[0], y - eyeC[1], z - eyeC[2]) - 0.0185), 0.009);
+    d = smax(d, -(Math.hypot(ax - eyeC[0], y - eyeC[1], z - eyeC[2]) - 0.0178), 0.009);
     return d;
   };
   const tmp: RGB = [0, 0, 0];
@@ -94,7 +94,7 @@ export function buildEagle(): THREE.Group {
   });
   kit.addEyes({
     center: [0.039, 0.214, 0.07],
-    radius: 0.0185,
+    radius: 0.0168,
     gaze: [0.45, 0.02, 0.89],
     style: { iris: '#E8A417', ring: '#8A5410', pupil: 'round', surround: '#2A1C10', irisR: 0.46 },
     lids: { upper: 10, lower: -32, frown: 12, color: def.colors.base, rim: '#1E140C' },
