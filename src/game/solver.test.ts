@@ -27,9 +27,11 @@ describe('planBeta', () => {
       if (!h) continue; // smear
       expect(m.limb === 'LH' || m.limb === 'RH' ? usableByHand(h) : usableByFoot(h)).toBe(true);
     }
-    const last = plan!.slice(-2);
+    // the beta ends with the last hand move onto the top, and both hands' final holds are the top
     const top = b.holds.find((h) => h.role === 'top')!;
-    expect(last.every((m) => m.holdId === top.id)).toBe(true);
+    const handMoves = plan!.filter((m) => m.limb === 'LH' || m.limb === 'RH');
+    expect(handMoves[handMoves.length - 1].holdId).toBe(top.id);
+    for (const hand of ['LH', 'RH'] as const) expect(handMoves.filter((m) => m.limb === hand || m.dyno === 'both').pop()!.holdId).toBe(top.id);
   });
 
   it('is fast on typical boulders (< 60 ms median)', { timeout: 60_000 }, () => {

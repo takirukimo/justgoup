@@ -9,6 +9,9 @@ export {
   tutorialBoulder,
   dailyBoulder,
   dailyGrade,
+  styleFor,
+  runStyle,
+  dailyStyle,
   todayKey,
   TUTORIAL_SEQUENCE,
   type TutorialStep,
@@ -61,3 +64,14 @@ export {
   type Vec3,
   type SurfacePoint,
 } from './wall-profile';
+export {
+  STYLES,
+  PROFILE_STYLES,
+  availableStyles,
+  pickStyle,
+  styleAngle,
+  styleProfile,
+  leadProfile,
+  dressHold,
+  type ProfileSpec,
+} from './archetypes';

@@ -5,6 +5,8 @@
 //   ?view=limits           anatomy QA: extreme / illegal poses, falls, crossovers (see character-limits.ts)
 //   ?view=ref&id=ibex      the head next to assets/reference/ibex-reference.png (same 3/4 view)
 //   ?view=tees             CHIRAL SPORTS tees (black / white / pink) front + back
+//   ?view=tech&tech=heel   a Phase B technique done by the real sim, posed by the real renderer
+//                          (heel toe flag backflag drop smear shake chalk deadpoint dyno pump; cam=follow|side|front|low)
 //   ?t=<s>                 freeze the clock at t seconds (deterministic screenshots)
 
 import * as THREE from 'three';
@@ -29,6 +31,7 @@ const labels = document.getElementById('labels') as HTMLDivElement;
 
 const canvas = document.getElementById('gl') as HTMLCanvasElement;
 if (view === 'game') void import('./character-game').then((m) => m.runGame(canvas, qs, hud));
+else if (view === 'tech') void import('./character-tech').then((m) => m.runTech(canvas, qs, hud));
 else if (view === 'limits') void import('./character-limits').then((m) => m.runLimits(canvas, qs, labels, hud));
 else studio();
 

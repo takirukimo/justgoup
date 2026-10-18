@@ -3,14 +3,17 @@
 // prove that planned betas are executable, and usable as an attract-mode / demo climber.
 // It manages its body like a climber (Phase B): before a hand move it chalks that hand when the chalk
 // has worn off (lead routes, ≈ every 4–5 moves) and, when a forearm is pumped, it lets go with it and
-// shakes it out by the side (the other hand holding) before re-gripping and going on.
+// shakes it out by the side (the other hand holding) before re-gripping and going on. Thrown moves of the
+// beta (BetaMove.dyno: deadpoints and double dynos) are launched from the planned stance with
+// ClimberSimAPI.dyno and caught in flight; the following steps put the cut limbs back on.
 
 import type { HoldDef, LimbId, Vec2 } from '../core/types';
 import type { BetaMove, ClimberSimAPI, SimEvent } from '../core/contracts';
+import { clamp } from '../core/math';
 import { contactPoint, LIMB_INDEX } from './holds';
 import { planBetaDetailed, SMEAR_ID, type PlanResult, type PlanStep } from './solver';
 
-type BotPhase = 'prep' | 'drag' | 'hold' | 'settle' | 'clip' | 'clipwait' | 'recover' | 'chalk' | 'shake' | 'regrab' | 'done' | 'failed';
+type BotPhase = 'prep' | 'drag' | 'hold' | 'settle' | 'clip' | 'clipwait' | 'recover' | 'chalk' | 'shake' | 'regrab' | 'fly' | 'done' | 'failed';
 
 /** Body management thresholds of the bot. */
 export const BOT = {
@@ -23,6 +26,8 @@ export const BOT = {
   shakeMax: 20,
   /** Only from a calm stance. */
   calmTension: 0.75,
+  /** Launch power of a planned deadpoint / dyno (1 = the ideal throw). */
+  throwPower: 1.06,
 } as const;
 
 export interface BetaBotOptions {
@@ -57,6 +62,14 @@ export class BetaBot {
   /** Chalk dips and shake-outs the bot made. */
   chalks = 0;
   shakes = 0;
+  /** Deadpoints / dynos thrown. */
+  throws = 0;
+  /** A throw cut the feet: put them back on at once. */
+  private fastFeet = false;
+  /** Extra launch power after a short throw (reset on a catch). */
+  private throwBoost = 0;
+  /** Missed throws (after two, re-plans look for a static beta first). */
+  private misses = 0;
   readonly log: string[] = [];
 
   constructor(sim: ClimberSimAPI, plan?: PlanResult | null, opts: BetaBotOptions = {}) {
@@ -124,6 +137,18 @@ export class BetaBot {
     switch (this.phase) {
       case 'prep': {
         if (!st) break;
+        // still flying (a throw's catch settles the body for a moment): wait until the climber is back on
+        if (s.airborne) break;
+        // right after a caught throw the cut feet go straight back on (no weight shift, a quick placement)
+        if (this.fastFeet) {
+          if (s.limbs.LF.holdId || s.limbs.LF.smearing) {
+            if (s.limbs.RF.holdId || s.limbs.RF.smearing) this.fastFeet = false;
+          }
+          if (this.fastFeet && (limb === 'LF' || limb === 'RF') && !s.limbs[limb].holdId && !s.limbs[limb].smearing) {
+            this.beginMove(st, limb);
+            return;
+          }
+        }
         if (this.t < dt * 1.5 && this.opts.manageBody && this.manage(limb)) return;
         // shift the weight toward the reach position while still on four limbs, then let go
         if (this.opts.useHips) sim.setHipTarget({ x: st.reachPose.px, y: st.reachPose.py });
@@ -135,14 +160,42 @@ export class BetaBot {
         const strained = this.t > 0.12 && s.tension > Math.max(0.8, this.prepTension + 0.22);
         if (this.t > this.opts.prepTime || strained || (this.t > 0.12 && (d < 0.05 || (v < 0.05 && this.t > 0.3)))) {
           this.prepTension = -1;
-          this.beginMove(st, limb);
+          if (st.move.dyno) this.launch(st);
+          else this.beginMove(st, limb);
         }
+        break;
+      }
+      case 'fly': {
+        if (!st) break;
+        // the throw is in the air: wait for the catch (or the miss)
+        for (const e of events) {
+          if (e.type === 'dyno-catch') {
+            this.moves++;
+            this.throwBoost = 0;
+            this.fastFeet = !!st.dyno && st.dyno.cut.some((l) => l === 'LF' || l === 'RF');
+            if (this.opts.useHips) sim.setHipTarget({ x: st.pose.px, y: st.pose.py });
+            this.phase = 'settle';
+            this.t = 0;
+            return;
+          }
+          if (e.type === 'dyno-miss') {
+            this.log.push(`dyno missed ${st.move.dyno}->${st.move.holdId} (${e.reason})`);
+            // throw harder after a short one, softer after ripping off; a second miss looks for a static way
+            this.throwBoost = clamp(this.throwBoost + (e.reason === 'short' ? 0.1 : -0.05), -0.1, 0.3);
+            this.misses++;
+            // a deadpoint that fell back onto its hold can try again from the live stance
+            if (s.phase === 'climbing' && (s.limbs.LH.holdId || s.limbs.RH.holdId)) this.retry();
+            else this.fail('dyno missed');
+            return;
+          }
+        }
+        if (this.t > 2.5) this.fail('dyno: no catch');
         break;
       }
       case 'drag': {
         if (!st) break;
         if (this.opts.useHips) sim.setHipTarget({ x: st.reachPose.px, y: st.reachPose.py });
-        const k = Math.min(1, this.t / this.opts.dragTime);
+        const k = Math.min(1, this.t / (this.fastFeet ? Math.min(0.22, this.opts.dragTime) : this.opts.dragTime));
         const e = k * k * (3 - 2 * k);
         sim.dragTo(limb, { x: this.from.x + (this.target.x - this.from.x) * e, y: this.from.y + (this.target.y - this.from.y) * e });
         if (k >= 1) {
@@ -159,6 +212,13 @@ export class BetaBot {
         if (ok || this.t > 1.0) {
           const ev = sim.endDrag(limb);
           const grabbed = ev.some((x) => (x.type === 'grab' && x.holdId === this.hold?.id) || (x.type === 'smear' && !this.hold));
+          // a planned smear that landed on a foothold instead is just as good: carry on from the live stance
+          if (!grabbed && !this.hold && (limb === 'LF' || limb === 'RF') && ev.some((x) => x.type === 'grab')) {
+            this.moves++;
+            this.log.push(`smear ${limb} landed on a hold`);
+            this.replan();
+            return;
+          }
           if (!grabbed) {
             this.log.push(`miss ${limb}->${st.move.holdId} (${ev.map((x) => x.type).join(',')})`);
             this.retry();
@@ -173,7 +233,7 @@ export class BetaBot {
       }
       case 'settle': {
         if (!st) break;
-        if (this.t > this.opts.settleTime) {
+        if (this.t > (this.fastFeet ? 0.04 : this.opts.settleTime)) {
           const clip = st.clip;
           this.idx++;
           this.phase = 'prep';
@@ -353,6 +413,27 @@ export class BetaBot {
     this.t = 0;
   }
 
+  /** Throw the planned deadpoint / dyno from the stance the bot shifted into. */
+  private launch(st: PlanStep): void {
+    const sim = this.sim;
+    const d = st.move.dyno!;
+    if (!sim.dyno) {
+      this.fail('dyno: the sim cannot throw');
+      return;
+    }
+    sim.setHipTarget(null);
+    // commit a little past the ideal throw (research [37]: jumping past the hold is good, short falls)
+    const ev = sim.dyno(d, st.move.holdId, BOT.throwPower + this.throwBoost);
+    if (!ev.some((e) => e.type === 'dyno-start')) {
+      this.log.push(`dyno refused ${d}->${st.move.holdId}`);
+      this.retry();
+      return;
+    }
+    this.throws++;
+    this.phase = 'fly';
+    this.t = 0;
+  }
+
   private retry(): void {
     if (!this.opts.replan || this.replans >= 3) {
       this.fail('move missed');
@@ -367,12 +448,14 @@ export class BetaBot {
   private replan(): void {
     const s = this.sim.getState();
     const ids = (['LH', 'RH', 'LF', 'RF'] as const).map((l) => s.limbs[l].holdId);
-    const plan = planBetaDetailed(this.sim.boulder, {
+    const opts = {
       start: ids,
       startPose: { px: s.pelvis.x, py: s.pelvis.y, cx: s.chest.x, cy: s.chest.y },
       maxNodes: this.sim.boulder.mode === 'rope' ? 2600 : 900,
       clipped: s.clipped,
-    });
+    };
+    // after two missed throws, a static beta from here is worth more than a third throw
+    const plan = (this.misses >= 2 ? planBetaDetailed(this.sim.boulder, { ...opts, dynos: false }) : null) ?? planBetaDetailed(this.sim.boulder, opts);
     if (!plan) {
       this.fail('replan failed');
       return;

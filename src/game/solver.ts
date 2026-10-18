@@ -12,7 +12,7 @@
 
 import type { BoulderDef, HoldDef, LimbId, QuickdrawDef, Vec2, WallPanel } from '../core/types';
 import type { BetaMove, ClimberSimAPI } from '../core/contracts';
-import { BODY, SIM } from '../config/tuning';
+import { BODY, GAME, SIM } from '../config/tuning';
 import { clamp } from '../core/math';
 import {
   canMatch,
@@ -66,6 +66,9 @@ export const SOLVER = {
    * centimetres of difference between the planned and the live body must not turn it into a slip.
    */
   clipMax: 0.9,
+  /** A clip stance this calm is taken at once; a more strenuous one looks up to clipLookahead moves ahead. */
+  clipCalm: 0.62,
+  clipLookahead: 2,
   /**
    * Forearm pump assumed while planning (capacity margin): pumpCapFactor(0.52) ≈ 0.971, the same
    * margin the planner had before the per-forearm model (1 − 0.32·0.3²).
@@ -84,11 +87,11 @@ export const SOLVER = {
   candidatesPerLimb: 7,
   // ── deadpoints + dynos (planned only for style 'dyno' problems or PlanOptions.dynos; research §2.5) ──
   /** Extra cost of a thrown move: a static beta is preferred whenever one exists. */
-  dynoCost: 2.2,
+  dynoCost: 3,
   /** A throw is planned only to holds at least this good (nominal hand capacity, BW). */
   dynoMinCap: 0.5,
   /** The launch speed a throw needs must stay under this fraction of what the climber can produce. */
-  dynoSpeedMargin: 0.9,
+  dynoSpeedMargin: 0.8,
   /** The catch's peak stress must stay under this fraction of SIM.dynoCatchStress. */
   dynoCatchMargin: 0.85,
   /** Tension allowed right after a catch (feet cut: the climber puts them back at once). */
@@ -315,6 +318,12 @@ class Planner {
     this.smearOk = this.prof ? this.prof.minAngle <= SIM.smearMaxAngle : b.wallAngle <= SIM.smearMaxAngle;
     const q = b.mode === 'rope' ? b.quickdraws ?? [] : [];
     this.anchor = q.length ? q[q.length - 1] : null;
+  }
+
+  /** A usable foothold within the sim's snap radius of (x, y): a foot released there grabs it, it doesn't smear. */
+  nearFoothold(x: number, y: number): boolean {
+    for (const h of this.footHolds) if (dhypot(h.x - x, h.y - y) - h.size <= GAME.snapRadius) return true;
+    return false;
   }
 
   /** Wall angle (degrees) of the panel at surface height y. */
@@ -686,6 +695,8 @@ class Planner {
     const b = n.slots[1];
     if (!a || !b || a === 'smear' || b === 'smear') return;
     if (!n.slots[2] && !n.slots[3]) return; // no campus dynos
+    // one throw at a time: the cut limbs go back on (and the body calms down) before the next one
+    if (n.transient) return;
     const maxHandY = Math.max(a.y, b.y);
     const mx = (a.x + b.x) / 2;
     for (const h of this.handHolds) {
@@ -693,7 +704,8 @@ class Planner {
       if (h.y < maxHandY + 0.25) continue;
       if (dhypot(h.x - mx, h.y - maxHandY) > BODY.armMax + SIM.dynoMaxReach + 0.4) continue;
       if (!this.topIds.has(h.id) && nominalCapacity(h, true, this.angleOf(h.y)) < SOLVER.dynoMinCap) continue;
-      const tries: number[][] = canMatch(0, h) ? [[0, 1], [0], [1]] : [[0], [1]];
+      // a double dyno jumps off both feet
+      const tries: number[][] = canMatch(0, h) && n.slots[2] && n.slots[3] ? [[0, 1], [0], [1]] : [[0], [1]];
       for (const hands of tries) {
         const d = this.throwFrom(n, hands, h);
         if (!d) continue;
@@ -800,7 +812,8 @@ class Planner {
       const side = li === 2 ? -1 : 1;
       const sx = n.pose.px + side * 0.16;
       const sy = Math.max(0.35, minHandY - 1.25);
-      if (this.smearAt(sy) && this.targetOk(n, li, null, sx, sy, slack)) out.push({ hold: null, x: sx, y: sy, score: -1.2 });
+      // (not where the sim would snap the foot onto a foothold instead)
+      if (this.smearAt(sy) && !this.nearFoothold(sx, sy) && this.targetOk(n, li, null, sx, sy, slack)) out.push({ hold: null, x: sx, y: sy, score: -1.2 });
     }
     out.sort((a, c) => c.score - a.score);
     if (out.length > SOLVER.candidatesPerLimb) out.length = SOLVER.candidatesPerLimb;
@@ -930,11 +943,11 @@ export class StanceLab {
     return this.p.angleOf(y);
   }
 
-  /** Settled pose + tension of a stance; ok when it is within the planner's limits. */
-  stance(slots: (HoldDef | null)[], seed: Pose | null): { pose: Pose; tension: number; ok: boolean } {
+  /** Settled pose + tension of a stance; ok when it is within the planner's limits (violation: anatomy). */
+  stance(slots: (HoldDef | null)[], seed: Pose | null): { pose: Pose; tension: number; ok: boolean; violation: number } {
     // unique key: route builders rename and reuse ids while backtracking, so never cache
     const r = this.p.stance({ slots, sx: this.empty, sy: this.empty, key: `lab-s${this.seq++}` }, seed);
-    return { pose: r.pose, tension: r.tension, ok: r.violation <= 0.004 && r.tension <= SOLVER.stanceMax };
+    return { pose: r.pose, tension: r.tension, ok: r.violation <= 0.004 && r.tension <= SOLVER.stanceMax, violation: r.violation };
   }
 
   /** Can limb `li` move to `target` from the stance (other three holding)? */
@@ -959,6 +972,38 @@ export class StanceLab {
     } as Node;
     if (!this.p.targetOk(node, li, target, tp.x, tp.y, li < 2 ? 0.5 : 0.32)) return { pose, tension: Infinity, ok: false };
     return this.p.reach(node, li, tp.x, tp.y, `lab${this.seq++}`);
+  }
+
+  /**
+   * Can the climber THROW for `target` from the stance (the planner's dyno model, ClimberSim.throwPlan):
+   * 'LH' / 'RH' a deadpoint, 'both' a double-hand dyno. Fails when the target is within static reach
+   * (no throw needed), too far, the launch too fast for the legs, the catch too hard, or the landing
+   * stance too strenuous. On success: the stance after the catch (`slots` with the target in the
+   * throwing hands and the cut limbs null), its pose and tension.
+   */
+  dyno(
+    slots: (HoldDef | null)[],
+    hands: 'LH' | 'RH' | 'both',
+    target: HoldDef,
+    pose: Pose,
+  ): { ok: boolean; slots: (HoldDef | null)[]; pose: Pose; tension: number; kind: 'deadpoint' | 'dyno'; cut: number[]; rise: number } {
+    const fail = { ok: false, slots, pose, tension: Infinity, kind: 'deadpoint' as const, cut: [] as number[], rise: 0 };
+    if (!slots[0] || !slots[1]) return fail;
+    if (hands === 'both' && !canMatch(0, target)) return fail;
+    const parent = { slots, sx: this.empty, sy: this.empty, key: `lab-d${this.seq++}`, pose, tension: 0, g: 0, f: 0, parent: null, step: null, depth: 0, move: null } as Node;
+    // the launch stance's effective plane (cached under its key) sets the throw's gravity split
+    const st = this.p.stance(parent, pose);
+    parent.tension = st.tension;
+    const hs = hands === 'both' ? [0, 1] : [hands === 'LH' ? 0 : 1];
+    const d = this.p.throwFrom(parent, hs, target);
+    if (!d) return fail;
+    const next = slots.slice();
+    for (const i of d.hands) next[i] = target;
+    for (const i of d.cut) next[i] = null;
+    const child = { slots: next, sx: this.empty, sy: this.empty, key: `lab-d${this.seq++}`, pose, tension: 0, g: 0, f: 0, parent, step: null, depth: 1, move: null } as Node;
+    const m: LazyMove = { li: d.hands[0], hold: target, tx: target.x, ty: target.y, fromX: target.x, fromY: target.y, reachKey: '', dyno: d };
+    if (!this.p.evaluateDyno(child, m, d)) return fail;
+    return { ok: true, slots: next, pose: child.pose, tension: child.tension, kind: d.kind, cut: d.cut.slice(), rise: d.rise };
   }
 
   /** Anchor (shoulder / hip) of a limb in a pose. */
@@ -1006,24 +1051,47 @@ function planClips(planner: Planner, steps: PlanStep[], clipped: readonly string
   const cp = { x: 0, y: 0 };
   let qi = 0;
   while (qi < draws.length && clipped.includes(draws[qi].id)) qi++;
-  for (let k = 0; k < steps.length && qi < draws.length; k++) {
+  // The easiest clip of a draw: from the first stance it can be clipped from, or one of the next
+  // CLIP_LOOKAHEAD stances when that is clearly calmer, with the hand that leaves the better hold holding
+  // (the other three limbs hold the climber for GAME.clipTime: a strenuous clip stance is where lead
+  // climbers come off).
+  const best = { k: -1, li: -1, tension: Infinity, pose: null as Pose | null };
+  const tryAt = (k: number, qd: QuickdrawDef): void => {
     const n = STEP_NODE.get(steps[k]);
-    if (!n) continue;
-    const isAnchor = qi === draws.length - 1;
-    if (isAnchor && k < steps.length - 1) continue;
-    clipPoint(draws[qi], cp);
-    let done = false;
-    for (let li = 0; li < 2 && !done; li++) {
+    if (!n) return;
+    clipPoint(qd, cp);
+    for (let li = 0; li < 2; li++) {
       const other = n.slots[1 - li];
       if (!other || other === 'smear') continue;
       const a = planner.anchorOf(n.pose, li);
       if (dhypot(a.x - cp.x, a.y - cp.y) > BODY.armMax + 0.5) continue;
       const r = planner.reach(n, li, cp.x, cp.y, `${n.key}>clip${li}`);
       if (!r.ok || r.tension > SOLVER.clipMax) continue;
-      steps[k].clip = { quickdrawId: draws[qi].id, limb: LIMB_IDS[li], reachPose: r.pose, tension: r.tension };
-      done = true;
+      if (r.tension < best.tension) {
+        best.k = k;
+        best.li = li;
+        best.tension = r.tension;
+        best.pose = r.pose;
+      }
     }
-    if (done) qi++;
+  };
+  for (let k = 0; k < steps.length && qi < draws.length; k++) {
+    const isAnchor = qi === draws.length - 1;
+    if (isAnchor && k < steps.length - 1) continue;
+    best.k = -1;
+    best.tension = Infinity;
+    tryAt(k, draws[qi]);
+    if (best.k < 0) continue;
+    // a calmer stance a move or two later (the anchor is clipped from the top)
+    if (!isAnchor && best.tension > SOLVER.clipCalm)
+      for (let j = k + 1; j < Math.min(steps.length - 1, k + 1 + SOLVER.clipLookahead); j++) {
+        const t0 = best.tension;
+        tryAt(j, draws[qi]);
+        if (best.tension < t0 - 0.12 && best.tension <= SOLVER.clipCalm) break;
+      }
+    steps[best.k].clip = { quickdrawId: draws[qi].id, limb: LIMB_IDS[best.li], reachPose: best.pose!, tension: best.tension };
+    k = best.k;
+    qi++;
   }
   return qi;
 }
@@ -1036,6 +1104,7 @@ const STAGE_NODES = 520;
 export function planBetaDetailed(boulder: BoulderDef, opts: PlanOptions & { goalY?: number } = {}): PlanResult | null {
   const t0 = now();
   const planner = new Planner(boulder, opts.assist ?? 0);
+  if (opts.dynos !== undefined) planner.dynos = opts.dynos;
   if (!planner.topIds.size) return null;
   const startIds = opts.start ?? startPlacement(boulder);
   const st = startSlots(planner, startIds, boulder, opts.startPose);

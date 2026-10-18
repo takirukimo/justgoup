@@ -3,7 +3,7 @@ import { GAME } from '../config/tuning';
 import { ROUTE_COLORS } from '../config/brand';
 import { dailyBoulder, dailyGrade, generateBoulder, generateRopeRoute, todayKey, tutorialBoulder, TUTORIAL_SEQUENCE } from './generator';
 import { planBeta, planBetaDetailed } from './solver';
-import { usableByHand } from './holds';
+import { nominalCapacity, usableByHand } from './holds';
 
 const routeHolds = (b: ReturnType<typeof generateBoulder>) => b.holds.filter((h) => h.role !== 'deco');
 
@@ -60,7 +60,10 @@ describe('generator — determinism + structure', () => {
       expect(tops.length).toBe(1);
       expect(tops[0].size).toBeGreaterThanOrEqual(0.07);
       expect(['jug', 'edge']).toContain(tops[0].type);
-      expect(tops[0].y).toBeGreaterThan(b.height - 0.5);
+      // a traverse finishes on the far side of the wall, the others at the top
+      if (b.style === 'traverse') expect(tops[0].y).toBeGreaterThan(2.3);
+      else expect(tops[0].y).toBeGreaterThan(b.height - 0.5);
+      expect(b.style).toBeTruthy();
       expect(b.startFeet?.LF && b.startFeet?.RF).toBeTruthy();
       const feet = [b.startFeet!.LF!, b.startFeet!.RF!].map((id) => b.holds.find((h) => h.id === id)!);
       for (const f of feet) {
@@ -72,7 +75,8 @@ describe('generator — determinism + structure', () => {
       expect(deco.length).toBeGreaterThanOrEqual(40);
       expect(deco.length).toBeLessThanOrEqual(90);
       expect(deco.every((h) => h.color !== b.color)).toBe(true);
-      const volumes = b.holds.filter((h) => h.type === 'volume');
+      // wall volumes (deco or route feet); compression problems add hand volumes on top
+      const volumes = b.holds.filter((h) => h.type === 'volume' && h.role !== 'hand');
       expect(volumes.length).toBeGreaterThanOrEqual(1);
       expect(volumes.length).toBeLessThanOrEqual(4);
       for (const h of b.holds) {
@@ -120,59 +124,113 @@ describe('generator — determinism + structure', () => {
     expect(b.name).toBe('Ibex Crack');
   });
 
-  it('builds lead routes with quickdraws every ~1.4–2.0 m and the anchor at the top', { timeout: 60_000 }, () => {
+  it('lead routes bolt to the EN standard: first ≤ 3.1 m, ≤ 1 m apart to 5 m, ≤ 1.5 m to 8 m, ≤ 2 m above; anchor over the top', { timeout: 120_000 }, () => {
     for (const grade of [0, 4, 8]) {
       const r = generateRopeRoute({ seed: 31 + grade, grade });
       expect(r.mode).toBe('rope');
       expect(r.height).toBe(GAME.ropeWall.height);
       const q = r.quickdraws!;
-      expect(q.length).toBeGreaterThanOrEqual(6);
-      expect(q[0].y).toBeGreaterThanOrEqual(1.85);
-      expect(q[0].y).toBeLessThanOrEqual(2.25);
+      // research §3.5: 10–14 draws + the anchor on a 15 m wall
+      expect(q.length).toBeGreaterThanOrEqual(10);
+      expect(q.length).toBeLessThanOrEqual(15);
+      expect(q[0].y).toBeGreaterThanOrEqual(1.6);
+      expect(q[0].y).toBeLessThanOrEqual(3.1);
       for (let i = 1; i < q.length - 1; i++) {
         const dy = q[i].y - q[i - 1].y;
-        expect(dy).toBeGreaterThanOrEqual(1.39);
-        expect(dy).toBeLessThanOrEqual(2.01);
+        const max = q[i - 1].y < 5 ? 1.0 : q[i - 1].y < 8 ? 1.5 : 2.0;
+        expect(dy, `${r.id} q${i}`).toBeGreaterThanOrEqual(0.55);
+        expect(dy, `${r.id} q${i}`).toBeLessThanOrEqual(max + 1e-9);
       }
       const top = r.holds.find((h) => h.role === 'top')!;
       const anchor = q[q.length - 1];
       expect(anchor.y).toBeGreaterThan(top.y);
       expect(anchor.y - top.y).toBeLessThan(0.6);
       expect(top.y).toBeGreaterThan(r.height - 1.0);
+      // clipping stances: most draws sit at chest height under a positive hand hold beside them
+      let clipHolds = 0;
+      for (const d of q.slice(0, -1))
+        if (r.holds.some((h) => usableByHand(h) && h.role !== 'top' && h.y - d.y >= 0.2 && h.y - d.y <= 0.75 && Math.abs(h.x - d.x) < 0.5 && nominalCapacity(h, true, r.wallAngle) >= 0.5)) clipHolds++;
+      expect(clipHolds / (q.length - 1)).toBeGreaterThanOrEqual(0.7);
     }
+  });
+
+  it('lead routes vary: wall angles, lines and hold sets differ between seeds', { timeout: 120_000 }, () => {
+    const routes = [0, 1, 2, 3, 4, 5].map((k) => generateRopeRoute({ seed: 900 + k * 37, grade: 5 }));
+    expect(new Set(routes.map((r) => r.wallAngle)).size).toBeGreaterThanOrEqual(2);
+    const mix = routes.map((r) => {
+      const hands = r.holds.filter((h) => h.role === 'hand');
+      const share = (t: string) => hands.filter((h) => h.type === t).length / hands.length;
+      return ['jug', 'edge', 'crimp', 'sloper', 'pinch', 'pocket'].map(share);
+    });
+    // the dominant non-jug hold type is not the same on every route
+    const dominant = mix.map((m) => m.slice(1).indexOf(Math.max(...m.slice(1))));
+    expect(new Set(dominant).size).toBeGreaterThanOrEqual(2);
+    // the crux (55–75 % of the height) is set on poorer holds than the start (below 4.2 m)
+    const mean = (pick: (r: (typeof routes)[number], y: number) => boolean) => {
+      let sum = 0;
+      let n = 0;
+      for (const r of routes)
+        for (const h of r.holds)
+          if (h.role === 'hand' && pick(r, h.y)) {
+            sum += nominalCapacity(h, true, r.wallAngle);
+            n++;
+          }
+      return sum / Math.max(1, n);
+    };
+    expect(mean((_r, y) => y < 4.2)).toBeGreaterThan(mean((r, y) => y > 0.55 * r.height && y < 0.75 * r.height));
   });
 });
 
 describe('generator — solvability', () => {
-  it('300 generated boulders across V0–V12 are all solvable by planBeta()', { timeout: 240_000 }, () => {
+  const boulders = (profiles: boolean) => {
     const fails: string[] = [];
     let genMs = 0;
     let worstGen = 0;
+    const styles = new Map<string, number>();
     for (let i = 0; i < 300; i++) {
       const grade = i % 13;
       const t0 = performance.now();
-      const b = generateBoulder({ seed: 10_000 + i * 7919, grade });
+      const b = generateBoulder({ seed: 10_000 + i * 7919, grade, profiles });
       const dt = performance.now() - t0;
       genMs += dt;
       worstGen = Math.max(worstGen, dt);
       expect(b.grade).toBe(grade);
-      if (!planBeta(b, { maxNodes: 900 })) fails.push(`${b.id} (V${grade}, ${b.wallAngle}°)`);
+      styles.set(b.style!, (styles.get(b.style!) ?? 0) + 1);
+      if (!profiles) expect(b.profile).toBeUndefined();
+      if (!planBeta(b, { maxNodes: 900 })) fails.push(`${b.id} (V${grade}, ${b.style}, ${b.wallAngle}°)`);
     }
-    console.info(`generateBoulder: ${(genMs / 300).toFixed(0)} ms mean, ${worstGen.toFixed(0)} ms worst over 300 boulders`);
+    console.info(
+      `generateBoulder (profiles ${profiles ? 'on' : 'off'}): ${(genMs / 300).toFixed(0)} ms mean, ${worstGen.toFixed(0)} ms worst; styles ${[...styles].map(([k, v]) => `${k} ${v}`).join(', ')}`,
+    );
+    return { fails, styles };
+  };
+
+  it('300 generated boulders across V0–V12 are all solvable by planBeta() (profiles off)', { timeout: 400_000 }, () => {
+    const { fails, styles } = boulders(false);
     expect(fails).toEqual([]);
+    expect(styles.has('cave')).toBe(false);
+    expect(styles.size).toBeGreaterThanOrEqual(8);
   });
 
-  it('30 lead routes are solvable and every quickdraw is clippable along the beta', { timeout: 240_000 }, () => {
+  it('300 generated boulders are all solvable with multi-angle profiles on (caves, mixed walls)', { timeout: 500_000 }, () => {
+    const { fails, styles } = boulders(true);
+    expect(fails).toEqual([]);
+    expect(styles.get('cave') ?? 0).toBeGreaterThan(5);
+  });
+
+  it('40 lead routes are solvable and every quickdraw is clippable along the beta (+ 8 profiled towers)', { timeout: 500_000 }, () => {
     const fails: string[] = [];
     let genMs = 0;
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 48; i++) {
+      const profiles = i >= 40;
       const t0 = performance.now();
-      const r = generateRopeRoute({ seed: 50_000 + i * 104729, grade: i % 9 });
+      const r = generateRopeRoute({ seed: 50_000 + i * 104729, grade: i % 9, profiles });
       genMs += performance.now() - t0;
+      if (profiles) expect(r.profile && r.profile.length >= 4).toBe(true);
       const plan = planBetaDetailed(r, { maxNodes: 3000 });
       if (!plan || plan.clipsPlanned !== r.quickdraws!.length) fails.push(r.id);
     }
-    console.info(`generateRopeRoute: ${(genMs / 30).toFixed(0)} ms mean over 30 routes`);
+    console.info(`generateRopeRoute: ${(genMs / 48).toFixed(0)} ms mean over 48 routes`);
     expect(fails).toEqual([]);
   });
 });
@@ -197,11 +255,12 @@ describe('daily + tutorial', () => {
     expect(a.grade).toBe(2);
   });
 
-  it('the tutorial is a friendly orange jug problem with stable ids', () => {
+  it('the tutorial is a friendly CHIRAL-pink jug problem with stable ids', () => {
     const t = tutorialBoulder();
     expect(t.grade).toBe(0);
     expect(t.wallAngle).toBe(0);
-    expect(t.color).toBe('#FF4F1F');
+    expect(t.color).toBe('#D54051');
+    for (const h of t.holds) if (h.role !== 'deco' && h.type !== 'volume') expect(h.color).toBe('#D54051');
     expect(JSON.stringify(tutorialBoulder())).toBe(JSON.stringify(t));
     for (const step of TUTORIAL_SEQUENCE) expect(t.holds.some((h) => h.id === step.holdId)).toBe(true);
     const hands = t.holds.filter((h) => h.role !== 'deco' && usableByHand(h));

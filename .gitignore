@@ -12,3 +12,4 @@ screenshots/
 
 # Agent scratch probes/benchmarks (never committed)
 src/**/__*.test.ts
+dev/**/*.debug*.test.ts
