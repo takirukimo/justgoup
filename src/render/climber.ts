@@ -113,6 +113,8 @@ export interface LimbGoal {
   autoPoint: boolean;
   /** Shoulder elevation (m) for this arm. */
   lift: number;
+  /** Shoulder moved out to the side (m): the shoulder blade rotating up under an overhead reach. */
+  spread: number;
   /** Treat `target` as the wrist / ankle position instead of the grip / toe point. */
   jointTarget: boolean;
   /**
@@ -164,6 +166,7 @@ function limbGoal(): LimbGoal {
     thumb: 0.3,
     autoPoint: true,
     lift: 0,
+    spread: 0,
     jointTarget: false,
     pinned: false,
     layer: 0,
@@ -1059,6 +1062,7 @@ export class BodyRig {
       h.curlB = 0.35;
       h.thumb = 0.2;
       h.lift = 0;
+      h.spread = 0;
       h.jointTarget = false;
       const f = g.feet[s];
       f.dir.set(sg * 0.12, 0, -1).normalize();
@@ -2488,7 +2492,7 @@ export class BodyRig {
     const J = this.joints;
     // shoulder joint: chest node ± shoulderHalf along the chest's right axis, slightly lowered
     const S = J.shoulder[s];
-    _t0.set(sg * BODY.shoulderHalf, -SHOULDER_DROP + goal.lift, 0).applyQuaternion(this.qChest);
+    _t0.set(sg * (BODY.shoulderHalf + goal.spread), -SHOULDER_DROP + goal.lift, 0).applyQuaternion(this.qChest);
     S.copy(g.chest).add(_t0);
     const qh = this.qHand[s];
     const dir = this.tmpGoalDir.copy(goal.dir).normalize();
@@ -3983,6 +3987,7 @@ export class ClimberModel extends THREE.Group {
     let shape: HandShape = SHAPE_FREE;
     hg.jointTarget = false;
     hg.lift = 0;
+    hg.spread = 0;
 
     // phase-specific targets
     let ropeK = 0;
@@ -4196,11 +4201,16 @@ export class ClimberModel extends THREE.Group {
 
     // elbow pole: down + out on high holds, back + out on low ones; tremor wobbles the elbow
     const hi = sstep(-0.35, 0.25, rel);
+    // a hand going up over the head (toward the midline): the elbow swings out to the side so the
+    // upper arm rises beside the head, not across the face / horns
+    const inward = -side * this.v0.subVectors(hg.target, S).dot(this.goal.chestRight);
+    const over = sstep(0.2, 0.45, rel) * sstep(-0.12, 0.12, inward);
+    hg.spread = 0.022 * sstep(0.25, 0.5, rel);
     const pole = hg.pole;
     pole
       .copy(Nw)
-      .multiplyScalar(0.75 * (1 - hi) + 0.3 * hi)
-      .addScaledVector(this.goal.chestRight, side * (0.45 + 0.15 * hi))
+      .multiplyScalar(0.75 * (1 - hi) + 0.3 * hi - 0.15 * over)
+      .addScaledVector(this.goal.chestRight, side * (0.45 + 0.15 * hi + 0.6 * over))
       .addScaledVector(WORLD_UP, -0.25 * (1 - hi) - 0.65 * hi);
     if (ph === 'landed') pole.copy(Nw).multiplyScalar(0.8).addScaledVector(this.goal.chestRight, side * 0.6);
     if (rk > 0.5) pole.copy(WORLD_UP).multiplyScalar(-0.6).addScaledVector(this.goal.chestRight, side * 0.8).addScaledVector(Nw, 0.2);
