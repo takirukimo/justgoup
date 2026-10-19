@@ -93,6 +93,8 @@ function makeNoise(seed: number): (x: number, y: number) => number {
   };
 }
 
+const clampX = (x: number, W: number): number => Math.max(-W / 2 + 0.3, Math.min(W / 2 - 0.3, x));
+
 const OTHER_COLORS = ['#2F6FEB', '#2FB36D', '#E5433B', '#8B5CF6', '#FF7A1A', '#F06EA9', '#EDEDED', '#1E1F22', '#21B8B0', '#F2C230'];
 
 /** Lay out a route (bottom → top) and other routes' holds, without overlaps. */
@@ -105,21 +107,24 @@ export function synthLayout(o: SynthOptions = {}): SynthHold[] {
   const free = (x: number, y: number, r: number, pad = 0.06): boolean =>
     Math.abs(x) < W / 2 - r - 0.08 && y > r + 0.25 && y < H - r - 0.08 && holds.every((h) => Math.hypot(h.x - x, h.y - y) > h.r + r + pad);
   const n = o.routeCount ?? 14;
-  // the line: zig-zags up the wall from a start at 1.3 m to a top near the wall's top
+  // the line: a standing start at ~1.5 m, then zig-zags up to a big top hold near the wall's top
   const shapes: SynthShape[] = ['blob', 'crescent', 'blob', 'pocket', 'disc', 'rail', 'blob', 'crescent', 'blob', 'disc', 'blob', 'crescent', 'pocket', 'blob'];
   let cx = rng.range(-0.8, 0.8);
+  let side = rng.chance(0.5) ? 1 : -1;
   for (let i = 0; i < n; i++) {
     const t = i / Math.max(1, n - 1);
-    const y = 1.2 + t * (H - 1.55);
-    const shape = shapes[i % shapes.length];
-    const r = shape === 'rail' ? rng.range(0.1, 0.13) : shape === 'crescent' ? rng.range(0.045, 0.07) : shape === 'disc' ? rng.range(0.06, 0.09) : rng.range(0.05, 0.11);
+    const y = 1.5 + t * (H - 1.9);
+    const key = i === 0 || i === n - 1;
+    const shape = key ? 'blob' : shapes[i % shapes.length];
+    const r = key ? rng.range(0.095, 0.11) : shape === 'rail' ? rng.range(0.1, 0.13) : shape === 'crescent' ? rng.range(0.045, 0.07) : shape === 'disc' ? rng.range(0.06, 0.09) : rng.range(0.05, 0.11);
     const aspect = shape === 'rail' ? 0.28 : shape === 'crescent' ? 0.5 : rng.range(0.6, 0.95);
+    side = -side;
     for (let k = 0; k < 40; k++) {
-      const x = cx + rng.range(-0.55, 0.55);
-      const yy = y + rng.range(-0.12, 0.12);
-      if (free(x, yy, r, 0.1)) {
+      const x = clampX(cx + side * rng.range(0.12, 0.42) + rng.range(-0.08, 0.08), W);
+      const yy = y + rng.range(-0.08, 0.08);
+      if (free(x, yy, r, 0.08)) {
         holds.push({ x, y: yy, r, aspect, rot: rng.range(-0.5, 0.5), color: route, route: true, shape, seed: rng.int(1, 1e9) });
-        cx = x;
+        cx = x * 0.7 + cx * 0.3;
         break;
       }
     }
@@ -132,13 +137,21 @@ export function synthLayout(o: SynthOptions = {}): SynthHold[] {
       holds.push({ x: start.x + 0.02, y: start.y - start.r * start.aspect - gap - 0.075, r: 0.075, aspect: 0.17, rot: 1.45, color: route, route: false, shape: 'tape', seed: 1 });
     }
   }
-  // foot chips of the route below the start
-  for (let i = 0; i < 3; i++) {
+  // foot chips of the route: two under the start, one higher up beside the line
+  const st = holds.find((h) => h.route);
+  const feetAt: [number, number][] = st
+    ? [
+        [st.x - 0.25, st.y - 1.05],
+        [st.x + 0.25, st.y - 0.95],
+        [st.x + rng.range(-0.5, 0.5), rng.range(1.6, 2.4)],
+      ]
+    : [];
+  for (const [fx, fy] of feetAt) {
     for (let k = 0; k < 40; k++) {
-      const x = rng.range(-1.2, 1.2);
-      const y = rng.range(0.35, 1.0);
-      const r = rng.range(0.022, 0.032);
-      if (free(x, y, r, 0.1)) {
+      const x = clampX(fx + rng.range(-0.12, 0.12), W);
+      const y = fy + rng.range(-0.08, 0.08);
+      const r = rng.range(0.03, 0.042);
+      if (free(x, y, r, 0.08)) {
         holds.push({ x, y, r, aspect: 0.7, rot: rng.range(-0.4, 0.4), color: route, route: true, shape: 'blob', seed: rng.int(1, 1e9) });
         break;
       }

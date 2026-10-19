@@ -701,6 +701,32 @@
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3);
 }
 
+/* beta check */
+.ph-beta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 22px;
+  font: 600 10.5px/1.35 var(--f-mono);
+  letter-spacing: 0.14em;
+  color: var(--c-fog);
+}
+.ph-beta .ph-spin {
+  width: 16px;
+  height: 16px;
+}
+.ph-beta-ic {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+.ph-beta.is-ok {
+  color: var(--c-good);
+}
+.ph-beta.is-none {
+  color: var(--c-warn);
+}
+
 /* WALL: the 3D gym shows through the stage */
 .ph.is-3d {
   background: transparent;
@@ -730,6 +756,35 @@
 @media (min-height: 760px) {
   .ph-title {
     font-size: 28px;
+  }
+}
+/* short phones: a tighter sheet leaves the photo room to tap on */
+@media (max-height: 760px) {
+  .ph-sheet {
+    gap: 10px;
+    padding-top: 14px;
+  }
+  .ph-title {
+    font-size: 22px;
+  }
+  .ph-hint {
+    font-size: 13px;
+  }
+  .ph-claude {
+    padding: 10px;
+    gap: 6px;
+  }
+  .ph-claude-go {
+    min-height: 44px;
+  }
+  .ph-claude-note {
+    font-size: 11px;
+  }
+  .ph-actions .btn-xl {
+    min-height: 54px;
+  }
+  .ph-wall {
+    min-height: 84px;
   }
 }
 @media (max-width: 370px) {

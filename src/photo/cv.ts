@@ -24,6 +24,8 @@ export const CV = {
   tapeAspect: 4.2,
   tapeMaxWidthM: 0.04,
   tapeMinLengthM: 0.1,
+  /** …and straight: a curved crescent edge has a hollow hull. */
+  tapeSolidity: 0.72,
   /** Bigger than this (longest dimension, m) reads as a volume. */
   volumeM: 0.5,
   volumeEqM: 0.4,
@@ -530,13 +532,14 @@ function blobOf(id: number, r: Region, kind: BlobKind, threshold: number, w: num
 }
 
 /** What a region reads as at this scale (null = noise, dropped). */
-export function classify(major: number, minor: number, area: number, ppm: number): BlobKind | null {
+export function classify(major: number, minor: number, area: number, ppm: number, solidity = 1): BlobKind | null {
   const eq = (2 * Math.sqrt(area / Math.PI)) / ppm;
   const M = major / ppm;
   const m = minor / ppm;
   if (eq < CV.minHoldM) return null;
   if (M > CV.volumeM || eq > CV.volumeEqM) return 'volume';
-  if (M / Math.max(1e-6, m) > CV.tapeAspect && m < CV.tapeMaxWidthM && M > CV.tapeMinLengthM) return 'tape';
+  // tape is a straight strip; a crescent edge is as long and thin but curved (hollow hull)
+  if (M / Math.max(1e-6, m) > CV.tapeAspect && m < CV.tapeMaxWidthM && M > CV.tapeMinLengthM && solidity >= CV.tapeSolidity) return 'tape';
   return 'hold';
 }
 
@@ -816,7 +819,7 @@ export function detectBlobs(lab: LabImage, dist: Float32Array, p: DetectParams):
   // merge fragments of one hold (a chalk band or a glossy stripe across it)
   const prelim = regions.map((r, i) => {
     const b = blobOf(i, r, 'hold', T, w);
-    const kind: BlobKind | null = r.tape ? 'tape' : classify(b.major, b.minor, b.area, p.ppm);
+    const kind: BlobKind | null = r.tape ? 'tape' : classify(b.major, b.minor, b.area, p.ppm, b.solidity);
     return { b, kind };
   });
   const gapPx = Math.max(2, CV.mergeGapM * p.ppm);
@@ -835,7 +838,7 @@ export function detectBlobs(lab: LabImage, dist: Float32Array, p: DetectParams):
       a.merge(b);
       regions[j].alive = false;
       const nb = blobOf(i, regions[i], 'hold', T, w);
-      prelim[i] = { b: nb, kind: classify(nb.major, nb.minor, nb.area, p.ppm) };
+      prelim[i] = { b: nb, kind: classify(nb.major, nb.minor, nb.area, p.ppm, nb.solidity) };
       if (prelim[i].kind !== 'hold') break;
       j = i; // re-scan: the grown region may reach more fragments
     }
@@ -927,7 +930,7 @@ export function regionAt(lab: LabImage, dist: Float32Array, x: number, y: number
   if (touches) return null; // spills out of the window: the wall itself, or a volume
   mo.lists.push(list);
   const b = blobOf(0, { mo, parent: 0, alive: true }, 'hold', T, w);
-  const kind = classify(b.major, b.minor, b.area, p.ppm);
+  const kind = classify(b.major, b.minor, b.area, p.ppm, b.solidity);
   if (!kind || kind === 'volume') return null;
   b.kind = kind === 'tape' ? 'tape' : 'hold';
   b.manual = true;

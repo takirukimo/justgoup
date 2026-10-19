@@ -17,7 +17,9 @@ import { colorName, labToHex } from './color';
 import { CV, inHull } from './cv';
 import { PhotoEngine } from './engine';
 import { applyH, defaultQuad, quadAspect, quadValid, rectSize, rectToPhoto } from './geometry';
-import { buildBoulder, guessRoles, placeHolds, routeColorFor, ROUTE, wallFor } from './route';
+import { buildWithReport, guessRoles, placeHolds, routeColorFor, ROUTE, wallFor } from './route';
+import { Analyzer } from '../editor/analyzer';
+import { gradeLabel } from '../game/grades';
 import { resolveSample, type SampleAccess, type SampleError } from './sample';
 import { askClaude, circleHull, mergeVision, visionErrorCopy, VisionError, type VisionResult } from './vision';
 import type { DetectResult, Lab, PhotoBlob, PhotoHold, Pt, Quad } from './types';
@@ -143,6 +145,10 @@ export class PhotoImporter {
   presetId: string = ROUTE.defaultPreset;
   private presetTouched = false;
   private preview: BoulderDef | null = null;
+  private addedFeet = 0;
+  private analyzer: Analyzer | null = null;
+  private betaTicket = 0;
+  beta: { state: 'idle' | 'reading' | 'ok' | 'none'; grade: number | null } = { state: 'idle', grade: null };
 
   // view
   private zoom = 1;
@@ -312,6 +318,8 @@ export class PhotoImporter {
     if (this.detectTimer) clearTimeout(this.detectTimer);
     if (this.loupeTimer) clearTimeout(this.loupeTimer);
     this.engine.dispose();
+    this.analyzer?.dispose();
+    this.analyzer = null;
     this.el.classList.remove('on');
     this.el.classList.add('out');
     const remove = (): void => this.el.remove();
@@ -530,10 +538,13 @@ export class PhotoImporter {
         }
         const c = this.routeColor();
         const n = this.included().length;
-        const sum = el('div', 'ph-sum', el('i', 'ph-sum-dot'), el('span', null, `${c.name.toUpperCase()} SNAPSHOT · ${n} HOLD${n === 1 ? '' : 'S'}`));
+        const sum = el('div', 'ph-sum', el('i', 'ph-sum-dot'), el('span', null, `${c.name.toUpperCase()} SNAPSHOT · ${n} HOLD${n === 1 ? '' : 'S'}`, el('span', 'ph-sum-feet', '')));
         sum.style.setProperty('--sw', c.hex);
+        const beta = el('div', 'ph-beta');
+        beta.setAttribute('aria-live', 'polite');
         const make = button({ label: 'CREATE PROBLEM', variant: 'primary', cls: 'btn-xl ph-make', icon: 'check', onTap: () => this.confirm() });
-        s.append(head('Pick the wall', 'How steep is the wall in your photo? Slide for more.'), list, sum, el('div', 'ph-actions', make));
+        s.append(head('Pick the wall', 'How steep is the wall in your photo? Slide for more.'), list, sum, beta, el('div', 'ph-actions', make));
+        requestAnimationFrame(() => this.renderBeta());
         requestAnimationFrame(() => list.querySelector('.on')?.scrollIntoView({ inline: 'center', block: 'nearest' }));
         break;
       }
@@ -992,7 +1003,42 @@ export class PhotoImporter {
     const inc = this.included();
     const { starts, top } = this.resolveRoles();
     const c = this.routeColor();
-    return buildBoulder({ holds: inc, rectW: this.rectW, rectH: this.rectH, starts, top, presetId: this.presetId, color: c.hex, name: `${c.name} Snapshot` });
+    const r = buildWithReport({ holds: inc, rectW: this.rectW, rectH: this.rectH, starts, top, presetId: this.presetId, color: c.hex, name: `${c.name} Snapshot` });
+    this.addedFeet = r.addedFeet;
+    if (this.beta.state === 'ok' && this.beta.grade !== null) r.boulder.grade = this.beta.grade;
+    return r.boulder;
+  }
+
+  /** Can the game's climber get up it on this wall? (the editor's beta reader, in its worker) */
+  private checkBeta(b: BoulderDef): void {
+    const ticket = ++this.betaTicket;
+    this.beta = { state: 'reading', grade: null };
+    this.renderBeta();
+    this.analyzer ??= new Analyzer();
+    this.analyzer
+      .solve(b, 900)
+      .then((r) => {
+        if (ticket !== this.betaTicket || this.finished) return;
+        this.beta = r.moves ? { state: 'ok', grade: r.grade } : { state: 'none', grade: null };
+      })
+      .catch(() => {
+        if (ticket === this.betaTicket) this.beta = { state: 'idle', grade: null };
+      })
+      .finally(() => {
+        if (ticket === this.betaTicket) this.renderBeta();
+      });
+  }
+
+  private renderBeta(): void {
+    const box = this.sheet.querySelector('.ph-beta');
+    if (!box) return;
+    box.textContent = '';
+    box.className = `ph-beta is-${this.beta.state}`;
+    if (this.beta.state === 'reading') box.append(el('i', 'ph-spin'), el('span', null, 'READING THE BETA'));
+    else if (this.beta.state === 'ok') box.append(icon('check', 'ph-beta-ic'), el('span', null, `CLIMBABLE${this.beta.grade !== null ? ' · ' + gradeLabel(this.beta.grade) : ''}`));
+    else if (this.beta.state === 'none') box.append(icon('warn', 'ph-beta-ic'), el('span', null, 'NO BETA YET · TRY A FLATTER WALL OR BIGGER HOLDS IN THE EDITOR'));
+    const feet = this.sheet.querySelector('.ph-sum-feet');
+    if (feet) setText(feet, this.addedFeet ? ` · +${this.addedFeet} START FOOTHOLD${this.addedFeet === 1 ? '' : 'S'}` : '');
   }
 
   private routeColor(): { name: string; hex: string } {
@@ -1016,6 +1062,7 @@ export class PhotoImporter {
       const topH = (this.el.querySelector('.ph-top') as HTMLElement | null)?.offsetHeight ?? 0;
       r.setViewInsets?.(Math.min(0.4, (topH + 8) / H), Math.min(0.45, (this.sheet.offsetHeight + 8) / H));
       this.renderer.setCameraMode('preview', { instant: false });
+      this.checkBeta(this.preview);
     } catch {
       /* the 3D preview is a nicety: the problem is still built on confirm */
     }

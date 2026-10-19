@@ -173,7 +173,7 @@ describe('geometry', () => {
     const h = 540;
     const rect = warpQuad(s.photo, s.quad, w, h);
     // every big route hold has its colour at its centre in the rectified image
-    for (const hd of s.holds.filter((q) => q.route && q.r > 0.06 && q.shape !== 'pocket')) {
+    for (const hd of s.holds.filter((q) => q.route && q.r > 0.06 && (q.shape === 'blob' || q.shape === 'disc'))) {
       const x = Math.round(((hd.x + WALL_W / 2) / WALL_W) * w);
       const y = Math.round(((WALL_H - hd.y) / WALL_H) * h);
       const o = (y * w + x) * 4;
@@ -333,7 +333,8 @@ describe('detection on synthetic photos', () => {
     const r0 = run({ seed: 21, view: 'below', route: '#2F6FEB', distractors: 30 });
     const purple = r0.s.holds.filter((hd) => hd.color === '#8B5CF6');
     expect(purple.length).toBeGreaterThan(0);
-    const ex = purple.find((p) => p.r > 0.05) ?? purple[0];
+    // the "not this" tap lands on a purple hold's body (a crescent's middle is wall)
+    const ex = purple.find((p) => p.r > 0.05 && p.shape !== 'crescent') ?? purple.find((p) => p.shape !== 'crescent') ?? purple[0];
     const px = r0.toPx(ex);
     const neg = samplePatch(r0.lab, px.x, px.y, 2)!;
     const r = run({ seed: 21, view: 'below', route: '#2F6FEB', distractors: 30 }, { exclude: [neg], sensitivity: 0.7 });

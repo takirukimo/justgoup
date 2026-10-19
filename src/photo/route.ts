@@ -8,6 +8,7 @@ import { ROUTE_COLORS } from '../config/brand';
 import { GAME } from '../config/tuning';
 import { extentOf, sizeRange } from '../editor/catalog';
 import { capsuleGap, clampToBounds, holdBounds } from '../editor/model';
+import { startPlacement } from '../game/holds';
 import { cleanWall, presetById, presetWall, setWall, WALL_PRESETS, type WallPreset } from '../editor/walls';
 import { hexToLab } from './color';
 import type { Lab, PhotoHold } from './types';
@@ -18,6 +19,11 @@ export const ROUTE = {
   margin: 0.12,
   /** Start holds sit at least this high unless nothing else can start (m). */
   startMinY: 0.75,
+  /** Preferred start height (the game's climber starts standing on the pads, feet on holds below). */
+  startBand: [1.2, 2.0] as const,
+  /** A start foothold sits this far below the start hands (m). */
+  footGapMin: 0.55,
+  footGapMax: 1.6,
   /** A second start: about level with the first, a hand-width or more apart. */
   pairDy: 0.35,
   pairDxMin: 0.12,
@@ -54,9 +60,9 @@ export interface PlacedHold {
 }
 
 /**
- * Guess type, product shape and size from a blob's real dimensions (research §5.1 step 6). Sloper vs jug
- * is undecidable in 2D, so a round mid-size blob is a jug only while it is jug-sized; bigger round ones
- * read as slopers (the conservative capacity).
+ * Guess type, product shape and size from a blob's real dimensions (research §5.1 step 6, with its
+ * "edge, medium" default: a small compact blob is an edge, only a thin sliver a crimp). Sloper vs jug is
+ * undecidable in 2D, so a round blob is a jug while it is jug-sized; bigger round ones read as slopers.
  * `lengthM` / `widthM`: longest and cross dimension; `thetaWall`: major axis direction in wall
  * coordinates (y up); `towardX`: +1 / −1, the side the route's line is on (for sidepulls).
  */
@@ -74,11 +80,11 @@ export function guessHold(o: { lengthM: number; widthM: number; thetaWall: numbe
     type = 'pocket';
     fingers = L < 0.07 ? 2 : 3;
   } else if (L < 0.1) {
-    if (aspect > 2.6) {
+    // research default: "edge, medium" — only a thin sliver reads as a crimp
+    if (aspect > 2.6 && o.widthM < 0.026) {
       type = 'crimp';
-      if (o.widthM < 0.022) shape = 'micro';
-    } else if (aspect > 1.6) type = 'edge';
-    else type = 'crimp';
+      if (o.widthM < 0.018) shape = 'micro';
+    } else type = 'edge';
   } else if (L < 0.25) {
     const vertical = Math.abs(Math.cos(o.thetaWall)) < 0.5;
     if (aspect > 3) {
@@ -86,7 +92,7 @@ export function guessHold(o: { lengthM: number; widthM: number; thetaWall: numbe
       if (L >= 0.16) shape = 'rail';
     } else if (aspect > 1.9 && vertical) type = 'pinch';
     else if (aspect > 1.9) type = 'edge';
-    else if (L < 0.17) type = 'jug';
+    else if (L < 0.2) type = 'jug';
     else if (aspect < 1.35) type = 'sloper';
     else {
       type = 'jug';
@@ -206,8 +212,12 @@ export function guessRoles(placed: readonly PlacedHold[], tapes: readonly { x: n
     if (best >= 0 && starts.length < 2) starts.push(best);
   }
   if (!starts.length && pool.length) {
+    // the game's climber starts standing: hands in the start band with something for the feet below
+    const feetUnder = (h: { p: PlacedHold; i: number }): boolean =>
+      placed.some((q, j) => j !== h.i && q.y < h.p.y - ROUTE.footGapMin && q.y > h.p.y - ROUTE.footGapMax && Math.abs(q.x - h.p.x) < 1.0);
+    const band = pool.filter((h) => h.p.y >= ROUTE.startBand[0] && h.p.y <= ROUTE.startBand[1] && feetUnder(h));
     const high = pool.filter((h) => h.p.y >= ROUTE.startMinY);
-    const cands = high.length ? high : pool;
+    const cands = band.length ? band : high.length ? high : pool;
     const first = cands.reduce((a, b) => (b.p.y < a.p.y ? b : a));
     starts = [first.i];
     let pair: { p: PlacedHold; i: number } | null = null;
@@ -269,12 +279,22 @@ export interface BuildOptions {
   color: string;
   name: string;
   seed?: number;
+  /**
+   * Add small route-coloured footholds under the start when the photo has none in reach (many gym
+   * problems are "any feet"; the game's climber needs something to stand on). Default true.
+   */
+  startFeet?: boolean;
 }
 
 const r3 = (v: number): number => Math.round(v * 1000) / 1000;
 
 /** Assemble the BoulderDef the editor loads as a draft. */
 export function buildBoulder(o: BuildOptions): BoulderDef {
+  return buildWithReport(o).boulder;
+}
+
+/** buildBoulder, also reporting the start footholds it had to add. */
+export function buildWithReport(o: BuildOptions): { boulder: BoulderDef; addedFeet: number } {
   const wall = wallFor(o.presetId);
   const placed = placeHolds(o.holds, o.rectW, o.rectH, wall.length);
   const seed = o.seed ?? 1 + Math.floor(Math.random() * 0x7ffffffe);
@@ -294,6 +314,11 @@ export function buildBoulder(o: BuildOptions): BoulderDef {
   let n = 0;
   placed.forEach((p, i) => {
     const g = p.guess;
+    // a guessed foot chip marked as the start or the top is a small hand hold
+    if (g.type === 'foot' && (i === o.top || o.starts.includes(i)) && !o.holds[i].type) Object.assign(g, { type: 'crimp', size: sizeFor('crimp', undefined, p.lengthM) });
+    // the top is matched with both hands and starts are held from a standing start: gyms set them on
+    // good holds, and a round blob there is far more likely a jug than a sloper (2D can't tell)
+    if (!o.holds[i].type && (i === o.top || o.starts.includes(i))) upgradeKeyHold(g, p.lengthM, i === o.top);
     const role: HoldDef['role'] = g.type === 'foot' || g.type === 'volume' ? 'foot' : i === o.top ? 'top' : o.starts.includes(i) ? 'start' : 'hand';
     const h: HoldDef = {
       id: `${role === 'start' ? 's' : role === 'top' ? 't' : g.type === 'volume' ? 'v' : role === 'foot' ? 'f' : 'h'}${++n}`,
@@ -311,7 +336,63 @@ export function buildBoulder(o: BuildOptions): BoulderDef {
     b.holds.push(h);
   });
   settle(b);
-  return b;
+  const addedFeet = o.startFeet === false ? 0 : addStartFeet(b, seed);
+  return { boulder: b, addedFeet };
+}
+
+/**
+ * The start stance needs a foothold under each foot (game/holds startPlacement): where the photo gives
+ * none, add a small route-coloured foot chip where the game's own generator would set one.
+ */
+function addStartFeet(b: BoulderDef, seed: number): number {
+  const sp = startPlacement(b);
+  if (!sp[0] || !sp[1] || (sp[2] && sp[3])) return 0;
+  const byId = new Map(b.holds.map((h) => [h.id, h] as const));
+  const lh = byId.get(sp[0])!;
+  const rh = byId.get(sp[1])!;
+  const hx = (lh.x + rh.x) / 2;
+  const hy = Math.min(lh.y, rh.y);
+  const fy = Math.max(GAME.padHeight + 0.12, Math.min(hy - 1.0, 0.75));
+  let added = 0;
+  for (const [slot, side] of [
+    [2, -1],
+    [3, 1],
+  ] as const) {
+    if (sp[slot]) continue;
+    const h: HoldDef = {
+      id: `f${b.holds.length + 1}`,
+      x: r3(hx + side * 0.24),
+      y: r3(fy + (side > 0 ? 0.04 : 0)),
+      type: 'foot',
+      shape: 'chip',
+      size: 0.026,
+      angle: -Math.PI / 2,
+      role: 'foot',
+      color: b.color,
+      seed: (Math.imul(seed ^ (91 + slot), 2654435761) >>> 1) % 0x7ffffff0 || 1,
+    };
+    while (byId.has(h.id)) h.id = `f${Number(h.id.slice(1)) + 1}`;
+    byId.set(h.id, h);
+    b.holds.push(h);
+    added++;
+  }
+  if (added) settle(b);
+  return added;
+}
+
+/** Start / top holds read as the good version of their shape (jug for round blobs, edge for crimps). */
+function upgradeKeyHold(g: HoldGuess, lengthM: number, top: boolean): void {
+  const to = (type: HoldType, shape?: HoldShape): void => {
+    g.type = type;
+    if (shape) g.shape = shape;
+    else delete g.shape;
+    delete g.fingers;
+    g.size = sizeFor(type, shape, lengthM);
+    g.angle = -Math.PI / 2;
+  };
+  if (g.type === 'sloper' || g.type === 'pocket') to('jug', g.shape === 'macro' ? 'bucket' : undefined);
+  else if (g.type === 'crimp') to('edge');
+  else if (top && g.type === 'pinch') to('jug');
 }
 
 /**

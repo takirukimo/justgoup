@@ -3,7 +3,9 @@ import { draftFromSample, validateDraft } from '../editor/model';
 import { hexToLab, grayWorldGains, samplePatch, toLab } from './color';
 import { CV, detectBlobs, distanceMap, excludeSet, wallColor } from './cv';
 import { quadAspect, rectSize, warpQuad } from './geometry';
-import { buildBoulder, guessHold, guessRoles, placeHolds, routeColorFor, wallFor, type PlacedHold } from './route';
+import { buildBoulder, buildWithReport, guessHold, guessRoles, placeHolds, routeColorFor, wallFor, type PlacedHold } from './route';
+import { startPlacement } from '../game/holds';
+import { planBetaDetailed } from '../game/solver';
 import { synthPhoto } from './synth';
 import type { PhotoBlob, PhotoHold } from './types';
 
@@ -25,10 +27,12 @@ describe('hold guesses', () => {
     expect(g(0.03, 0.025).type).toBe('foot');
     expect(g(0.03, 0.025).shape).toBe('chip');
     expect(g(0.045, 0.03).type).toBe('foot');
-    expect(g(0.07, 0.06).type).toBe('crimp');
-    expect(g(0.09, 0.03).type).toBe('crimp');
+    expect(g(0.07, 0.06).type).toBe('edge');
+    expect(g(0.09, 0.022).type).toBe('crimp');
+    expect(g(0.08, 0.015)).toMatchObject({ type: 'crimp', shape: 'micro' });
     expect(g(0.09, 0.045).type).toBe('edge');
     expect(g(0.13, 0.11).type).toBe('jug');
+    expect(g(0.18, 0.15).type).toBe('jug');
     expect(g(0.21, 0.19).type).toBe('sloper');
     expect(g(0.22, 0.13)).toMatchObject({ type: 'jug', shape: 'bucket' });
     expect(g(0.2, 0.05)).toMatchObject({ type: 'edge', shape: 'rail' });
@@ -40,7 +44,7 @@ describe('hold guesses', () => {
 
   it('pulls square to an edge, toward the body below', () => {
     expect(g(0.09, 0.03).angle).toBeCloseTo(-Math.PI / 2, 5);
-    // an edge tilted up to the right: the pull leans left of straight down
+    // an edge tilted up to the right: the pull leans right of straight down (square to the edge)
     const tilted = g(0.09, 0.03, { thetaWall: 0.4 }).angle;
     expect(Math.sin(tilted)).toBeLessThan(0);
     expect(Math.cos(tilted)).toBeGreaterThan(0.2);
@@ -151,4 +155,38 @@ describe('photo → BoulderDef', () => {
       expect(check.ok, `${presetId}: ${check.headline}`).toBe(true);
     }
   }, 20000);
+
+  it('adds start footholds when the photo has none under the start, and the start then stands', () => {
+    // a ladder of hand holds from 1.5 m, nothing below
+    const holds: PhotoHold[] = [];
+    for (let k = 0; k < 9; k++) holds.push(H({ x: 400 + (k % 2 ? 60 : -60), y: 900 - 1.5 * 200 - k * 0.32 * 200, major: 0.12 * 200 }));
+    const r = buildWithReport({ holds, rectW: 800, rectH: 900, starts: [0], top: 8, presetId: 'vertical', color: '#F2C230', name: 'Ladder', seed: 7 });
+    expect(r.addedFeet).toBe(2);
+    const sp = startPlacement(r.boulder);
+    expect(sp[2]).toBeTruthy();
+    expect(sp[3]).toBeTruthy();
+    expect(r.boulder.holds.filter((h) => h.type === 'foot').length).toBe(2);
+    const none = buildWithReport({ holds, rectW: 800, rectH: 900, starts: [0], top: 8, presetId: 'vertical', color: '#F2C230', name: 'Ladder', seed: 7, startFeet: false });
+    expect(none.addedFeet).toBe(0);
+  });
+
+  it('a gym-like problem from a photo is climbable by the game’s planner on a vertical wall', () => {
+    for (const seed of [3, 5]) {
+      const s = synthPhoto({ seed, view: 'below', photoW: 720, photoH: 960, ppm: 170 });
+      const { w, h } = rectSize(quadAspect(s.quad, s.photo.width, s.photo.height), 800);
+      const rect = warpQuad(s.photo, s.quad, w, h);
+      const lab = toLab(rect, grayWorldGains(rect));
+      const route = s.holds.filter((hd) => hd.route && hd.r > 0.05)[0];
+      const sample = samplePatch(lab, ((route.x + 2.3) / 4.6) * w, ((4.5 - route.y) / 4.5) * h)!;
+      const res = detectBlobs(lab, distanceMap(lab, [sample], excludeSet(wallColor(lab), [sample], [])), { sensitivity: CV.defaultSensitivity, ppm: h / 4.5 });
+      const holds: PhotoHold[] = res.blobs.filter((b) => b.kind === 'hold').map((b) => ({ ...b }));
+      const tapes = res.blobs.filter((b) => b.kind === 'tape');
+      const wall = wallFor('vertical');
+      const placed = placeHolds(holds, w, h, wall.length);
+      const mpp = wall.length / h;
+      const roles = guessRoles(placed, tapes.map((t) => ({ x: (t.x - w / 2) * mpp, y: wall.length - t.y * mpp })));
+      const b = draftFromSample(buildBoulder({ holds, rectW: w, rectH: h, starts: roles.starts, top: roles.top, presetId: 'vertical', color: '#F2C230', name: 'Snap', seed }));
+      expect(planBetaDetailed(b, { maxMs: 4000 }), `seed ${seed}`).not.toBeNull();
+    }
+  }, 30000);
 });
