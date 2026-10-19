@@ -294,11 +294,12 @@ try {
   const shared = await tab.evaluate(async () => {
     const b = window.__jgu.backend;
     const r = await b.submitScore({ player: 'Sandbox Ibex', score: 777, mode: 'boulder', sends: 1, maxGrade: 1, head: 'ibex', createdAt: Date.now() });
-    const top = await b.topScores('boulder', { limit: 5 });
+    // (the offline board is seeded with ghost climbers, so a modest score ranks below the top five)
+    const top = await b.topScores('boulder', { limit: 20 });
     return { rank: r.rank, top: top.map((e) => `${e.player}:${e.score}`), docs: window.__fakeDb ? window.__fakeDb.size : -1, label: b.label };
   });
   if (withClaude) ok(shared.docs > 0 && shared.top.includes('Sandbox Ibex:777') && shared.rank === 1, `score stored in the shared Artifact db (${JSON.stringify(shared)})`);
-  else ok(shared.top.includes('Sandbox Ibex:777'), `score kept on the local board (${JSON.stringify(shared)})`);
+  else ok(shared.top.includes('Sandbox Ibex:777') && shared.rank !== null, `score kept on the local board (rank ${shared.rank}, ${shared.label})`);
 
   await tab.evaluate(() => window.__jgu.sim.forceFall());
   await waitScreen('results', 120000);
