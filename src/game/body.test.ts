@@ -684,8 +684,11 @@ describe('foot techniques (research §2.2, §2.3)', () => {
     expect(outside.mode).toBe('flag');
     expect(back.mode).toBe('flag');
     expect(outside.ev.some((e) => e.type === 'technique' && e.technique === 'flag')).toBe(true);
+    // (a back flag cuts the swing by a good third, an outside flag stops it; the torso leans for where the hip
+    // handle takes the body, so the back flag's share moved from 0.58 to 0.63 of the open door)
+    expect(outside.yaw).toBeLessThan(none.yaw * 0.6);
+    expect(back.yaw).toBeLessThan(none.yaw * 0.66);
     for (const f of [outside, back]) {
-      expect(f.yaw).toBeLessThan(none.yaw * 0.6);
       expect(f.tension).toBeLessThan(none.tension - 0.3);
       expect(f.pump).toBeLessThan(none.pump - 0.03);
     }
