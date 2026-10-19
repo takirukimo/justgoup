@@ -49,6 +49,8 @@ interface Tally {
   headArmOverhead: number;
   /** Worst head ↔ arm overlap (m) of the overhead frames. */
   headArmWorst: number;
+  /** Frames where the head turns faster than HEAD_JERK relative to the chest (climbing, not airborne). */
+  headJerkFrames: number;
 }
 
 const fresh = (): Tally => ({
@@ -76,10 +78,13 @@ const fresh = (): Tally => ({
   overheadFrames: 0,
   headArmOverhead: 0,
   headArmWorst: 0,
+  headJerkFrames: 0,
 });
 
 /** An elbow / knee moving this much more than its limb's ends in one 60 Hz frame reads as a pop. */
 const JUMP_BAD = 0.03;
+/** Head rotation relative to the chest faster than this (rad per 60 Hz frame, ~7 rad/s) reads as a snap. */
+const HEAD_JERK = 0.12;
 /** A body capsule this far inside the (folded) wall surface counts as a wall penetration. */
 const WALL_BAD = 0.02;
 
@@ -193,6 +198,9 @@ function run(b: BoulderDef, T: Tally, opts: { secs: number; fallAt?: number; tag
   const prev = [0, 1, 2, 3].map(() => [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()]);
   let havePrev = false;
   let topped = false;
+  const headPrev = new THREE.Quaternion();
+  const headRel = new THREE.Quaternion();
+  const chestInv = new THREE.Quaternion();
   const n = Math.round(opts.secs / dt);
   for (let i = 0; i < n; i++) {
     bot.update(dt, events);
@@ -227,6 +235,13 @@ function run(b: BoulderDef, T: Tally, opts: { secs: number; fallAt?: number; tag
           T.wallLog.push(`${(w.v * 100).toFixed(1)}cm ${w.what} ${where} P=${st.pelvis.x.toFixed(2)},${st.pelvis.y.toFixed(2)} C=${st.chest.x.toFixed(2)},${st.chest.y.toFixed(2)} d=${st.pelvisDepth.toFixed(2)}`);
       }
       if (w.v > T.wall.v) T.wall = { v: w.v, what: w.what, tag: `${where} P=${st.pelvis.x.toFixed(2)},${st.pelvis.y.toFixed(2)} d=${st.pelvisDepth.toFixed(2)}` };
+    }
+    {
+      // head snaps: the neck's rotation relative to the chest, frame to frame
+      chestInv.copy(model.rig.bones[BONE.chest].quaternion).invert();
+      headRel.copy(chestInv).multiply(model.rig.bones[BONE.neck].quaternion);
+      if (havePrev && st.phase === 'climbing' && !st.airborne && headRel.angleTo(headPrev) > HEAD_JERK) T.headJerkFrames++;
+      headPrev.copy(headRel);
     }
     {
       // hands reaching overhead vs the head (skull, snout, horns)
@@ -385,7 +400,7 @@ function report(name: string, T: Tally): void {
   process.stderr.write(
     `\n== ${name} ==\nframes ${T.frames}  pen>${PEN_BAD * 100}cm ${pct(T.penFrames, T.frames)}  pen>5cm ${pct(T.pen5Frames, T.frames)}  floor ${pct(T.floorFrames, T.frames)}  wall>${WALL_BAD * 100}cm ${pct(T.wallFrames, T.frames)}  pops ${pct(T.jumpFrames, T.frames)}  ik-fallback ${pct(T.fbFrames, T.frames)}\n` +
       `pose ${(T.poseMs / Math.max(1, T.frames)).toFixed(3)} ms/frame (node)\n` +
-      `head↔arm>${PEN_BAD * 100}cm ${pct(T.headArmFrames, T.frames)} of frames; overhead reaches ${pct(T.overheadFrames, T.frames)} of frames, head↔arm in ${pct(T.headArmOverhead, T.overheadFrames)} of them (worst ${(T.headArmWorst * 100).toFixed(1)} cm)\n` +
+      `head↔arm>${PEN_BAD * 100}cm ${pct(T.headArmFrames, T.frames)} of frames; overhead reaches ${pct(T.overheadFrames, T.frames)} of frames, head↔arm in ${pct(T.headArmOverhead, T.overheadFrames)} of them (worst ${(T.headArmWorst * 100).toFixed(1)} cm); head snaps ${pct(T.headJerkFrames, T.frames)}\n` +
       `worst wall ${(T.wall.v * 100).toFixed(1)} cm ${T.wall.what} @ ${T.wall.tag}\nwall by part: ${JSON.stringify(T.wallBy)}\n` +
       (T.wallLog.length ? `walls:\n  ${T.wallLog.join('\n  ')}\n` : '') +
       `worst pen ${(T.worst.v * 100).toFixed(1)} cm ${T.worst.what} @ ${T.worst.tag}\n` +

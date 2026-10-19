@@ -378,6 +378,9 @@ const HEAD_ARM_MOVES: Float32Array = (() => {
   return new Float32Array(rows.slice(0, 72).flat());
 })();
 
+/** Fastest the head moves into / out of an arm dodge (rad/s per axis). */
+const HEAD_DODGE_RATE = 4.5;
+
 /** Max angle (radians) of a polar table at azimuth `omegaDeg`. */
 function polarMax(t: PolarTable, omegaDeg: number): number {
   let w = omegaDeg % 360;
@@ -2415,11 +2418,14 @@ export class BodyRig {
     this.dodge[0] = armYaw;
     this.dodge[1] = armPitch;
     this.dodge[2] = armRoll;
-    const kIn = dt <= 0 ? 1 : 1 - Math.exp(-dt * 18);
+    // into a dodge quickly, back out slowly; never faster than a brisk head turn (no snaps)
+    const kIn = dt <= 0 ? 1 : 1 - Math.exp(-dt * 16);
     const kOut = dt <= 0 ? 1 : 1 - Math.exp(-dt * 7);
-    this.headArmYaw += (armYaw - this.headArmYaw) * (Math.abs(armYaw) > Math.abs(this.headArmYaw) ? kIn : kOut);
-    this.headArmPitch += (armPitch - this.headArmPitch) * (Math.abs(armPitch) > Math.abs(this.headArmPitch) ? kIn : kOut);
-    this.headArmRoll += (armRoll - this.headArmRoll) * (Math.abs(armRoll) > Math.abs(this.headArmRoll) ? kIn : kOut);
+    const vMax = dt <= 0 ? Infinity : HEAD_DODGE_RATE * dt;
+    const ease = (cur: number, tgt: number) => cur + clampN((tgt - cur) * (Math.abs(tgt) > Math.abs(cur) ? kIn : kOut), -vMax, vMax);
+    this.headArmYaw = ease(this.headArmYaw, armYaw);
+    this.headArmPitch = ease(this.headArmPitch, armPitch);
+    this.headArmRoll = ease(this.headArmRoll, armRoll);
     const pitchF = p0 + this.headArmPitch;
     const yawF = yawW + this.headArmYaw;
     const rollF = r0 + this.headArmRoll;

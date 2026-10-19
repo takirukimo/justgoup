@@ -124,6 +124,10 @@ async function respawnAt(f, steepest = false) {
       const placement = { LH: pair[0].id, RH: pair[1].id };
       if (lf) placement.LF = lf.id;
       if (rf) placement.RF = rf.id;
+      // lead: clip every draw below the hands first (as if climbed to here), so a slip is a rope
+      // catch and not a ground fall that ends the run
+      const sess = window.__jgu.app.activeSession;
+      if (sess && sess.rope) for (const q of sess.rope.quickdraws) if (q.y < hy - 0.4 && !sess.rope.isClipped?.(q.id)) sess.onClipped(q.id);
       sim.respawn(placement);
       return { hy: +hy.toFixed(2), placement };
     },
