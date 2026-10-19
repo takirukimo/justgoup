@@ -1,0 +1,759 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   STEIBOCK — photo → route importer (Phase E). Lives inside the UI root (.jgu-ui tokens).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.ph {
+  position: absolute;
+  inset: 0;
+  z-index: 4; /* over the editor (1–3), under the modal layer (5) */
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  pointer-events: auto;
+  color: var(--c-bone);
+  background:
+    radial-gradient(120% 70% at 50% 0%, rgba(213, 64, 81, 0.07), transparent 60%),
+    var(--c-basalt);
+  opacity: 0;
+  transition: opacity 0.26s var(--ease), background-color 0.3s;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.ph.on {
+  opacity: 1;
+}
+.ph.out {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ── top bar ── */
+.ph-top {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) 52px;
+  align-items: center;
+  gap: 10px;
+  padding: calc(var(--safe-t) + 10px) calc(var(--safe-r) + var(--gut)) 10px calc(var(--safe-l) + var(--gut));
+}
+.ph-top-mid {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.ph-kicker {
+  font: 600 10px/1 var(--f-mono);
+  letter-spacing: 0.22em;
+  color: var(--c-fog);
+}
+.ph-prog {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+  width: min(100%, 220px);
+}
+.ph-prog-seg {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--hair-2);
+  transition: background-color 0.3s var(--ease);
+}
+.ph-prog-seg.done {
+  background: rgba(233, 229, 221, 0.62);
+}
+.ph-prog-seg.cur {
+  background: var(--c-signal);
+  box-shadow: 0 0 10px rgba(var(--c-signal-rgb), 0.6);
+}
+.ph-step-l {
+  font: 700 11px/1 var(--f-mono);
+  letter-spacing: 0.16em;
+  color: var(--c-chalk);
+  white-space: nowrap;
+}
+
+/* ── stage ── */
+.ph-stage {
+  position: relative;
+  overflow: hidden;
+  touch-action: none;
+  background-color: #0b0c0e;
+  /* the T-nut lattice of a climbing wall */
+  background-image: radial-gradient(rgba(255, 255, 255, 0.07) 1px, transparent 1.4px);
+  background-size: 22px 22px;
+  background-position: 11px 11px;
+}
+.ph-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.ph[data-step='color'] .ph-canvas,
+.ph[data-step='holds'] .ph-canvas,
+.ph[data-step='roles'] .ph-canvas {
+  cursor: crosshair;
+}
+.ph.is-detecting .ph-canvas {
+  filter: saturate(0.85);
+}
+
+.ph-corner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 48px;
+  height: 48px;
+  margin: -24px 0 0 -24px;
+  display: grid;
+  place-items: center;
+  touch-action: none;
+  cursor: grab;
+  outline: 0;
+  z-index: 2;
+}
+.ph-corner[hidden] {
+  display: none;
+}
+.ph-corner-ring {
+  display: block;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  background: radial-gradient(circle, var(--c-signal) 0 4px, rgba(13, 14, 16, 0.35) 4.5px);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.6), 0 0 0 4px rgba(var(--c-signal-rgb), 0.22);
+  transition: transform 0.16s var(--ease), box-shadow 0.2s;
+}
+.ph-corner.drag {
+  cursor: grabbing;
+}
+.ph-corner.drag .ph-corner-ring {
+  transform: scale(1.18);
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.6), 0 0 0 7px rgba(var(--c-signal-rgb), 0.3);
+}
+.ph-corner:focus-visible .ph-corner-ring {
+  box-shadow: 0 0 0 3px var(--c-basalt), 0 0 0 5px var(--c-glacier);
+}
+
+.ph-loupe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 128px;
+  height: 128px;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 3;
+  box-shadow: 0 0 0 2px #fff, 0 0 0 4px rgba(13, 14, 16, 0.7), 0 14px 34px rgba(0, 0, 0, 0.65);
+  transition: opacity 0.14s;
+}
+.ph-loupe.on {
+  opacity: 1;
+}
+.ph-loupe.tinted {
+  box-shadow: 0 0 0 2px #fff, 0 0 0 7px var(--sw, #fff), 0 0 0 8px rgba(13, 14, 16, 0.7), 0 14px 34px rgba(0, 0, 0, 0.65);
+}
+
+.ph-busy {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: rgba(13, 14, 16, 0.6);
+  font: 600 11px/1 var(--f-mono);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--c-chalk);
+}
+.ph-busy.on {
+  display: flex;
+}
+.ph-spin {
+  display: inline-block;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.16);
+  border-top-color: var(--c-signal);
+  animation: ph-spin 0.8s linear infinite;
+}
+@keyframes ph-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── PHOTO hero ── */
+.ph-hero {
+  position: absolute;
+  inset: 0;
+  display: none;
+  place-items: center;
+  align-content: center;
+  gap: 18px;
+}
+.ph[data-step='photo'] .ph-hero {
+  display: grid;
+}
+.ph-viewfinder {
+  position: relative;
+  width: min(52%, 210px);
+  aspect-ratio: 4 / 5;
+  border-radius: 6px;
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px) 0 0 / 100% 25%,
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px) 0 0 / 25% 100%,
+    linear-gradient(180deg, #23262c, #191b1f);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06), 0 30px 60px -20px rgba(0, 0, 0, 0.8);
+  animation: ph-float 5s ease-in-out infinite;
+}
+@keyframes ph-float {
+  50% {
+    transform: translateY(-5px);
+  }
+}
+.ph-vf-c {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--c-signal);
+  filter: drop-shadow(0 0 8px rgba(var(--c-signal-rgb), 0.5));
+}
+.ph-vf-c.tl {
+  top: -10px;
+  left: -10px;
+  border-right: 0;
+  border-bottom: 0;
+  border-radius: 6px 0 0 0;
+}
+.ph-vf-c.tr {
+  top: -10px;
+  right: -10px;
+  border-left: 0;
+  border-bottom: 0;
+  border-radius: 0 6px 0 0;
+}
+.ph-vf-c.br {
+  bottom: -10px;
+  right: -10px;
+  border-left: 0;
+  border-top: 0;
+  border-radius: 0 0 6px 0;
+}
+.ph-vf-c.bl {
+  bottom: -10px;
+  left: -10px;
+  border-right: 0;
+  border-top: 0;
+  border-radius: 0 0 0 6px;
+}
+.ph-vf-dot {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  border-radius: 46% 54% 50% 50% / 55% 50% 50% 45%;
+  background: radial-gradient(circle at 35% 30%, #fff 0, var(--c-bone) 35%, #a9a49a 100%);
+  box-shadow: 1px 3px 4px rgba(0, 0, 0, 0.55);
+}
+.ph-vf-dot:last-child {
+  background: radial-gradient(circle at 35% 30%, #ffb3bc 0, var(--c-signal) 45%, var(--c-signal-deep) 100%);
+}
+.ph-hero-mark {
+  width: 40px;
+  height: auto;
+  color: rgba(233, 229, 221, 0.16);
+}
+
+/* ── bottom sheet ── */
+.ph-sheet {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px calc(var(--safe-r) + var(--gut)) calc(var(--safe-b) + 16px) calc(var(--safe-l) + var(--gut));
+  background: linear-gradient(180deg, rgba(23, 25, 29, 0.97), rgba(15, 16, 19, 0.98));
+  border-top: 1px solid var(--hair-2);
+  border-radius: 22px 22px 0 0;
+  box-shadow: 0 -18px 40px rgba(0, 0, 0, 0.45), var(--hi);
+  /* (a % here would resolve against the grid row and leave a gap under the sheet) */
+  max-height: 64vh;
+  max-height: 64cqh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.ph-head {
+  display: grid;
+  gap: 6px;
+}
+.ph-title {
+  margin: 0;
+  font: 700 26px/1 var(--f-display);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--c-chalk);
+}
+.ph-hint {
+  margin: 0;
+  font: 400 14px/1.45 var(--f-ui);
+  color: var(--c-mist);
+}
+.ph-lbl {
+  font: 600 10.5px/1 var(--f-mono);
+  letter-spacing: 0.16em;
+  color: var(--c-fog);
+}
+
+.ph-tips {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.ph-tips li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font: 500 14px/1.3 var(--f-ui);
+  color: var(--c-bone);
+}
+.ph-ic {
+  width: 20px;
+  height: 20px;
+  flex: none;
+}
+.ph-tips .ph-ic {
+  color: var(--c-signal-ink);
+}
+.ph-foot {
+  margin: 0;
+  text-align: center;
+  font: 600 10px/1.3 var(--f-mono);
+  letter-spacing: 0.18em;
+  color: var(--c-fog);
+}
+.ph-err {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 500 13.5px/1.35 var(--f-ui);
+  color: var(--c-bad-ink);
+}
+.ph-err-ic {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+.ph-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 2px;
+}
+.ph-actions .btn {
+  flex: 1;
+}
+.ph-actions .btn-primary {
+  flex: 1.7;
+}
+.ph-actions-col {
+  flex-direction: column;
+}
+.ph-actions .btn .ph-ic {
+  width: 22px;
+  height: 22px;
+}
+
+/* segmented control */
+.ph-seg {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid var(--hair);
+}
+.ph-seg-b {
+  appearance: none;
+  border: 0;
+  min-height: 44px;
+  border-radius: 10px;
+  background: none;
+  color: var(--c-mist);
+  font: 700 15px/1 var(--f-display);
+  letter-spacing: 0.14em;
+  cursor: pointer;
+  transition: background-color 0.2s, color 0.2s;
+}
+.ph-seg-b.on {
+  background: var(--c-bone);
+  color: var(--c-basalt);
+}
+.ph-seg-b:focus-visible {
+  outline: 2px solid var(--c-glacier);
+  outline-offset: 1px;
+}
+
+/* colour swatches */
+.ph-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 44px;
+  align-items: center;
+}
+.ph-sw-empty {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font: 600 11px/1 var(--f-mono);
+  letter-spacing: 0.16em;
+  color: var(--c-fog);
+}
+.ph-sw {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 12px 0 6px;
+  border-radius: 22px;
+  border: 1px solid var(--hair-2);
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--c-bone);
+  font: 600 11px/1 var(--f-mono);
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  animation: ph-pop 0.32s var(--ease-spring) both;
+}
+@keyframes ph-pop {
+  from {
+    transform: scale(0.8);
+    opacity: 0;
+  }
+}
+.ph-sw-dot {
+  position: relative;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--sw);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25), 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+.ph-sw.neg .ph-sw-dot::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 3px;
+  bottom: 3px;
+  width: 2.5px;
+  margin-left: -1.25px;
+  background: #fff;
+  border-radius: 2px;
+  transform: rotate(45deg);
+  box-shadow: 0 0 0 1px rgba(13, 14, 16, 0.6);
+}
+.ph-sw.neg {
+  border-color: rgba(var(--c-bad-rgb), 0.4);
+}
+.ph-sw-x {
+  width: 14px;
+  height: 14px;
+  color: var(--c-fog);
+}
+
+/* sensitivity */
+.ph-sens {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+}
+.ph-range-v {
+  font: 700 13px/1 var(--f-mono);
+  color: var(--c-chalk);
+  text-align: right;
+}
+.ph-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 44px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.ph-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, rgba(var(--c-signal-rgb), 0.7), rgba(255, 255, 255, 0.18));
+}
+.ph-range::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, rgba(var(--c-signal-rgb), 0.7), rgba(255, 255, 255, 0.18));
+}
+.ph-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 26px;
+  height: 26px;
+  margin-top: -11px;
+  border-radius: 50%;
+  background: #fff;
+  border: 0;
+  box-shadow: 0 0 0 4px rgba(var(--c-signal-rgb), 0.45), 0 3px 8px rgba(0, 0, 0, 0.5);
+}
+.ph-range::-moz-range-thumb {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #fff;
+  border: 0;
+  box-shadow: 0 0 0 4px rgba(var(--c-signal-rgb), 0.45), 0 3px 8px rgba(0, 0, 0, 0.5);
+}
+.ph-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px var(--c-basalt), 0 0 0 5px var(--c-glacier);
+}
+
+/* Enhance with Claude */
+.ph-claude {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(154, 212, 222, 0.22);
+  background: rgba(154, 212, 222, 0.05);
+}
+.ph-claude-go {
+  width: 100%;
+  min-height: 48px;
+  font-size: 15.5px;
+}
+.ph-claude-go .ph-ic,
+.ph-claude-h .ph-ic {
+  color: var(--c-glacier);
+}
+.ph-claude-note {
+  margin: 0;
+  font: 400 12px/1.4 var(--f-ui);
+  color: var(--c-fog);
+  text-align: center;
+}
+.ph-claude-run {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  font: 500 13px/1.35 var(--f-ui);
+  color: var(--c-mist);
+}
+.ph-claude-run .ph-spin {
+  border-top-color: var(--c-glacier);
+}
+.ph-claude-stop {
+  min-height: 44px;
+}
+.ph-claude-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 700 11px/1 var(--f-mono);
+  letter-spacing: 0.16em;
+  color: var(--c-glacier);
+}
+.ph-note {
+  margin: 0;
+  font: 400 12.5px/1.4 var(--f-ui);
+  color: var(--c-mist);
+}
+.ph-note b {
+  font-weight: 700;
+  color: var(--c-chalk);
+}
+.ph-note.bad b {
+  color: var(--c-bad-ink);
+}
+
+/* start / top status */
+.ph-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.ph-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--hair-2);
+  font: 700 11px/1 var(--f-mono);
+  letter-spacing: 0.12em;
+  color: var(--c-fog);
+}
+.ph-chip.ok {
+  color: var(--c-good);
+  border-color: rgba(79, 209, 139, 0.38);
+}
+
+/* wall presets */
+.ph-walls {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  margin: 0 calc(-1 * var(--gut));
+  padding: 2px var(--gut) 6px;
+  scrollbar-width: none;
+}
+.ph-walls::-webkit-scrollbar {
+  display: none;
+}
+.ph-wall {
+  appearance: none;
+  flex: none;
+  width: 84px;
+  min-height: 94px;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 3px;
+  padding: 8px 4px;
+  border-radius: 14px;
+  border: 1px solid var(--hair-2);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--c-bone);
+  cursor: pointer;
+  scroll-snap-align: center;
+  transition: border-color 0.2s, background-color 0.2s, transform 0.16s var(--ease);
+}
+.ph-wall:active {
+  transform: scale(0.97);
+}
+.ph-wall.on {
+  border-color: var(--c-signal);
+  background: rgba(var(--c-signal-rgb), 0.14);
+  box-shadow: inset 0 0 0 1px var(--c-signal);
+}
+.ph-wall:focus-visible {
+  outline: 2px solid var(--c-glacier);
+  outline-offset: 2px;
+}
+.ph-wall-g {
+  width: 40px;
+  height: 38px;
+}
+.ph-wall-line {
+  fill: none;
+  stroke: var(--c-bone);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.ph-wall.on .ph-wall-line {
+  stroke: #fff;
+}
+.ph-wall-floor {
+  stroke: var(--c-steel);
+  stroke-width: 1.2;
+}
+.ph-wall-t {
+  font: 600 9.5px/1 var(--f-mono);
+  letter-spacing: 0.1em;
+  color: var(--c-fog);
+}
+.ph-wall.on .ph-wall-t {
+  color: var(--c-chalk);
+}
+.ph-wall-v {
+  font: 700 15px/1 var(--f-display);
+  letter-spacing: 0.08em;
+  color: var(--c-chalk);
+}
+.ph-sum {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font: 600 11px/1.3 var(--f-mono);
+  letter-spacing: 0.14em;
+  color: var(--c-bone);
+}
+.ph-sum-dot {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--sw);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3);
+}
+
+/* WALL: the 3D gym shows through the stage */
+.ph.is-3d {
+  background: transparent;
+}
+.ph.is-3d .ph-stage {
+  background: transparent;
+  pointer-events: none;
+}
+.ph.is-3d .ph-top {
+  background: linear-gradient(180deg, rgba(13, 14, 16, 0.86), rgba(13, 14, 16, 0));
+}
+
+/* hidden inputs / live region */
+.ph-file,
+.ph-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+}
+
+@media (min-height: 760px) {
+  .ph-title {
+    font-size: 28px;
+  }
+}
+@media (max-width: 370px) {
+  .ph-wall {
+    width: 76px;
+  }
+  .ph-title {
+    font-size: 23px;
+  }
+}
+
+.reduced-motion .ph,
+.reduced-motion .ph-viewfinder,
+.reduced-motion .ph-sw {
+  animation: none;
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ph,
+  .ph-viewfinder,
+  .ph-sw,
+  .ph-spin {
+    animation-duration: 0.01ms;
+    animation-iteration-count: 1;
+    transition: none;
+  }
+}

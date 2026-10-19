@@ -229,17 +229,27 @@ export function guessRoles(placed: readonly PlacedHold[], tapes: readonly { x: n
   return { starts, top: topH.i };
 }
 
-/** The route colour of the game's palette closest to a sampled colour. */
+/**
+ * The route colour of the game's palette closest to a sampled colour: by hue for a coloured sample (a
+ * shaded blue is still blue, never black), by lightness for a white / grey / black one.
+ */
 export function routeColorFor(c: Lab): { name: string; hex: string } {
+  const chromaC = Math.hypot(c.a, c.b);
+  const coloured = chromaC >= 12;
+  const hue = (l: Lab): number => Math.atan2(l.b, l.a);
   let best = ROUTE_COLORS[0];
   let bd = Infinity;
-  const chromaC = Math.hypot(c.a, c.b);
   for (const rc of ROUTE_COLORS) {
     const r = hexToLab(rc.hex);
     const chromaR = Math.hypot(r.a, r.b);
-    // hue/chroma first; lightness matters for white / black / grey
-    const wl = chromaC < 12 && chromaR < 12 ? 1 : 0.25;
-    const d = Math.hypot((c.L - r.L) * wl, c.a - r.a, c.b - r.b);
+    if (coloured !== chromaR >= 12) continue;
+    let d: number;
+    if (coloured) {
+      let dh = Math.abs(hue(c) - hue(r));
+      if (dh > Math.PI) dh = 2 * Math.PI - dh;
+      // hue first; chroma and lightness only split near neighbours (pink vs red, yellow vs orange)
+      d = dh * 60 + Math.abs(chromaC - chromaR) * 0.12 + Math.abs(c.L - r.L) * 0.08;
+    } else d = Math.abs(c.L - r.L);
     if (d < bd) {
       bd = d;
       best = rc;

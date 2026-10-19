@@ -98,4 +98,6 @@ export interface PhotoHold {
   sizeM?: number;
   manual?: boolean;
   source?: 'cv' | 'claude' | 'user';
+  /** False: the user (or the tape / volume default) left it out of the problem. */
+  included?: boolean;
 }

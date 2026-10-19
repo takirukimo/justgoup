@@ -251,7 +251,7 @@ export function mergeVision(local: readonly PhotoHold[], v: VisionResult, mode: 
   const rejected = new Set(v.rejected);
   const stats: MergeStats = { kept: 0, dropped: 0, added: 0 };
   const apply = (p: PhotoHold, vh: VisionHold): PhotoHold => {
-    const q: PhotoHold = { ...p, source: 'claude' };
+    const q: PhotoHold = { ...p, source: 'claude', included: true };
     if (vh.type) {
       q.type = vh.type;
       if (vh.shape) q.shape = vh.shape;
@@ -269,7 +269,7 @@ export function mergeVision(local: readonly PhotoHold[], v: VisionResult, mode: 
     if (vh) {
       out.push(apply(p, vh));
       used.add(i);
-    } else if (mode === 'merge' && !rejected.has(id) && p.kind === 'hold') {
+    } else if (mode === 'merge' && !rejected.has(id) && p.kind === 'hold' && p.included !== false) {
       out.push({ ...p });
       used.add(i);
     }
@@ -314,7 +314,7 @@ export function mergeVision(local: readonly PhotoHold[], v: VisionResult, mode: 
     roleOf.set(q, vh.role);
     stats.added++;
   }
-  stats.dropped = local.filter((p, i) => p.kind === 'hold' && !used.has(i)).length;
+  stats.dropped = local.filter((p, i) => p.kind === 'hold' && p.included !== false && !used.has(i)).length;
   const starts: number[] = [];
   let top: number | null = null;
   out.forEach((p, i) => {

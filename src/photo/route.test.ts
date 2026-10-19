@@ -114,6 +114,14 @@ describe('route colours', () => {
     expect(routeColorFor(hexToLab('#3570E0')).name).toBe('Blue');
     expect(routeColorFor(hexToLab('#F0F0EE')).name).toBe('White');
     expect(routeColorFor(hexToLab('#202124')).name).toBe('Black');
+    // a shaded blue sample is still blue; orange stays orange; pink stays pink
+    expect(routeColorFor(hexToLab('#16336A')).name).toBe('Blue');
+    expect(routeColorFor(hexToLab('#E8741F')).name).toBe('Orange');
+    expect(routeColorFor(hexToLab('#EE72AC')).name).toBe('Pink');
+    expect(routeColorFor(hexToLab('#2BAF6A')).name).toBe('Green');
+    expect(routeColorFor(hexToLab('#25B5AD')).name).toBe('Teal');
+    expect(routeColorFor(hexToLab('#DD4038')).name).toBe('Red');
+    expect(routeColorFor(hexToLab('#8A5CF0')).name).toBe('Purple');
   });
 });
 
