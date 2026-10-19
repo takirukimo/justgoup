@@ -13,11 +13,13 @@ All of these are branches on GitHub (`takirukimo/justgoup`), never rewritten:
 | `backup/v0.1-playtest` | the first playtest build, exactly as published as the first claude.ai artifact (also `backups/just-go-up-v0.1-playtest.html` on that branch) |
 | `backup/2026-10-18-latest` | end of day 1: anatomy limits, self-collision, before the v0.1 feedback round |
 | `backup/v0.2-phone-link` | **v0.2**, the build published to the claude.ai artifact link the owner plays on the phone: STEIBOCK rebrand, CHIRAL pink, new ibex, human + cap, wall profiles, chalk, dynos, foot techniques |
-| `backup/v0.2-ios-app` | **v0.2 + editor upgrades + Pure mode + photo-to-route + the native iPhone app**, verified green (`tsc`, 410/410 unit tests, build). The safest branch to put on a phone with Xcode today |
-| `main` | current work. While the v0.3 round runs it can be mid-change; take a backup branch for a phone build until v0.3 is pushed |
+| `backup/v0.2-ios-app` | v0.2 + editor upgrades + Pure mode + photo-to-route + the native iPhone app, verified green (`tsc`, 410/410 unit tests, build) |
+| `release/v0.2.1-ios` | **the branch to put on the iPhone today**: `backup/v0.2-ios-app` plus the brand fixes (gym CHIRAL SPORTS without "HQ", pink sign without the flicker, no lettering on the wall) and the key-art start screen. Checked: typecheck, unit tests, build, and a smoke run of the built app (start screen → onboarding → title → Send Train climb, no console errors) |
+| `main` | current work. While the v0.3 round runs it can be mid-change; build the phone from `release/v0.2.1-ios` until v0.3 is pushed |
 
-To try an old version: `git switch backup/v0.2-phone-link && npm install && npm run dev`, then
-`npm run ios:sync` for the phone. Switch back with `git switch main`.
+For the phone today: `git switch release/v0.2.1-ios && npm install && npm run ios:sync && npm run ios:open`.
+To try an old version: `git switch backup/v0.2-phone-link && npm install && npm run dev`. Switch back
+with `git switch main`.
 
 ## Continue this conversation locally
 
