@@ -46,6 +46,8 @@ export interface RendererOptions {
 }
 
 const OFF_WALL_MARGIN = 0.6;
+/** Tower flood intensity (cd): ~11 m from the upper tower, about the key's level on the lower wall. */
+const TOWER_FLOOD = 500;
 
 /** An empty showcase wall shown until the app loads a problem. */
 function showcaseBoulder(): BoulderDef {
@@ -101,6 +103,13 @@ export class GameRenderer implements RendererAPI {
   private caveTarget = new THREE.Object3D();
   private bounce = new THREE.DirectionalLight('#d9c8b4', 0);
   private roofness = 0;
+  /**
+   * Lead towers: the same flood becomes the tower flood — mounted far out in front at mezzanine
+   * height (like the floods across a real lead hall) and aimed up at the upper tower, where the
+   * rig's top-down key fades out and overhanging headwalls face away from every ceiling light.
+   * It lights the headwall from in front and below, so holds up there keep their modelling.
+   */
+  private tower = false;
   private caveAim = new THREE.Vector3(0, 2, 1);
   private caveHome = new THREE.Vector3(0, 2, 1);
 
@@ -396,8 +405,15 @@ export class GameRenderer implements RendererAPI {
     // cave flood + floor bounce (folded walls with steep sections)
     const r = this.roofness;
     this.bounce.intensity = 0.5 * r;
-    this.caveFlood.intensity = 70 * r * (0.85 + 0.15 * k);
-    if (r > 0) {
+    if (this.tower) {
+      // tower flood: fixed on the upper tower, a touch stronger while the whole route is on show
+      this.caveFlood.intensity = TOWER_FLOOD * (0.8 + 0.2 * clamp((k - 1) / 1.4, 0, 1));
+      this.caveAim.lerp(this.caveHome, aimL * 0.6);
+      this.caveTarget.position.copy(this.caveAim);
+      this.caveTarget.updateMatrixWorld();
+      this.caveFlood.position.set(this.caveAim.x + 1.7, this.wallFrame.origin.y + 5.6, this.wallFrame.origin.z + Math.max(0, this.caveAim.z - this.wallFrame.origin.z) + 10.5);
+    } else this.caveFlood.intensity = 70 * r * (0.85 + 0.15 * k);
+    if (r > 0 && !this.tower) {
       // aim at the steep section, drifting toward the climber while they are under it
       this.v.copy(this.caveHome);
       if (st && this.climberVisible && !overview) {
@@ -427,7 +443,20 @@ export class GameRenderer implements RendererAPI {
       }
     }
     this.roofness = f.folded ? smoothstep(38, 80, best) : 0;
-    f.toWorldXYZ(0, f.folded ? y : Math.min(b.height * 0.5, 2.4), 0, this.caveHome);
+    this.tower = b.mode === 'rope';
+    if (this.tower) {
+      // the upper tower (its steep headwall when that sits up there)
+      const yAim = f.folded && y > b.height * 0.55 ? Math.min(y, b.height * 0.82) : b.height * 0.72;
+      f.toWorldXYZ(0, yAim, 0, this.caveHome);
+      this.caveFlood.color.set('#f4efe6');
+      this.caveFlood.angle = 0.4;
+      this.caveFlood.penumbra = 0.9;
+    } else {
+      f.toWorldXYZ(0, f.folded ? y : Math.min(b.height * 0.5, 2.4), 0, this.caveHome);
+      this.caveFlood.color.set('#ffe0bd');
+      this.caveFlood.angle = 0.62;
+      this.caveFlood.penumbra = 0.85;
+    }
     this.caveAim.copy(this.caveHome);
   }
 
