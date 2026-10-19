@@ -42,6 +42,15 @@ at the same time: let the cloud round finish and push first, or stop it.
 `claude remote-control`, or `/remote-control` inside a session, lets the Claude app on the phone drive
 a session that runs on the Mac. That combines with Xcode and an attached iPhone.
 
+## Done since v0.2 (on `main`)
+
+- **Gym and sign:** the gym is CHIRAL SPORTS (no "HQ"). The sign is lit in CHIRAL pink and no longer
+  flickers. The flicker was z-fighting: the logo plane sat exactly on its box's front face.
+- **Wall:** no CHIRAL SPORTS lettering on the climbing wall.
+- **Start screen:** the owner's key art, with only the mark, STEIBOCK · BY CHIRAL SPORTS and TAP TO
+  START.
+- **iPhone app:** the native app in `ios/` (see `docs/IOS.md`).
+
 ## Where v0.3 stands (the owner's v0.2 feedback)
 
 Being built when this was written; the items land on `main` as they finish:
