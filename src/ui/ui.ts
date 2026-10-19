@@ -283,6 +283,11 @@ export class GameUI implements UIAPI {
     this.portraits.setProvider(fn);
   }
 
+  /** Optional: Steini's card for his speech bubble and tips (the white INSTRUCTOR tee), e.g. renderer.guidePortrait. */
+  setGuidePortraitProvider(fn: (() => string) | null): void {
+    this.portraits.setGuideProvider(fn);
+  }
+
   /** Optional: tell the UI which backend is live ('GLOBAL' / 'CLAUDE SHARED' / 'OFFLINE'); boards use it for their badge. */
   setBackendLabel(label: string): void {
     this.backendName = label;

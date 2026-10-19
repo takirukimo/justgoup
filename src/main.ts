@@ -81,6 +81,8 @@ async function boot(): Promise<void> {
   ui.mount(uiEl);
   stray.ui = ui;
   ui.setPortraitProvider((h) => renderer.portrait(h, 256));
+  // Steini's speech bubble and tips show him in the white INSTRUCTOR tee
+  if (typeof renderer.guidePortrait === 'function') ui.setGuidePortraitProvider(() => renderer.guidePortrait(256));
   ui.setSettings(profile.settings);
   const controls = new LimbControls(controlsEl, renderer);
   const audio = new GameAudio();
@@ -192,6 +194,7 @@ async function boot(): Promise<void> {
       last = performance.now();
       // portraits rendered while the context was gone fell back to flat emblems: re-render them
       ui.setPortraitProvider((h) => renderer.portrait(h, 256));
+      if (typeof renderer.guidePortrait === 'function') ui.setGuidePortraitProvider(() => renderer.guidePortrait(256));
     }
   });
 

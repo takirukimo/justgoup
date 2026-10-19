@@ -51,7 +51,7 @@ export class GuideBubble {
     this.card = el(
       'div',
       'gb-card',
-      el('div', 'gb-pt', portraits.frame('ibex', 'pt-guide'), this.moodEl),
+      el('div', 'gb-pt', portraits.guideFrame('pt-guide'), this.moodEl),
       el('div', 'gb-body', el('div', 'gb-tag', el('span', 'gb-name', BRAND.guideName.toUpperCase()), label('INSTRUCTOR · ' + BRAND.gym)), this.textEl, this.more),
       el('span', 'gb-tail'),
     );

@@ -10,7 +10,7 @@ import { ClimberSim } from '../game/climber-sim';
 import { tutorialBoulder, TUTORIAL_SEQUENCE } from '../game/generator';
 import { contactPoint, LIMB_INDEX } from '../game/holds';
 import { Clock } from './scope';
-import { abortTutorial, runIntro, runTutorial, TUTORIAL_SIM_OPTIONS, tutorialStatus } from './tutorial';
+import { abortTutorial, guideSpot, runIntro, runTutorial, TUTORIAL_SIM_OPTIONS, tutorialStatus } from './tutorial';
 import { cardHoldTime, colourWord, FINALE, holdTime, INTRO_CARD, INTRO_LINES, readTime, tOpen } from './script';
 import { BRAND, PALETTE } from '../config/brand';
 import { randomTip, TIPS, tipFor } from './tips';
@@ -39,6 +39,8 @@ interface Rig {
   callouts: string[];
   highlights: HoldHighlight[];
   guide: GuideState | null;
+  /** Every spot Steini was put on (a new entry only when he moved). */
+  guideTrail: { x: number; depth: number }[];
   camera: string;
   allowed: { limbs: readonly LimbId[] | 'all'; hips: boolean };
   skipChip: (() => void) | null;
@@ -58,6 +60,7 @@ function rig(edit?: (b: BoulderDef) => BoulderDef): Rig {
     callouts: [] as string[],
     highlights: [] as HoldHighlight[],
     guide: null as GuideState | null,
+    guideTrail: [] as { x: number; depth: number }[],
     camera: 'title',
     allowed: { limbs: 'all' as readonly LimbId[] | 'all', hips: true },
     skipChip: null as (() => void) | null,
@@ -69,6 +72,8 @@ function rig(edit?: (b: BoulderDef) => BoulderDef): Rig {
     },
     setGuide: (g: GuideState | null) => {
       r.guide = g ? { ...g } : null;
+      const last = r.guideTrail[r.guideTrail.length - 1];
+      if (g && (!last || last.x !== g.x || last.depth !== g.depth)) r.guideTrail.push({ x: g.x, depth: g.depth });
     },
     setCameraMode: (m: string) => {
       r.camera = m;
@@ -284,6 +289,17 @@ describe('runTutorial', () => {
     expect(r.skipChip).toBeNull();
     expect(r.guide).toBeNull();
     expect(tutorialStatus().running).toBe(false);
+    // Steini stays on his final side (right of the start holds) from the first frame, and never
+    // crosses the mats: every move between spots is a step (< 1 m), never a jump past the climber
+    const startX = r.sim.boulder.holds.filter((h) => h.role === 'start').reduce((a, h, _i, all) => a + h.x / all.length, 0);
+    const fin = r.guideTrail[r.guideTrail.length - 1];
+    expect(r.guideTrail.length).toBeGreaterThan(0);
+    for (const g of r.guideTrail) expect(Math.sign(g.x - startX), `spot x ${g.x}`).toBe(Math.sign(fin.x - startX));
+    for (let i = 1; i < r.guideTrail.length; i++) {
+      const a = r.guideTrail[i - 1];
+      const b = r.guideTrail[i];
+      expect(Math.hypot(b.x - a.x, b.depth - a.depth), `step ${i}`).toBeLessThan(1);
+    }
   }, 60000);
 
   it('corrects a wrong hold and a miss, then carries on', async () => {
@@ -434,6 +450,21 @@ describe('pacing (owner: every card and line stays up long enough to read)', () 
     expect(shown[0].at).toBeGreaterThanOrEqual(0.55 + cardHoldTime());
     for (let i = 0; i + 1 < shown.length; i++) expect(shown[i + 1].at - shown[i].at, shown[i].text).toBeGreaterThanOrEqual(holdTime(shown[i].text));
   }, 30000);
+
+  it('Steini stands on one side of the start holds from the intro to the finale', () => {
+    const b = tutorialBoulder();
+    const starts = b.holds.filter((h) => h.role === 'start');
+    const cx = starts.reduce((a, h) => a + h.x, 0) / starts.length;
+    const intro = guideSpot(b, 'intro');
+    const wide = guideSpot(b, 'wide');
+    const lesson = guideSpot(b, 'lesson');
+    for (const g of [intro, wide, lesson]) expect(g.x).toBeGreaterThan(cx + 0.5);
+    // intro → route reading → lessons → finale: steps, never a walk across the mats
+    expect(Math.hypot(intro.x - wide.x, intro.depth - wide.depth)).toBeLessThan(0.3);
+    expect(Math.hypot(lesson.x - wide.x, lesson.depth - wide.depth)).toBeLessThan(1);
+    // on the mats, inside the wall's width
+    for (const g of [intro, wide, lesson]) expect(Math.abs(g.x)).toBeLessThanOrEqual(b.width / 2 - 0.45 + 1e-9);
+  });
 
   it('names the tutorial route by its tape colour and calls the game STEIBOCK', () => {
     expect(colourWord('#FF4F1F')).toBe('orange');

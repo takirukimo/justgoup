@@ -148,11 +148,40 @@ export function fallbackPortrait(head: HeadId): string {
 /** Portrait source registry shared by every screen. */
 export class Portraits {
   private provider: ((head: HeadId) => string) | null = null;
+  /** Steini's own card: the ibex in the white CHIRAL SPORTS INSTRUCTOR tee (not the player's black tee). */
+  private guideProvider: (() => string) | null = null;
   private listeners = new Set<() => void>();
 
   setProvider(fn: (head: HeadId) => string): void {
     this.provider = fn;
     for (const l of this.listeners) l();
+  }
+
+  setGuideProvider(fn: (() => string) | null): void {
+    this.guideProvider = fn;
+    for (const l of this.listeners) l();
+  }
+
+  /** Steini's portrait: the instructor render when there is one, else the ibex portrait. */
+  guideSrc(): string {
+    if (this.guideProvider) {
+      try {
+        const s = this.guideProvider();
+        if (s) return s;
+      } catch (err) {
+        console.warn('[ui] guide portrait provider failed', err);
+      }
+    }
+    return this.src('ibex');
+  }
+
+  /** Steini's framed portrait (speech bubble, tips): always the white INSTRUCTOR tee when the renderer can draw it. */
+  guideFrame(cls = ''): HTMLSpanElement {
+    const i = img('pt-img', this.guideSrc(), 'Steini');
+    i.dataset.guide = '1';
+    const wrap = el('span', `pt ${this.provider || this.guideProvider ? '' : 'pt-flat'} ${cls}`.trim(), i);
+    wrap.dataset.guideFrame = '1';
+    return wrap;
   }
 
   get hasProvider(): boolean {
@@ -194,6 +223,10 @@ export class Portraits {
       const h = im.dataset.head as HeadId;
       im.src = this.src(h);
       im.parentElement?.classList.toggle('pt-flat', !this.provider);
+    });
+    root.querySelectorAll<HTMLImageElement>('img[data-guide]').forEach((im) => {
+      im.src = this.guideSrc();
+      im.parentElement?.classList.toggle('pt-flat', !this.provider && !this.guideProvider);
     });
   }
 }

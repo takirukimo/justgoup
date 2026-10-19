@@ -166,19 +166,23 @@ type GuideUI = UIAPI['guide'] & { setSkip?: (fn: (() => void) | null) => void };
 type Pos = NonNullable<GuideLine['position']>;
 
 /**
- * Where Steini stands on the mats (measured against the renderer's cameras on a 390×844 screen):
- *  'intro'  next to the climber standing on the pads, both in the title shot;
+ * Where Steini stands on the mats (measured against the renderer's cameras on a 390×844 screen).
+ * Every spot is on the SAME side, right of the start holds, where he ends the lesson (owner: "he
+ * should stand on his final side from the beginning"): from the intro through the route reading,
+ * the lessons and the finale he only ever takes a step or two, never crosses the mats.
+ *  'intro'  right of the climber standing on the pads, both in the title shot;
  *  'wide'   low right of the start holds, fully in the route-preview shot, below the route's
  *           right-hand holds and clear of the climber (route reading + finale);
- *  'lesson' off the left edge of the close follow camera, so gameplay framing stays clean.
+ *  'lesson' a step further right and back, off the right edge of the close follow camera, so the
+ *           gameplay framing stays clean.
  */
-function guideSpot(b: BoulderDef | null, mode: 'intro' | 'wide' | 'lesson'): { x: number; depth: number } {
+export function guideSpot(b: BoulderDef | null, mode: 'intro' | 'wide' | 'lesson'): { x: number; depth: number } {
   const starts = b ? b.holds.filter((h) => h.role === 'start') : [];
   const cx = starts.length ? starts.reduce((a, h) => a + h.x, 0) / starts.length : 0;
-  const lo = starts.length ? Math.min(...starts.map((h) => h.x)) : 0;
+  const hi = starts.length ? Math.max(...starts.map((h) => h.x)) : 0;
   const half = b ? b.width / 2 : 2.3;
-  const x = mode === 'intro' ? cx - 0.95 : mode === 'wide' ? cx + 0.9 : lo - 0.8;
-  return { x: clamp(x, -half + 0.45, half - 0.45), depth: mode === 'wide' ? 1.2 : 1.3 };
+  const x = mode === 'intro' ? cx + 0.95 : mode === 'wide' ? cx + 0.9 : hi + 1.25;
+  return { x: clamp(x, -half + 0.45, half - 0.45), depth: mode === 'wide' ? 1.2 : mode === 'lesson' ? 1.45 : 1.3 };
 }
 
 /** The long-reach pump lesson ('shake') came before step i. */
