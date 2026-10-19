@@ -25,6 +25,8 @@ interface Tally {
   wallFrames: number;
   wall: { v: number; what: string; tag: string };
   wallBy: Record<string, number>;
+  /** ClimberModel.pose() time (ms, summed over frames). */
+  poseMs: number;
   wallLog: string[];
   penFrames: number;
   floorFrames: number;
@@ -47,6 +49,7 @@ const fresh = (): Tally => ({
   wallFrames: 0,
   wall: { v: 0, what: '', tag: '' },
   wallBy: {},
+  poseMs: 0,
   wallLog: [],
   penFrames: 0,
   floorFrames: 0,
@@ -163,7 +166,9 @@ function run(b: BoulderDef, T: Tally, opts: { secs: number; fallAt?: number; tag
     }
     const st = sim.getState();
     frame.setBodyY((st.pelvis.y + st.chest.y) / 2);
+    const tp = performance.now();
     model.pose(st, frame, dt);
+    T.poseMs += performance.now() - tp;
     measureRig(model.rig, frame.normal, frame.origin, m, T.pairs);
     const tags = techTags(st);
     const where = `${opts.tag} t=${(i * dt).toFixed(2)} ${st.phase}${tags.length ? ' [' + tags.join(',') + ']' : ''}`;
@@ -313,6 +318,7 @@ function report(name: string, T: Tally): void {
     .join('  ');
   process.stderr.write(
     `\n== ${name} ==\nframes ${T.frames}  pen>${PEN_BAD * 100}cm ${pct(T.penFrames, T.frames)}  pen>5cm ${pct(T.pen5Frames, T.frames)}  floor ${pct(T.floorFrames, T.frames)}  wall>${WALL_BAD * 100}cm ${pct(T.wallFrames, T.frames)}  pops ${pct(T.jumpFrames, T.frames)}  ik-fallback ${pct(T.fbFrames, T.frames)}\n` +
+      `pose ${(T.poseMs / Math.max(1, T.frames)).toFixed(3)} ms/frame (node)\n` +
       `worst wall ${(T.wall.v * 100).toFixed(1)} cm ${T.wall.what} @ ${T.wall.tag}\nwall by part: ${JSON.stringify(T.wallBy)}\n` +
       (T.wallLog.length ? `walls:\n  ${T.wallLog.join('\n  ')}\n` : '') +
       `worst pen ${(T.worst.v * 100).toFixed(1)} cm ${T.worst.what} @ ${T.worst.tag}\n` +
