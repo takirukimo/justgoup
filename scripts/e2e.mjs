@@ -371,6 +371,32 @@ async function hipMove(target) {
   return true;
 }
 
+/**
+ * After a move, like a careful player: if a limb is overloaded (it would slip), shift the hips to
+ * the stance the plan expects after that move, then give the body a moment to settle before the
+ * next limb lets go.
+ */
+async function settleStance(stance) {
+  const worst = () => page.evaluate(() => {
+    const st = window.__jgu.sim?.getState();
+    if (!st || st.phase !== 'climbing') return 0;
+    return Math.max(...Object.values(st.limbs).map((l) => (l.holdId || l.smearing ? l.stress : 0)));
+  });
+  let w = await worst();
+  if (w < 0.95) return;
+  if (stance) {
+    const far = await page.evaluate((t) => {
+      const p = window.__jgu.sim?.getState().pelvis;
+      return p ? Math.hypot(p.x - t.x, p.y - t.y) : 0;
+    }, stance);
+    if (far > 0.04) {
+      await hipMove(stance);
+      log(`  settle: stress ${w.toFixed(2)} → hips ${(far * 100).toFixed(0)} cm onto the planned stance`);
+    }
+  }
+  for (let k = 0; k < 12 && (w = await worst()) >= 0.95; k++) await frames(2);
+}
+
 /** Rope: clip the next quickdraw as soon as a hand can reach it (what a lead climber does). */
 async function tryClip() {
   const c = await page.evaluate(async () => {
@@ -399,7 +425,7 @@ async function tryClip() {
 }
 
 /** Plan from the live stance (planBetaDetailed through the page) and execute it move by move. */
-async function autoClimb({ until, maxMoves = 60, label }) {
+async function autoClimb({ until, maxMoves = 60, label, careful = false }) {
   let moves = 0;
   let misses = 0;
   for (let replans = 0; replans < 8 && moves < maxMoves; replans++) {
@@ -424,6 +450,7 @@ async function autoClimb({ until, maxMoves = 60, label }) {
         holdId: s.move.holdId,
         dyno: s.move.dyno ?? null,
         hips: s.reachPose ? { x: s.reachPose.px, y: s.reachPose.py } : null,
+        stance: s.pose ? { x: s.pose.px, y: s.pose.py } : null,
         clip: s.clip ? { limb: s.clip.limb, id: s.clip.quickdrawId } : null,
       }));
     });
@@ -439,8 +466,16 @@ async function autoClimb({ until, maxMoves = 60, label }) {
         if (await until()) return true;
       }
       if (step.holdId === 'smear') continue;
+      if (careful && !step.dyno && step.hips) {
+        // a careful climber sets the hips for the reach first (what the sim's own bot does)
+        const far = await page.evaluate((t) => {
+          const p = window.__jgu.sim?.getState().pelvis;
+          return p ? Math.hypot(p.x - t.x, p.y - t.y) : 0;
+        }, step.hips);
+        if (far > 0.08) await hipMove(step.hips);
+      }
       let r = step.dyno ? await throwMove(step.dyno, step.holdId) : await dragMove(step.limb, step.holdId);
-      if (!step.dyno && r.startsWith('miss') && step.hips) {
+      if (!step.dyno && r.startsWith('miss(') && step.hips) {
         // out of reach from where the hips are: shift the weight to the planned reach pose, try again
         const far = await page.evaluate((t) => {
           const p = window.__jgu.sim?.getState().pelvis;
@@ -460,6 +495,7 @@ async function autoClimb({ until, maxMoves = 60, label }) {
         replan = true;
         break;
       }
+      if (r === 'ok' && !step.dyno) await settleStance(step.stance);
       if (step.clip) {
         const c = await dragMove(step.clip.limb, step.clip.id);
         log(`  clip ${step.clip.id} with ${step.clip.limb}: ${c}`);
@@ -802,6 +838,7 @@ if (want('editor')) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     testSent = await autoClimb({
       label: `editor-test #${attempt}`,
+      careful: attempt > 1,
       until: async () => {
         const ph = await page.evaluate(() => window.__jgu.sim?.getState().phase ?? 'gone');
         return ph === 'topped' || ph === 'falling' || ph === 'landed' || ph === 'gone';
