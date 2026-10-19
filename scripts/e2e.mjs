@@ -719,6 +719,7 @@ if (want('human')) {
   // leaderboard: the player's row carries the human icon, next to the ghost climbers (one is human too)
   await tapText('LEADERBOARD');
   await waitScreen('leaderboard');
+  await tapText('SEND TRAIN'); // the board remembers the last tab
   await waitFor(() => !document.querySelector('.lb-skel'), 'leaderboard rows (human)', 30000);
   await page.waitForTimeout(900);
   const lb = await page.evaluate(async () => {
@@ -732,7 +733,7 @@ if (want('human')) {
   });
   ok(lb.mine, 'the run is on the board under the human head');
   ok(lb.ghost, 'a ghost climber wears the human head too');
-  ok(lb.icons >= 1, `the leaderboard shows the human icon (${lb.icons} rows)`);
+  ok(lb.icons >= 2, `the Send Train board shows the human icon on the player's row and the ghost's (${lb.icons} rows)`);
   await shot('leaderboard-human');
   await tap('.btn-back', 'back');
   await waitScreen('title');
