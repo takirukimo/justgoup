@@ -7,6 +7,8 @@
 //   ?view=tees             CHIRAL SPORTS tees (black / white / pink) front + back
 //   ?view=tech&tech=heel   a Phase B technique done by the real sim, posed by the real renderer
 //                          (heel toe flag backflag drop smear shake chalk deadpoint dyno pump; cam=follow|side|front|low)
+//   ?view=grip&kind=jug&limb=hand|foot&cam=close|side|game|below
+//                          hands / feet on every hold type, close up (see character-grip.ts, character.grip.mjs)
 //   ?t=<s>                 freeze the clock at t seconds (deterministic screenshots)
 
 import * as THREE from 'three';
@@ -33,6 +35,7 @@ const canvas = document.getElementById('gl') as HTMLCanvasElement;
 if (view === 'game') void import('./character-game').then((m) => m.runGame(canvas, qs, hud));
 else if (view === 'tech') void import('./character-tech').then((m) => m.runTech(canvas, qs, hud));
 else if (view === 'limits') void import('./character-limits').then((m) => m.runLimits(canvas, qs, labels, hud));
+else if (view === 'grip') void import('./character-grip').then((m) => m.runGrip(canvas, qs, hud));
 else studio();
 
 /** Studio views (heads, portraits, body, guide, climber poses) on a plain WebGLRenderer. */
