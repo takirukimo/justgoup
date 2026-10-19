@@ -115,8 +115,11 @@ console.log('draft', JSON.stringify(draft));
 check(draft.name === 'Yellow Snapshot' && draft.holds >= 14 && draft.starts >= 1 && draft.tops === 1 && draft.color === '#F2C230', 'the editor loads the photo problem as its draft');
 const toast = await page.evaluate(() => [...document.querySelectorAll('.ed-toast, .toast, [class*="toast"]')].map((e) => e.textContent).join(' | '));
 console.log('toast:', toast.slice(0, 200));
-const status = await page.evaluate(() => document.querySelector('.ed-status, .ed-chip-status, [class*="status"]')?.textContent ?? '');
-console.log('status:', status.slice(0, 120));
+// the editor's beta reader on the imported draft (the importer's default wall: 15 deg overhang)
+await page.waitForFunction(() => ['ok', 'nobeta', 'invalid'].includes(document.querySelector('.ed-chip')?.dataset.status ?? ''), null, { timeout: 60000 });
+const chip = await page.evaluate(() => ({ status: document.querySelector('.ed-chip').dataset.status, text: document.querySelector('.ed-chip').textContent }));
+console.log('editor beta reader:', JSON.stringify(chip));
+check(chip.status === 'ok', `the editor's beta reader solves the imported problem (${chip.text})`);
 await shot('04-draft');
 // cancel path: open again and back out
 await page.evaluate(() => document.querySelector('.ed-photo-go').click());
