@@ -612,7 +612,28 @@ if (want('sendtrain')) {
   ok(/#\d+/.test(ro.text), 'run-over results show the leaderboard rank');
   const best = await page.evaluate(() => window.__jgu.app.profile.best.boulder);
   ok(best > 0, `profile best updated (${best})`);
-  await tapText('MENU');
+  // TRY AGAIN: the boulder the run ended on, as a fresh run (same wall, streak and score back to 0)
+  const fellOn = await page.evaluate(() => window.__jgu.app.activeSession?.boulder.id);
+  await tapText('TRY AGAIN');
+  await waitScreen('preview', 120000);
+  await veilClear();
+  await page.waitForTimeout(900);
+  const again = await page.evaluate(() => ({ id: window.__jgu.app.activeSession?.boulder.id, text: document.querySelector('#ui')?.textContent ?? '' }));
+  ok(again.id === fellOn && !/STREAK ×[1-9]/.test(again.text), `TRY AGAIN replays the same boulder as a fresh run (${again.id})`);
+  await shot('preview-try-again');
+  // another fall → NEW RUN: new random problems
+  await tap('.pv-hit', 'TAP TO START');
+  await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'climb start (try again)', 60000);
+  await page.evaluate(() => window.__jgu.sim.forceFall());
+  await waitScreen('results', 90000);
+  await page.waitForTimeout(1500);
+  await shot('results-run-over-2');
+  await tapText('NEW RUN');
+  await waitScreen('preview', 120000);
+  await veilClear();
+  const fresh = await page.evaluate(() => window.__jgu.app.activeSession?.boulder.id);
+  ok(!!fresh && fresh !== fellOn, `NEW RUN starts new random problems (${fresh})`);
+  await tap('.pv-back', 'back');
   await waitScreen('modes', 60000);
   await veilClear();
   await page.waitForTimeout(900);
@@ -1116,11 +1137,35 @@ if (want('communityplay')) {
   await page.waitForTimeout(1500);
   await shot('community-preview');
   ok((await page.evaluate(() => window.__jgu.app.activeSession?.boulder.holds.length ?? 0)) > 4, 'community problem loads for a climb');
+  // a fall: TRY AGAIN (same problem), PROBLEMS (back to the list) and MENU
+  const cid = await page.evaluate(() => window.__jgu.app.activeSession?.boulder.id);
+  const fallOnce = async (what) => {
+    await tap('.pv-hit', 'TAP TO START');
+    await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', `community climb start (${what})`, 60000);
+    await page.waitForTimeout(400);
+    await page.evaluate(() => window.__jgu.sim.forceFall());
+    await waitScreen('results', 90000);
+    await page.waitForTimeout(1800);
+  };
+  await fallOnce('1');
+  const cmBtns = await page.evaluate(() => [...document.querySelectorAll('#ui .res-actions button')].map((b) => b.getAttribute('aria-label')).join(' / '));
+  ok(/TRY AGAIN/.test(cmBtns) && /PROBLEMS/.test(cmBtns) && /MENU/.test(cmBtns), `community results offer TRY AGAIN, PROBLEMS and MENU (${cmBtns})`);
+  await shot('community-results-fall');
+  await tapText('TRY AGAIN');
+  await waitScreen('preview', 120000);
+  await veilClear();
+  ok((await page.evaluate(() => window.__jgu.app.activeSession?.boulder.id)) === cid, 'community TRY AGAIN climbs the same problem');
   await tap('.pv-back', 'back');
   await waitScreen('community', 60000);
   await veilClear();
-  await tap('.btn-back', 'back');
-  await waitScreen('title');
+  // again, and MENU goes to the main menu instead of the list
+  await page.locator('#ui .cm-play, #ui .cm-card button').first().tap();
+  await waitScreen('preview', 120000);
+  await veilClear();
+  await fallOnce('2');
+  await tapText('MENU');
+  await waitScreen('title', 60000);
+  await veilClear();
 }
 
 // ───────────────────────────── Lead Tower: clip a quickdraw ─────────────────────────────

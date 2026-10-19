@@ -9,6 +9,7 @@
 
 import type { BackendAPI, GenerateOptions, ResultsProps } from '../core/contracts';
 import { bus, type AppEvents } from '../core/events';
+import '../ui/intents';
 import { hashString, Rng } from '../core/rng';
 import type { BoulderDef, CommunityProblem, LeaderboardMode, Profile, ScoreEntry } from '../core/types';
 import { ROUTE_COLORS } from '../config/brand';
@@ -143,9 +144,19 @@ export class SendTrainRun extends BaseRun {
   private bestAtStart = 0;
   private lastBoulder: BoulderDef | null = null;
 
-  private reset(): void {
-    this.seed = (Math.random() * 0x7fffffff) | 0;
-    this.index = 0;
+  /** Did the current run start on the problem the last run ended on (TRY AGAIN)? */
+  private again = false;
+
+  /**
+   * A fresh run. `same` keeps the run's problem sequence and starts on the problem the last run
+   * ended on (TRY AGAIN: same seed, same wall), otherwise new random problems (NEW RUN).
+   */
+  private reset(same = false): void {
+    if (!same) {
+      this.seed = (Math.random() * 0x7fffffff) | 0;
+      this.index = 0;
+    }
+    this.again = same;
     this.streak = 0;
     this.score = 0;
     this.maxGrade = 0;
@@ -168,7 +179,7 @@ export class SendTrainRun extends BaseRun {
     this.reset();
     for (;;) {
       const o = this.optsFor(this.index);
-      const veil = { kicker: `SEND TRAIN · BOULDER ${pad2(this.index + 1)}`, title: `${gradeLabel(o.grade)} · ${this.streak ? `STREAK ×${this.streak}` : 'FIRST UP'}` };
+      const veil = { kicker: `SEND TRAIN · BOULDER ${pad2(this.index + 1)}`, title: `${gradeLabel(o.grade)} · ${this.streak ? `STREAK ×${this.streak}` : this.again ? 'ANOTHER GO' : 'FIRST UP'}` };
       await this.svc.veil.cover(veil.kicker, veil.title);
       const b = await this.svc.gen.boulder(o);
       this.lastBoulder = b;
@@ -217,9 +228,10 @@ export class SendTrainRun extends BaseRun {
           canContinue: true,
         });
         for (;;) {
-          const c = await waitChoice(['ui:next', 'ui:retry', 'ui:quit']);
+          const c = await waitChoice(['ui:next', 'ui:new-run', 'ui:quit']);
           if (c === 'ui:next') {
             this.index++;
+            this.again = false;
             break;
           }
           if (c === 'ui:quit') {
@@ -257,9 +269,10 @@ export class SendTrainRun extends BaseRun {
         const token = this.showResults(props);
         const rank = this.endRun(true);
         void rank.then((r) => this.patchResults(token, { ...props, rank: r }));
-        const c = await waitChoice(['ui:retry', 'ui:quit']);
+        // TRY AGAIN: this boulder again as a fresh run · NEW RUN: new random problems
+        const c = await waitChoice(['ui:retry', 'ui:new-run', 'ui:quit']);
         if (c === 'ui:quit') return;
-        this.reset();
+        this.reset(c === 'ui:retry');
       }
     }
   }
@@ -300,9 +313,15 @@ export class LeadTowerRun extends BaseRun {
   private hints = { left: HINTS_PER_RUN };
   private bestAtStart = 0;
 
-  private reset(): void {
-    this.seed = (Math.random() * 0x7fffffff) | 0;
-    this.index = 0;
+  private again = false;
+
+  /** A fresh tower: `same` starts on the route the last tower ended on (TRY AGAIN), else new routes. */
+  private reset(same = false): void {
+    if (!same) {
+      this.seed = (Math.random() * 0x7fffffff) | 0;
+      this.index = 0;
+    }
+    this.again = same;
     this.total = 0;
     this.tops = 0;
     this.maxGrade = 0;
@@ -320,7 +339,7 @@ export class LeadTowerRun extends BaseRun {
     for (;;) {
       const grade = this.gradeFor(this.index);
       const seed = hashString(`lead-tower:${this.seed}:${this.index}`);
-      await this.svc.veil.cover(`LEAD TOWER · ROUTE ${pad2(this.index + 1)}`, `${gradeLabel(grade)} · ${GAME.ropeWall.height} M`);
+      await this.svc.veil.cover(`LEAD TOWER · ROUTE ${pad2(this.index + 1)}`, `${gradeLabel(grade)} · ${this.again && this.tops === 0 ? 'ANOTHER GO' : `${GAME.ropeWall.height} M`}`);
       const b = await this.svc.gen.rope({ seed, grade });
       const run: HudRunInfo = { ...this.baseRun('rope', b), score: this.total, streak: this.tops, lives: this.lives.left, hintsLeft: this.hints.left };
       const restart = this.total > 0 ? { title: 'Start a new run?', body: `This run ends here and its ${this.total.toLocaleString('en-US')} pts go to the leaderboard.`, ok: 'NEW RUN' } : null;
@@ -371,9 +390,10 @@ export class LeadTowerRun extends BaseRun {
           canContinue: true,
         });
         for (;;) {
-          const c = await waitChoice(['ui:next', 'ui:retry', 'ui:quit']);
+          const c = await waitChoice(['ui:next', 'ui:new-run', 'ui:quit']);
           if (c === 'ui:next') {
             this.index++;
+            this.again = false;
             break;
           }
           if (c === 'ui:quit') {
@@ -408,9 +428,10 @@ export class LeadTowerRun extends BaseRun {
       };
       const token = this.showResults(props);
       void this.endRun(true).then((rank) => this.patchResults(token, { ...props, rank }));
-      const c = await waitChoice(['ui:retry', 'ui:quit']);
+      // TRY AGAIN: this route again as a fresh tower · NEW RUN: new random routes
+      const c = await waitChoice(['ui:retry', 'ui:new-run', 'ui:quit']);
       if (c === 'ui:quit') return;
-      this.reset();
+      this.reset(c === 'ui:retry');
     }
   }
 
@@ -525,7 +546,8 @@ export class CommunityRun extends BaseRun {
     super(host);
   }
 
-  async play(): Promise<void> {
+  /** Resolves where to go next: back to the problem list, or the main menu. */
+  async play(): Promise<'list' | 'menu'> {
     const pr = this.problem;
     const b: BoulderDef = { ...pr.boulder, name: pr.name, grade: pr.grade, author: pr.author || pr.boulder.author };
     let best = 0;
@@ -534,7 +556,7 @@ export class CommunityRun extends BaseRun {
       const run = this.baseRun('community', b);
       const res = await this.climb(b, { run, hints: { left: HINTS_PER_RUN }, tip: randomTip(hashString(pr.id), 'boulder', b) }, veil);
       veil = { kicker: 'COMMUNITY', title: 'ANOTHER GO' };
-      if (res.kind === 'quit') return;
+      if (res.kind === 'quit') return 'list';
       if (res.kind === 'retry') continue;
       const p = this.profile;
       if (res.kind === 'send') {
@@ -582,8 +604,10 @@ export class CommunityRun extends BaseRun {
           tip: tipFor(res.reason, undefined, 'boulder', b),
         });
       }
-      const c = await waitChoice(['ui:retry', 'ui:quit']);
-      if (c === 'ui:quit') return;
+      // TRY AGAIN: the same problem · PROBLEMS: back to the list · MENU: the main menu
+      const c = await waitChoice(['ui:retry', 'ui:quit', 'ui:menu']);
+      if (c === 'ui:quit') return 'list';
+      if (c === 'ui:menu') return 'menu';
     }
   }
 

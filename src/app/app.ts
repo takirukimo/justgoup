@@ -474,8 +474,9 @@ export class App implements RunHost {
   private async runFlow(run: { play(): Promise<unknown>; finish(): void }): Promise<void> {
     this.state = 'run';
     this.title.leave();
+    let dest: unknown;
     try {
-      await run.play();
+      dest = await run.play();
     } catch (err) {
       console.error('[app] run failed', err);
       this.svc.ui.hud.toast('SOMETHING SLIPPED · BACK TO THE MENU');
@@ -483,7 +484,8 @@ export class App implements RunHost {
       run.finish();
       this.session = null;
     }
-    await this.toMenu(this.top(), false);
+    // a run may ask for the main menu instead of the screen it was started from (community MENU)
+    await this.toMenu(dest === 'menu' ? 'title' : this.top(), false);
   }
 
   private async playTutorial(): Promise<void> {

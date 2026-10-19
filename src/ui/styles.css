@@ -371,6 +371,29 @@
   width: 100%;
 }
 
+/* Two-line button: the action, and under it a small mono caption saying what it does. */
+.btn-2l .btn-txt {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  min-width: 0;
+}
+.btn-2l .btn-cap {
+  font-family: var(--f-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  line-height: 1;
+  opacity: 0.66;
+}
+.btn-primary.btn-2l .btn-cap {
+  opacity: 0.84;
+}
+.btn-xl.btn-2l {
+  min-height: 64px;
+}
+
 /* ───────────────────────────── badges + chips ───────────────────────────── */
 
 /* Backend badge: GLOBAL (green), CLAUDE SHARED (glacier), OFFLINE (neutral), CONNECTING. */
@@ -3389,8 +3412,12 @@
 }
 .res-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 10px;
+}
+.res-row .btn {
+  min-width: 0;
+  padding: 0 12px;
 }
 
 /* outfit + chalk swatches */

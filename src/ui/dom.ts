@@ -56,6 +56,8 @@ export interface ButtonOpts {
   variant?: ButtonVariant;
   cls?: string;
   aria?: string;
+  /** A small second line under the label (what the button does, e.g. "SAME BOULDER"). */
+  caption?: string;
   /** Back buttons also emit 'ui:back'. */
   back?: boolean;
   disabled?: boolean;
@@ -74,7 +76,10 @@ export function button(o: ButtonOpts): HTMLButtonElement {
   if (o.disabled) b.disabled = true;
   const ic = o.icon ? icon(o.icon, 'btn-ic') : null;
   if (ic && !o.iconAfter) b.appendChild(ic);
-  if (o.label) b.appendChild(el('span', 'btn-lbl', o.label));
+  if (o.label && o.caption) {
+    b.classList.add('btn-2l');
+    b.appendChild(el('span', 'btn-txt', el('span', 'btn-lbl', o.label), el('span', 'btn-cap', o.caption)));
+  } else if (o.label) b.appendChild(el('span', 'btn-lbl', o.label));
   if (ic && o.iconAfter) b.appendChild(ic);
   if (o.back) b.dataset.back = '1';
   b.addEventListener('click', (ev) => {
