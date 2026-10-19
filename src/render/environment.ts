@@ -15,7 +15,7 @@ import type { ClimbMode, HoldDef, HoldType } from '../core/types';
 import { Rng } from '../core/rng';
 import { clamp, smoothstep } from '../core/math';
 import { Batch, beam, tr, type BakeFn } from './batch';
-import { holdGeometry, holdVariant, decoColor, woodColor } from './holds';
+import { holdGeometry, holdVariant, decoColor, woodColor, type HoldLod } from './holds';
 import { createSurfaceMaterial, type SurfaceMaterial } from './shading';
 import {
   BANNER_ASPECT,
@@ -344,7 +344,7 @@ export class GymEnvironment {
       for (let r = 0; r < routes; r++) {
         const col = ROUTE_COLORS[hrng.int(0, ROUTE_COLORS.length - 1)].hex;
         let x = hrng.range(-len / 2 + 0.5, len / 2 - 0.5);
-        const count = Math.round(f.height * (rope ? 1.4 : 2.4));
+        const count = Math.round(f.height * (rope ? 1.2 : 2.4));
         for (let k = 0; k < count; k++) {
           const y = 0.55 + (k + hrng.range(-0.2, 0.2)) * ((f.height - 0.9) / count);
           x = clamp(x + hrng.range(-0.45, 0.45), -len / 2 + 0.25, len / 2 - 0.25);
@@ -361,10 +361,10 @@ export class GymEnvironment {
           else if (type === 'sloper' && sv < 0.25) h.shape = sv < 0.1 ? 'macro' : 'dual-tex';
           else if (sv > 0.93) h.shape = 'wood';
           if (type === 'pocket') h.fingers = srng.pick([1, 2, 3, 4] as const);
-          addEnvHold(holdBatch, h, localMat, m4);
+          addEnvHold(holdBatch, h, localMat, m4, rope ? 3 : 1);
           if (hrng.chance(0.6)) {
             const fh: HoldDef = { ...h, x: clamp(x + hrng.range(-0.4, 0.4), -len / 2 + 0.2, len / 2 - 0.2), y: Math.max(0.42, y - hrng.range(0.5, 0.9)), type: 'foot', size: hrng.range(0.022, 0.04), seed: h.seed + 1 };
-            addEnvHold(holdBatch, fh, localMat, m4);
+            addEnvHold(holdBatch, fh, localMat, m4, rope ? 3 : 1);
           }
         }
       }
@@ -605,7 +605,7 @@ export class GymEnvironment {
     const pads = this.buildPads(fl, materials, geometries, decalBatch, atlas);
     floorGroup.add(pads);
 
-    if (preset.envDetail >= 1) this.buildProps(darkBatch, holdBatch, rng, hallX, zFront);
+    if (preset.envDetail >= 1) this.buildProps(darkBatch, holdBatch, rng, hallX, zFront, rope);
 
     // ── assemble batches ──
     const plyGeo = plyBatch.build(bake);
@@ -826,7 +826,7 @@ export class GymEnvironment {
     return g;
   }
 
-  private buildProps(dark: Batch, holds: Batch, rng: Rng, hallX: number, zFront: number): void {
+  private buildProps(dark: Batch, holds: Batch, rng: Rng, hallX: number, zFront: number, rope = false): void {
     // benches
     for (const [x, z, ry] of [[-3.6, 8.6, 0.05], [3.8, 8.9, -0.08], [-7.8, 10.5, 0.6]] as const) {
       dark.add(new RoundedBoxGeometry(2.0, 0.06, 0.42, 2, 0.015), tr(x, 0.44, z, 0, ry, 0), '#5b4630');
@@ -847,7 +847,7 @@ export class GymEnvironment {
       for (let k = 0; k < 9; k++) {
         const col = ROUTE_COLORS[rng.int(0, ROUTE_COLORS.length - 1)].hex;
         const type = rng.pick<HoldType>(['jug', 'sloper', 'edge', 'pinch']);
-        const hg = holdGeometry(type, rng.int(0, 1000), rng.range(0.05, 0.09), 1);
+        const hg = holdGeometry(type, rng.int(0, 1000), rng.range(0.05, 0.09), rope ? 3 : 1);
         holds.add(hg.geo.clone(), tr(rx - 0.05, 0.37 + s * 0.52, 12.1 + k * 0.33, -Math.PI / 2, 0, rng.range(-1, 1)), decoColor(col), { surf: [0, 0, 0, 0] });
       }
     }
@@ -924,8 +924,9 @@ function addEnvHold(
   h: HoldDef,
   localMat: (x: number, y: number, z: number, rz: number, out: THREE.Matrix4) => THREE.Matrix4,
   m4: THREE.Matrix4,
+  lod: HoldLod = 1,
 ): void {
-  const hg = holdGeometry(h.type, h.seed, h.size, 1, holdVariant(h));
+  const hg = holdGeometry(h.type, h.seed, h.size, lod, holdVariant(h));
   localMat(h.x, h.y, -0.0015, h.angle + Math.PI / 2, m4);
   const c = h.shape === 'wood' ? woodColor(h.color, 0.12) : new THREE.Color(h.color);
   const hsl = { h: 0, s: 0, l: 0 };

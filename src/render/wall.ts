@@ -159,8 +159,10 @@ export class WallView {
     this.trim.name = 'wall:trim';
     this.group.add(this.trim);
 
-    // below 'high' the small deco holds keep only their contact AO (saves a full shadow pass of them)
-    this.holds.build(b, b.holds, { decoShadows: preset.shadowMapSize >= 2048, ...holdOpts });
+    // below 'high' the small deco holds keep only their contact AO (saves a full shadow pass of them);
+    // a 15 m lead wall carries several times the deco holds of a boulder: coarser, contact AO only
+    const rope = b.mode === 'rope';
+    this.holds.build(b, b.holds, { decoShadows: preset.shadowMapSize >= 2048 && !rope, decoLod: rope ? 1 : 2, ...holdOpts });
     this.quickdraws.build(b.mode === 'rope' ? b.quickdraws : undefined);
   }
 

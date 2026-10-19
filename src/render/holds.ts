@@ -5,7 +5,10 @@
 // (angle + PI/2), so the classic incut-on-top hold (angle = −PI/2) needs no rotation and an
 // undercling (angle = +PI/2) is flipped — the good side always faces away from the body.
 //
-// Route holds are separate meshes (for highlights); deco holds are merged into one mesh.
+// In the game, route holds are merged per band of SHADOW_BAND m up the wall (one draw per band; a
+// lead tower's far bands drop to coarse geometry through THREE.LOD), with per-hold highlight rims
+// read from a small data texture; wooden route holds and the editor's holds stay separate meshes.
+// Deco holds are merged into one mesh.
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -14,8 +17,12 @@ import { Rng } from '../core/rng';
 import type { WallFrame } from './wall-frame';
 import { createSurfaceMaterial, ensureSurfaceAttributes, type SurfaceMaterial } from './shading';
 import { createLabelAtlas, softBlobTexture, speckleNormal, type AtlasRect } from './textures';
+import { bakeCurvature } from './curvature';
 
 export const HOLD_VARIANTS = 6;
+
+/** Hold tessellation: 0 route holds, 1 neighbour walls, 2 main-wall deco, 3 the lead hall's far faces. */
+export type HoldLod = 0 | 1 | 2 | 3;
 
 interface ProfilePt {
   y: number;
@@ -732,11 +739,12 @@ function ensureColor(g: THREE.BufferGeometry): void {
  * lod 1 = background detail (fewer segments, no bolt) for the neighbouring walls.
  * lod 2 = deco holds on the main wall (two thirds of the segments, no bolt): dimmed and never
  *         touched, they don't need the route holds' tessellation at phone resolution.
+ * lod 3 = the far faces of the 15 m lead hall (about a quarter of the segments).
  * `v` (HoldDef shape / edgeDepthMm / lipAngle / fingers) picks the product variant: a deep incut
  * edge reads differently from a 7 mm crimp, a mono from a three-finger pocket, a horn, a rail,
  * a bucket, a chip, a macro, dual-tex and wooden holds each have their own build or finish.
  */
-export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 | 1 | 2 = 0, v: HoldVariant = {}): HoldGeometry {
+export function holdGeometry(type: HoldType, seed: number, size: number, lod: HoldLod = 0, v: HoldVariant = {}): HoldGeometry {
   const variant = Math.abs(seed) % HOLD_VARIANTS;
   const sb = Math.max(1, Math.round(size * 200));
   const shape = v.shape;
@@ -745,7 +753,8 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 
   const lq = v.lipAngle !== undefined ? Math.round(v.lipAngle / 5) : 99;
   const fq = v.fingers ?? 0;
   const key = `${type}:${shape ?? '-'}:${variant}:${sb}:${lod}:${dq}:${lq}:${fq}`;
-  const segU = (n: number) => (lod === 1 ? Math.max(6, Math.round(n * 0.4)) : lod === 2 ? Math.max(10, Math.round(n * 0.66)) : n);
+  const segU = (n: number) =>
+    lod === 3 ? Math.max(5, Math.round(n * 0.28)) : lod === 1 ? Math.max(6, Math.round(n * 0.4)) : lod === 2 ? Math.max(10, Math.round(n * 0.66)) : n;
   geoUsed.set(key, geoEpoch);
   const hit = geoCache.get(key);
   if (hit) {
@@ -813,7 +822,7 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 
     }
     case 'pinch': {
       if (shape === 'horn') {
-        built = horn(rng, lod);
+        built = horn(rng, lod === 3 ? 1 : lod);
         boltScale = 0.8;
       } else {
         built = sweep(PINCH, { halfLen: rng.range(1.3, 1.6), segU: segU(18), taperP: rng.range(2.2, 3), bend: rng.range(-0.15, 0.15), zKeep: 0.6, noise, noiseAmp: 0.08, boltJ: 4, asym: rng.range(-1, 1) });
@@ -828,7 +837,7 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 
       const hy = f === 1 ? 0.55 : f === 2 ? 0.6 : f === 3 ? 0.68 : 0.78;
       const floor = dq >= 0 ? Math.max(0.05, Math.min(0.42, 0.58 - (dq * 2) / 1000 / s)) : 0.11;
       built = lathe(POCKET, {
-        seg: lod === 1 ? 12 : lod === 2 ? 16 : 22,
+        seg: lod === 3 ? 9 : lod === 1 ? 12 : lod === 2 ? 16 : 22,
         sx: rng.range(1.0, 1.25) * (f >= 4 ? 1.15 : 1),
         sy: rng.range(0.8, 0.95),
         holeShift: rng.range(0.08, 0.2),
@@ -845,7 +854,7 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 
         flat = chip(rng);
         boltScale = 0.45;
       } else {
-        built = lathe(FOOT, { seg: lod === 1 ? 9 : lod === 2 ? 11 : 14, sx: rng.range(1.1, 1.5), sy: rng.range(0.7, 0.95), holeShift: 0, noise: makeNoise(rng, 1.5, 4), noiseAmp: 0.14 });
+        built = lathe(FOOT, { seg: lod === 3 ? 7 : lod === 1 ? 9 : lod === 2 ? 11 : 14, sx: rng.range(1.1, 1.5), sy: rng.range(0.7, 0.95), holeShift: 0, noise: makeNoise(rng, 1.5, 4), noiseAmp: 0.14 });
         boltScale = 0.55;
       }
       break;
@@ -905,6 +914,8 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 
   const halfY = Math.max(Math.abs(bb.min.y), Math.abs(bb.max.y));
   if (shape === 'dual-tex' || shape === 'macro') applyFinish(geo, 'dual', halfY, seed);
   else if (shape === 'wood') applyFinish(geo, 'wood', halfY, seed);
+  // thin-hold shading (research §4.4): per-vertex curvature, so lips and thin edges read at phone scale
+  bakeCurvature(geo);
   const entry: HoldGeometry = {
     geo,
     halfX: Math.max(Math.abs(bb.min.x), Math.abs(bb.max.x)),
@@ -929,6 +940,37 @@ export function holdMatrix(h: HoldDef, frame: WallFrame, out: THREE.Matrix4): TH
   _q.setFromAxisAngle(Z, h.angle + Math.PI / 2).premultiply(frame.quaternionAt(h.y, _pq));
   frame.toWorldXYZ(h.x, h.y, 0, _v).addScaledVector(frame.normalAt(h.y, _n, false), -0.0015);
   return out.compose(_v, _q, ONE);
+}
+
+/** Panels meeting at a fold this far apart (deg) count as a lip / an inside corner for foldClampY. */
+const FOLD_MIN = 8;
+/** Clearance (m) a hold keeps from a fold, and the most a hold is moved to get it. */
+const FOLD_GAP = 0.006;
+const FOLD_MAX_SHIFT = 0.12;
+
+/**
+ * Render-side clamp for holds next to a fold (a roof lip, the edge of a kicker, an inside corner): a
+ * hold is bolted flat to its own panel, so a footprint reaching past the fold would stick out into
+ * the air beyond a convex lip (or into the next panel at an inside corner). The hold slides back
+ * along its panel until its footprint ends just short of the fold (at most FOLD_MAX_SHIFT); a panel
+ * shorter than the hold keeps it centred. Returns the surface y to draw the hold at.
+ */
+export function foldClampY(h: Pick<HoldDef, 'y' | 'angle'>, halfX: number, halfY: number, frame: WallFrame): number {
+  if (!frame.folded) return h.y;
+  const spans = frame.spans();
+  const i = frame.panelIndex(h.y);
+  const sp = spans[i];
+  if (!sp) return h.y;
+  const rot = h.angle + Math.PI / 2;
+  const ey = Math.abs(Math.sin(rot)) * halfX + Math.abs(Math.cos(rot)) * halfY;
+  const prev = spans[i - 1];
+  const next = spans[i + 1];
+  const lo = prev && Math.abs(prev.angle - sp.angle) >= FOLD_MIN ? sp.y0 + FOLD_GAP + ey : -Infinity;
+  const hi = next && Math.abs(next.angle - sp.angle) >= FOLD_MIN ? sp.y1 - FOLD_GAP - ey : Infinity;
+  let y = h.y;
+  if (lo > hi) y = (sp.y0 + sp.y1) / 2;
+  else y = Math.min(hi, Math.max(lo, y));
+  return h.y + Math.max(-FOLD_MAX_SHIFT, Math.min(FOLD_MAX_SHIFT, y - h.y));
 }
 
 const _hsl = { h: 0, s: 0, l: 0 };
@@ -1071,6 +1113,8 @@ export interface HoldSetOptions {
   decoShadows?: boolean;
   gradeText?: string;
   name?: string;
+  /** Tessellation of the merged deco holds (default 2; a 15 m lead wall uses 1: it shows many more). */
+  decoLod?: HoldLod;
 }
 
 /**
@@ -1084,6 +1128,11 @@ export interface HoldMount {
   /** Height of the mounting point above the wall surface (m, along the panel normal). */
   lift: number;
 }
+
+/** Attributes a merged route band keeps (plus its own aHold / aGrip). */
+const BAND_ATTRS = new Set(['position', 'normal', 'uv', 'color', 'aSurf', 'aCurv']);
+/** Lead towers: route bands farther than this (m) from the camera draw their coarse tessellation. */
+const LOD_FAR = 7.5;
 
 /** Draw-range start past any index count: renderBufferDirect returns before issuing a draw. */
 const HIDDEN_RANGE = 1 << 30;
@@ -1112,13 +1161,18 @@ export class HoldSet {
   private tapeMesh: THREE.Mesh | null = null;
   private aoMesh: THREE.Mesh | null = null;
   private routeMats: SurfaceMaterial[] = [];
+  /** Merged route-hold bands (game): one LOD (rope) or mesh per band, their geometries, the rim texture. */
+  private bands: THREE.Object3D[] = [];
+  private bandGeos: THREE.BufferGeometry[] = [];
+  private rimTex: THREE.DataTexture | null = null;
+  private readonly rimIdx = new Map<string, number>();
   private decoMat: SurfaceMaterial;
   private aoMat: THREE.MeshBasicMaterial;
   private tapeMat: THREE.MeshStandardMaterial | null = null;
 
   constructor(private frame: WallFrame) {
     this.group.name = 'holds';
-    this.decoMat = createSurfaceMaterial({ roughness: 0.74, normalMap: speckleNormal(), normalScale: 0.35, normalRepeat: 22, envMapIntensity: 0.32 });
+    this.decoMat = createSurfaceMaterial({ roughness: 0.74, normalMap: speckleNormal(), normalScale: 0.35, normalRepeat: 22, envMapIntensity: 0.32, curv: true });
     this.aoMat = new THREE.MeshBasicMaterial({
       color: 0x000000,
       // per-vertex alpha: the patch fades out past a roof lip (buildAo)
@@ -1168,6 +1222,7 @@ export class HoldSet {
     this.clear();
     geoEpoch++;
     const deco: { h: HoldDef; g: HoldGeometry }[] = [];
+    const merge: { h: HoldDef; g: HoldGeometry }[] = [];
     const m = new THREE.Matrix4();
     // holds bolted onto volumes: find their mounting points first (volumes may come later in the list)
     const byId = new Map<string, HoldDef>();
@@ -1176,13 +1231,20 @@ export class HoldSet {
       if (!h.onVolume) continue;
       const vol = byId.get(h.onVolume);
       if (!vol || vol.type !== 'volume') continue;
-      const vg = holdGeometry('volume', vol.seed, vol.size, vol.role === 'deco' && !opts.separateAll ? 2 : 0, holdVariant(vol));
+      const vg = holdGeometry('volume', vol.seed, vol.size, vol.role === 'deco' && !opts.separateAll ? (opts.decoLod ?? 2) : 0, holdVariant(vol));
       const mount = this.mountOn(h, vol, vg);
       if (mount) this.mounts.set(h.id, mount);
     }
-    for (const h of holds) {
-      const mergedDeco = h.role === 'deco' && !opts.separateAll;
-      const g = holdGeometry(h.type, h.seed, h.size, mergedDeco ? 2 : 0, holdVariant(h));
+    for (const h0 of holds) {
+      const mergedDeco = h0.role === 'deco' && !opts.separateAll;
+      const g = holdGeometry(h0.type, h0.seed, h0.size, mergedDeco ? (opts.decoLod ?? 2) : 0, holdVariant(h0));
+      // next to a fold the drawn hold slides back onto its own panel (never past a roof lip); the
+      // render copy carries that position for the AO, tapes, highlights and contact depth
+      let h = h0;
+      if (!this.mounts.has(h0.id) && h0.type !== 'volume') {
+        const y = foldClampY(h0, g.halfX, g.halfY, this.frame);
+        if (Math.abs(y - h0.y) > 1e-4) h = { ...h0, y };
+      }
       this.holds.set(h.id, h);
       this.geoms.set(h.id, g);
       if (h.role === 'deco' && !opts.separateAll) {
@@ -1191,6 +1253,10 @@ export class HoldSet {
       }
       const look = h.role === 'deco' ? null : routeHoldLook(h.color);
       const wood = h.shape === 'wood';
+      if (look && !wood && !opts.separateAll) {
+        merge.push({ h, g });
+        continue;
+      }
       let color = look ? look.color : decoColor(h.color, undefined, boulder.color);
       // wooden holds stay wood (the route's colour only stains them; its edge light keeps the route readable)
       if (wood) color = woodColor(h.color, look ? 0.22 : 0.1, look ? undefined : boulder.color);
@@ -1202,6 +1268,9 @@ export class HoldSet {
         normalRepeat: 22,
         rim: true,
         envMapIntensity: wood ? 0.35 : look ? 0.6 : 0.32,
+        curv: true,
+        // the within-reach rim + glint: only holds of the problem a limb may use
+        cue: h.role !== 'deco',
       });
       if (look) {
         const u = mat.userData.surf;
@@ -1254,10 +1323,138 @@ export class HoldSet {
         this.group.add(this.decoMesh);
       }
     }
+    if (merge.length) this.buildBands(boulder, merge);
     if (!opts.separateAll) this.buildShadowProxy();
-    this.buildAo(holds);
-    this.buildTapes(boulder, holds, opts);
+    const drawn = [...this.holds.values()];
+    this.buildAo(drawn);
+    this.buildTapes(boulder, drawn, opts);
     trimHoldCache();
+  }
+
+  /**
+   * Route holds merged per band of SHADOW_BAND m up the wall: one draw per band instead of one per
+   * hold (a lead tower's ~80 route holds become ~7 draws, still culled band by band), casting their
+   * own shadows. Each vertex carries its hold's index (aHold: highlight rims from the rim texture) and
+   * its hold's grip direction (aGrip: the within-reach cue). On a lead tower each band is a THREE.LOD:
+   * the hold geometry at full detail near the camera, the coarse (neighbour-wall) tessellation past LOD_FAR.
+   */
+  private buildBands(boulder: BoulderDef, items: { h: HoldDef; g: HoldGeometry }[]): void {
+    const W = Math.max(1, items.length);
+    const data = new Float32Array(W * 2 * 4);
+    for (let i = 0; i < W; i++) data[(W + i) * 4] = 2.2; // row 1: rim power
+    const tex = new THREE.DataTexture(data, W, 2, THREE.RGBAFormat, THREE.FloatType);
+    tex.minFilter = tex.magFilter = THREE.NearestFilter;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    this.rimTex = tex;
+    const looks = new Map<string, { look: RouteHoldLook; mat: SurfaceMaterial }>();
+    const lod = boulder.mode === 'rope';
+    const groups = new Map<string, { key: string; idx: number[] }>();
+    items.forEach((it, i) => {
+      this.rimIdx.set(it.h.id, i);
+      const key = `${it.h.color}|${Math.floor(it.h.y / SHADOW_BAND)}`;
+      let gr = groups.get(key);
+      if (!gr) groups.set(key, (gr = { key, idx: [] }));
+      gr.idx.push(i);
+    });
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const grip = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    const build = (idx: number[], coarse: boolean, col: THREE.Color): THREE.BufferGeometry | null => {
+      const parts: THREE.BufferGeometry[] = [];
+      for (const i of idx) {
+        const { h, g } = items[i];
+        const src = coarse ? holdGeometry(h.type, h.seed, h.size, 1, holdVariant(h)).geo : g.geo;
+        const geo = src.clone();
+        for (const name of Object.keys(geo.attributes)) if (!BAND_ATTRS.has(name)) geo.deleteAttribute(name);
+        const mount = this.mounts.get(h.id);
+        if (mount) m.compose(mount.pos, mount.quat, ONE);
+        else holdMatrix(h, this.frame, m);
+        geo.applyMatrix4(m);
+        m.decompose(_v, q, _n);
+        grip.set(0, 1, 0).applyQuaternion(q);
+        const n = geo.getAttribute('position').count;
+        const c = geo.getAttribute('color') as THREE.BufferAttribute;
+        for (let k = 0; k < c.count; k++) c.setXYZ(k, c.getX(k) * col.r, c.getY(k) * col.g, c.getZ(k) * col.b);
+        geo.setAttribute('aHold', new THREE.BufferAttribute(new Float32Array(n).fill(i), 1));
+        const ga = new Float32Array(n * 3);
+        for (let k = 0; k < n; k++) ga.set([grip.x, grip.y, grip.z], k * 3);
+        geo.setAttribute('aGrip', new THREE.BufferAttribute(ga, 3));
+        parts.push(geo);
+      }
+      const merged = mergeGeometries(parts, false);
+      for (const p of parts) p.dispose();
+      if (!merged) return null;
+      merged.translate(-center.x, -center.y, -center.z);
+      merged.computeBoundingSphere();
+      this.bandGeos.push(merged);
+      return merged;
+    };
+    for (const gr of groups.values()) {
+      const color = gr.key.split('|')[0];
+      let lk = looks.get(color);
+      if (!lk) {
+        const look = routeHoldLook(color);
+        const mat = createSurfaceMaterial({
+          color: 0xffffff,
+          roughness: look.roughness,
+          normalMap: speckleNormal(),
+          normalScale: 0.38,
+          normalRepeat: 22,
+          rim: true,
+          envMapIntensity: 0.6,
+          curv: true,
+          cue: true,
+          rimTex: tex,
+        });
+        const u = mat.userData.surf;
+        u.uEdgeColor.value.copy(look.edgeColor);
+        u.uEdgeStrength.value = look.edgeStrength;
+        u.uEdgePower.value = look.edgePower;
+        u.uLift.value = look.lift;
+        this.routeMats.push(mat);
+        looks.set(color, (lk = { look, mat }));
+      }
+      // the band's centre (LOD distance + local geometry)
+      center.set(0, 0, 0);
+      for (const i of gr.idx) {
+        const h = items[i].h;
+        const mount = this.mounts.get(h.id);
+        if (mount) center.add(mount.pos);
+        else center.add(this.frame.toWorldXYZ(h.x, h.y, 0, _v));
+      }
+      center.multiplyScalar(1 / gr.idx.length);
+      let wallY = 0;
+      for (const i of gr.idx) wallY += items[i].h.y;
+      wallY /= gr.idx.length;
+      const g0 = build(gr.idx, false, lk.look.color);
+      if (!g0) continue;
+      const mk = (g: THREE.BufferGeometry, name: string): THREE.Mesh => {
+        const mesh = new THREE.Mesh(g, lk.mat);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.name = name;
+        return mesh;
+      };
+      if (lod) {
+        const g2 = build(gr.idx, true, lk.look.color);
+        const o = new THREE.LOD();
+        o.name = 'holds:route-band';
+        o.position.copy(center);
+        o.addLevel(mk(g0, 'holds:route-band'), 0, 0.12);
+        if (g2) o.addLevel(mk(g2, 'holds:route-band-far'), LOD_FAR, 0.12);
+        o.userData.wallY = wallY;
+        this.bands.push(o);
+        this.group.add(o);
+      } else {
+        const mesh = mk(g0, 'holds:route-band');
+        mesh.position.copy(center);
+        mesh.userData.wallY = wallY;
+        this.bands.push(mesh);
+        this.group.add(mesh);
+      }
+    }
   }
 
   /**
@@ -1450,8 +1647,47 @@ export class HoldSet {
     if (this.decoMesh) this.decoMesh.castShadow = on;
   }
 
+  /**
+   * Shadow focus (wall-local y, or null for all): while the key light is tight on the climber, only
+   * the route bands within `range` m of it cast (a lead tower's far bands are outside its pool).
+   */
+  setShadowFocus(y: number | null, range = 3.2): void {
+    for (const b of this.bands) {
+      const on = y === null || Math.abs((b.userData.wallY as number) - y) <= range;
+      if (b.userData.castOn === on) continue;
+      b.userData.castOn = on;
+      b.traverse((o) => {
+        if ((o as THREE.Mesh).isMesh) o.castShadow = on;
+      });
+    }
+  }
+
+  /** Ids of the problem's holds a limb may use (start / hand / foot / top), merged or not. */
+  routeIds(): string[] {
+    const out: string[] = [];
+    for (const [id, h] of this.holds) if (h.role !== 'deco') out.push(id);
+    return out;
+  }
+
   /** Rim glow on a route hold mesh (highlights). strength 0 = off. */
   setRim(holdId: string, color: THREE.Color, strength: number, power = 2.2): void {
+    const bi = this.rimIdx.get(holdId);
+    if (bi !== undefined && this.rimTex) {
+      // merged band: the hold's column of the rim texture (re-uploaded only when it changes)
+      const d = this.rimTex.image.data as Float32Array;
+      const W = this.rimTex.image.width;
+      const o = bi * 4;
+      const p = (W + bi) * 4;
+      if (d[o] !== color.r || d[o + 1] !== color.g || d[o + 2] !== color.b || d[o + 3] !== strength || d[p] !== power) {
+        d[o] = color.r;
+        d[o + 1] = color.g;
+        d[o + 2] = color.b;
+        d[o + 3] = strength;
+        d[p] = power;
+        this.rimTex.needsUpdate = true;
+      }
+      return;
+    }
     const mesh = this.meshes.get(holdId);
     if (!mesh) return;
     const surf = (mesh.material as SurfaceMaterial).userData.surf;
@@ -1474,6 +1710,13 @@ export class HoldSet {
       mesh.geometry.dispose();
     }
     this.shadowMeshes = [];
+    for (const b of this.bands) this.group.remove(b);
+    this.bands = [];
+    for (const g of this.bandGeos) g.dispose();
+    this.bandGeos = [];
+    this.rimTex?.dispose();
+    this.rimTex = null;
+    this.rimIdx.clear();
     if (this.tapeMat) {
       this.tapeMat.map?.dispose();
       this.tapeMat.dispose();

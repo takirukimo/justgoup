@@ -11,7 +11,7 @@ import type { CameraMode, GuideState, HoldHighlight, RendererAPI, ScreenPoint } 
 import type { BoulderDef, ChalkId, ClimberState, ColorwayId, HeadId, HoldDef, LimbSnapshot, QualityLevel, Vec2 } from '../core/types';
 import { PALETTE } from '../config/brand';
 import { CHALKS } from '../config/skins';
-import { GAME } from '../config/tuning';
+import { BODY, GAME } from '../config/tuning';
 import { clamp, smoothstep } from '../core/math';
 import { WallFrame } from './wall-frame';
 import { WallView } from './wall';
@@ -27,6 +27,7 @@ import { GuideModel } from './guide';
 import { RopeMesh } from './rope-mesh';
 import { renderPortrait, resetPortraitEnvironment } from './portrait';
 import { disposeHoldCache } from './holds';
+import { HOLD_CUE } from './shading';
 
 /** Optional fx beyond RendererAPI['fx'] (the app calls them when present). */
 export interface GameRendererFx {
@@ -126,6 +127,14 @@ export class GameRenderer implements RendererAPI {
   private pulls = new Map<string, Vec2>();
   private skin: { head: HeadId; colorway: ColorwayId; chalk: ChalkId } = { head: 'ibex', colorway: 'basalt', chalk: 'classic' };
   private focusHint: Vec2 | null = null;
+  /** Pure mode (no HUD): body cues and the within-reach hold cue run stronger. */
+  private pure = false;
+  /** Eased strength of the within-reach hold cue (HOLD_CUE.uCueAmt). */
+  private cueAmt = 0;
+  /** Smoothed Pure-mode strain desaturation. */
+  private desat = 0;
+  /** Steini (belaying on a lead tower) casts the key light's shadow only while the climber is near. */
+  private guideCasts = true;
   /** Smoothed cost of ClimberModel.pose() (ms) for QA. */
   private poseMs = 0;
   private cssW = 1;
@@ -250,6 +259,12 @@ export class GameRenderer implements RendererAPI {
       out.depth = (this.wall.holds.geoms.get(id)?.depth ?? h.size * 0.5) + (this.wall.holds.mounts.get(id)?.lift ?? 0);
       return true;
     });
+    this.climber.setCueGain(this.pure ? 1.4 : 1);
+    // fingers creeping before a slip: a little chalk trickles off the hold (feet: a puff of rubber dust)
+    this.climber.onCreep = (limb, p) => {
+      if (limb === 'LH' || limb === 'RH') this.fxSys.chalkPuff(p, 0.22);
+      else this.fxSys.chalkPuff(p, 0.12);
+    };
     this.scene.add(this.climber);
     this.rope = new RopeMesh();
     this.scene.add(this.rope);
@@ -272,7 +287,7 @@ export class GameRenderer implements RendererAPI {
 
   /** Compile every material variant up front so the first highlight / puff doesn't hitch. */
   private prewarm(): void {
-    const ids = [...this.wall.holds.meshes.keys()];
+    const ids = this.wall.holds.routeIds();
     if (ids.length) {
       this.highlights.set([
         { holdId: ids[0], kind: 'candidate', quality: 0.8 },
@@ -313,6 +328,9 @@ export class GameRenderer implements RendererAPI {
 
   private applyQuality(): void {
     const p = this.preset;
+    // thin-hold cue tiers (research §4.4): the glint is the first thing to go on weak GPUs
+    HOLD_CUE.uCueGlint.value = p.level === 'low' ? 0.9 : p.level === 'medium' ? 1.2 : 1.4;
+    HOLD_CUE.uCueRim.value = p.level === 'low' ? 0.45 : 0.55;
     const shadows = p.shadowMapSize > 0;
     this.gl.shadowMap.enabled = shadows;
     this.key.castShadow = shadows;
@@ -323,7 +341,7 @@ export class GameRenderer implements RendererAPI {
     }
     this.key.shadow.radius = p.shadowRadius;
     this.contact.strength = shadows ? 1 : 1.35;
-    this.wall.holds.setDecoShadows(p.shadowMapSize >= 2048);
+    this.wall.holds.setDecoShadows(p.shadowMapSize >= 2048 && this.boulder?.mode !== 'rope');
     if (this.post) this.post.apply(p);
     if (this.env && this.boulder) this.env.configure(this.layoutFor(this.boulder), p);
   }
@@ -545,6 +563,75 @@ export class GameRenderer implements RendererAPI {
     this.poseMs += (performance.now() - t0 - this.poseMs) * 0.1;
   }
 
+  /**
+   * Optional (app, Pure mode): no HUD — the climber's body cues and the within-reach hold cue (rim +
+   * glint on usable lips, research §4.4) run stronger, since the yellow-paint highlights are gone.
+   */
+  setPure(on: boolean): void {
+    this.pure = on;
+    this.climber?.setCueGain(on ? 1.4 : 1);
+  }
+
+  /** Optional (app, reduced-motion setting): 0 turns off the camera's breath sway and strain dolly-in. */
+  setMotionScale(k: number): void {
+    this.rig.motionScale = clamp(k, 0, 1);
+  }
+
+  /**
+   * Shadow casters the tight key can't reach: in 'follow' only the route bands near the climber cast,
+   * and Steini belaying at the foot of a lead tower casts none.
+   */
+  private updateShadowCasters(st: ClimberState | null): void {
+    const follow = this.rig.mode === 'follow' && !!st && this.climberVisible;
+    this.wall.holds.setShadowFocus(follow && st ? st.com.y : null);
+    // (his belay stance sits outside the tight key's pool, and two characters' shadows would cost a
+    // lead tower more triangles than its whole wall of holds)
+    const casts = !(follow && this.boulder?.mode === 'rope');
+    if (casts === this.guideCasts || !this.guide) return;
+    this.guideCasts = casts;
+    this.guide.traverse((o) => {
+      if (!(o as THREE.Mesh).isMesh) return;
+      if (!casts) {
+        o.userData.cast0 = o.castShadow;
+        o.castShadow = false;
+      } else if (typeof o.userData.cast0 === 'boolean') o.castShadow = o.userData.cast0;
+    });
+  }
+
+  /** Body cues on the camera: the view breathes with the climber and closes in under strain. */
+  private updateBodyCam(dt: number): void {
+    const st = this.state;
+    const c = this.climber;
+    let strain = 0;
+    if (st && c && this.climberVisible && st.phase === 'climbing') {
+      strain = Math.max(smoothstep(0.85, 1.1, st.tension), smoothstep(0.5, 0.9, c.maxSlip));
+      this.rig.setBreath(c.breathValue, c.breathDepth, strain);
+    } else this.rig.setBreath(0, 0, 0);
+    const want = this.pure ? strain * 0.22 : 0;
+    this.desat += (want - this.desat) * (1 - Math.exp(-dt / (want > this.desat ? 0.8 : 1.5)));
+    this.post?.setDesaturation(this.desat);
+  }
+
+  /** Within-reach hold cue: reach spheres from the shoulders and hips, faded in only while climbing. */
+  private updateHoldCue(dt: number): void {
+    const st = this.state;
+    const live = !!st && this.climberVisible && st.phase === 'climbing' && this.rig.mode === 'follow';
+    const target = live ? (this.pure ? 1.35 : 1) : 0;
+    this.cueAmt += (target - this.cueAmt) * (1 - Math.exp(-dt / 0.25));
+    if (Math.abs(this.cueAmt - target) < 1e-3) this.cueAmt = target;
+    HOLD_CUE.uCueAmt.value = this.cueAmt;
+    if (!st || this.cueAmt <= 0) return;
+    const c = HOLD_CUE.uCueC.value;
+    const L = st.limbs;
+    const ids = ['LH', 'RH', 'LF', 'RF'] as const;
+    for (let i = 0; i < 4; i++) {
+      const a = L[ids[i]].anchor;
+      this.wallFrame.toWorldXYZ(a.x, a.y, 0, this.v);
+      // hands: an arm's reach (+ the sim's snap tolerance); feet: most of a leg from the hip
+      c[i].set(this.v.x, this.v.y, this.v.z, i < 2 ? BODY.armMax + 0.06 : BODY.legMax * 0.88);
+    }
+  }
+
   setSkin(head: HeadId, colorway: ColorwayId, chalk: ChalkId): void {
     this.skin = { head, colorway, chalk };
     this.climber?.setSkin(head, colorway, chalk);
@@ -708,6 +795,7 @@ export class GameRenderer implements RendererAPI {
     }
 
     this.rig.setContinuousShake(this.state ? this.state.shake : 0);
+    this.updateBodyCam(d);
     this.rig.update(d, this.cameraContext());
     const cam = this.rig.camera;
     // straight-on editor views of steep overhangs (and transitions out of them) sit below pad level
@@ -716,6 +804,8 @@ export class GameRenderer implements RendererAPI {
     this.env.setSignLevel(this.rig.mode === 'title' && this.rig.introProgress >= 1 ? 0.3 : 1);
 
     this.updateLights(d, st);
+    this.updateHoldCue(d);
+    this.updateShadowCasters(st);
     this.wall.update(d);
     this.updateRope(d);
     if (this.guide && this.guideState) this.guide.setState(this.guideState, this.wallFrame, d);
