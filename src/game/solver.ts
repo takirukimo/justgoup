@@ -22,6 +22,9 @@ import {
   clipPoint,
   contactPoint,
   footModeFor,
+  footModeOptions,
+  FM_EDGE,
+  FM_HOOK,
   LIMB_IDS,
   LIMB_INDEX,
   maxReachIdx,
@@ -48,6 +51,7 @@ import {
   setContact,
   setSmear,
   StanceEval,
+  chooseFootModes,
   type Contact,
   type Contacts,
   type Pose,
@@ -426,46 +430,61 @@ class Planner {
     return this.prof ? angleAt(this.prof, y) <= SIM.smearMaxAngle : this.smearOk;
   }
 
-  /** Would the feet's modes at `pose` differ from the ones the contacts carry? */
-  private footModesChange(contacts: Contacts, pose: Pose): boolean {
+  /** Technique options (holds.footModeOptions) of the feet on holds for the body in `pose` → this.fm. */
+  private readonly fm = [0, 0, 0, 0];
+  private footOptions(contacts: Contacts, pose: Pose): void {
     const prof = this.prof;
     computeAnchors(pose, this.AX, this.AY);
     const comY = pose.py + BODY.comT * (pose.cy - pose.py);
     const bodyAngle = prof ? smoothAngleAt(prof, comY) : this.b.wallAngle;
     for (let i = 2; i < 4; i++) {
       const c = contacts[i];
+      this.fm[i] = 0;
       if (!c || !c.hold) continue;
       const wall = prof ? Math.max(angleAt(prof, c.y), bodyAngle) : bodyAngle;
+      this.fm[i] = footModeOptions(c.hold, c.x, c.y, this.AX[i], this.AY[i], pose.px, wall, null);
       const m = footModeFor(c.hold, c.x, c.y, this.AX[i], this.AY[i], pose.px, wall, null);
-      const mode = m === 'heel' ? FOOT_HEEL : m === 'toe' ? FOOT_TOE : m === 'drop' ? FOOT_DROP : FOOT_PUSH;
-      if (mode !== c.mode) return true;
+      this.fp[i] = m === 'heel' ? FOOT_HEEL : m === 'toe' ? FOOT_TOE : m === 'drop' ? FOOT_DROP : FOOT_PUSH;
     }
-    return false;
+  }
+  /** The geometric technique (holds.footModeFor) of each foot, as Contact.mode (footOptions). */
+  private readonly fp = [0, 0, 0, 0];
+
+  private readonly modeEv = new StanceEval();
+
+  /** Would the feet's techniques at `pose` differ from the ones the contacts carry? */
+  private footModesChange(contacts: Contacts, pose: Pose, prm: StaticsParams): boolean {
+    const m2 = contacts[2]?.mode ?? 0;
+    const m3 = contacts[3]?.mode ?? 0;
+    this.applyFootModes(contacts, pose, prm);
+    const changed = (contacts[2]?.mode ?? 0) !== m2 || (contacts[3]?.mode ?? 0) !== m3;
+    if (contacts[2]) contacts[2].mode = m2;
+    if (contacts[3]) contacts[3].mode = m3;
+    return changed;
   }
 
   /**
-   * Feet on holds get the technique the live climber would use there (holds.footModeFor, the sim's rule)
-   * for the body in `pose`: hooks on roofs pull instead of pushing, a foot at hip height out to the side
-   * of a steep flat wall heel-hooks, a sidepull foothold drops the knee. (Flat walls used to plan pushing
-   * feet only, so a stance the sim turned into a weak heel hook could slip where the plan stood calm.)
+   * Feet on holds get the technique the live climber would use there for the body in `pose`: among the ones
+   * the geometry allows (holds.footModeOptions: standing, a heel / toe hook, a drop knee) the one whose
+   * stance holds best (statics.chooseFootModes, the sim's rule) — hooks on roofs pull instead of pushing, a
+   * foot at hip height out to the side of a steep wall heel-hooks, a sidepull foothold drops the knee.
    */
-  applyFootModes(contacts: Contacts, pose: Pose): void {
-    const prof = this.prof;
-    computeAnchors(pose, this.AX, this.AY);
-    const comY = pose.py + BODY.comT * (pose.cy - pose.py);
-    const bodyAngle = prof ? smoothAngleAt(prof, comY) : this.b.wallAngle;
+  applyFootModes(contacts: Contacts, pose: Pose, prm: StaticsParams = this.prm): void {
+    this.footOptions(contacts, pose);
+    let open = false;
     for (let i = 2; i < 4; i++) {
       const c = contacts[i];
       if (!c || !c.hold) continue;
-      const wall = prof ? Math.max(angleAt(prof, c.y), bodyAngle) : bodyAngle;
-      const m = footModeFor(c.hold, c.x, c.y, this.AX[i], this.AY[i], pose.px, wall, null);
-      c.mode = m === 'heel' ? FOOT_HEEL : m === 'toe' ? FOOT_TOE : m === 'drop' ? FOOT_DROP : FOOT_PUSH;
+      c.mode = this.fp[i];
+      if (this.fm[i] & ~FM_EDGE || this.fp[i] !== FOOT_PUSH) open = true;
     }
+    // the geometric technique, unless another one the foot could use holds clearly better (the sim's rule)
+    if (open) chooseFootModes(pose, contacts, prm, this.modeEv, this.fm[2], this.fm[3], SIM.footModeBias);
   }
 
   /**
-   * Would foot li placed on hold h at (tx, ty) hook it (heel / toe hook) with the body in `pose`? The sim's
-   * rule (holds.footModeFor, decided before the reach check).
+   * Could foot li placed on hold h at (tx, ty) hook it (heel / toe hook) with the body in `pose`? Then it
+   * reaches with the hooking leg's range (the sim's rule, decided before the reach check).
    */
   hookAt(pose: Pose, li: number, h: HoldDef, tx: number, ty: number): boolean {
     if (li < 2) return false;
@@ -474,8 +493,7 @@ class Planner {
     const comY = pose.py + BODY.comT * (pose.cy - pose.py);
     const bodyAngle = prof ? smoothAngleAt(prof, comY) : this.b.wallAngle;
     const wall = prof ? Math.max(angleAt(prof, ty), bodyAngle) : bodyAngle;
-    const m = footModeFor(h, tx, ty, this.AX[li], this.AY[li], pose.px, wall, null);
-    return m === 'heel' || m === 'toe';
+    return (footModeOptions(h, tx, ty, this.AX[li], this.AY[li], pose.px, wall, null) & FM_HOOK) !== 0;
   }
 
   /** Fill this.contacts for a node's slots, optionally without limb `skip`. */
@@ -507,14 +525,14 @@ class Planner {
     this.applyFootModes(contacts, init);
     const pose: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
     let r = seed ? optimizePose(contacts, this.prm, init, pose, this.ev, 44, true) : optimizePose(contacts, this.prm, init, pose, this.ev, 90);
-    // the sim infers each foot's mode from where the body SETTLES: when the settled pose turns a toe hook
+    // the sim picks each foot's technique where the body SETTLES: when the settled pose turns a toe hook
     // into a plain edge (or an edge into a heel hook), judge the stance with the modes the sim will use
-    if (this.footModesChange(contacts, pose)) {
+    if (this.footModesChange(contacts, pose, this.prm)) {
       this.applyFootModes(contacts, pose);
       const p2: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
       const r2 = optimizePose(contacts, this.prm, pose, p2, this.ev, 44, true);
       // keep the result only when the modes hold at the new pose too (no flip-flopping between two)
-      if (!this.footModesChange(contacts, p2)) {
+      if (!this.footModesChange(contacts, p2, this.prm)) {
         r = r2;
         pose.px = p2.px;
         pose.py = p2.py;
@@ -535,12 +553,12 @@ class Planner {
     const hit = this.reachCache.get(cacheKey);
     if (hit) return hit;
     const contacts = this.setContacts(n, li);
-    this.applyFootModes(contacts, n.pose);
     const prm = this.reachPrm;
     prm.reachLimb = li;
     prm.reachX = tx;
     prm.reachY = ty;
     prm.reachHook = hook && li >= 2;
+    this.applyFootModes(contacts, n.pose, prm);
     const pose: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
     const r = optimizePose(contacts, prm, n.pose, pose, this.ev, 48, true);
     prm.reachHook = false;

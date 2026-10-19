@@ -25,8 +25,9 @@
  *     after it — a hand anywhere, a foot only toward targets below or out to the side (a leg in the
  *     air can't lift the hips),
  * then projects position constraints (PBD): spine length, every attached hand / foot inside its
- * ANATOMICAL REACH ENVELOPE around the shoulder / hip (anatomy.ts: a foot at most ~0.17 m over the
- * hip and never straight up, a hand only a little way across the chest or down past the hips;
+ * ANATOMICAL REACH ENVELOPE around the shoulder / hip (anatomy.ts: a standing foot at most ≈0.32 m over
+ * the hip (a high step, the hips brought in), a hooking one ≈0.5 m, never straight up; a hand only a
+ * little way across the chest or down past the hips;
  * a contact that would leave it moves the chest / pelvis instead, a fresh grab at the edge of the
  * snap range eases the body in over SOFT_ATTACH), and soft in-plane minimums (SIM.armMinPlane /
  * legMinPlane: shoulders and hips sit off the wall, so a folded limb projects short). Velocities
@@ -71,7 +72,10 @@
  * the other hand holds well: it hangs by the side and recovers faster ('shake-out-start' / -end).
  *
  * ── Foot techniques ──────────────────────────────────────────────────────────────────
- * Inferred from where a foot goes (inferFootMode, re-checked every 0.25 s for rock-overs): heel hook
+ * Inferred from where a foot goes (refineFootModes, re-checked every 0.25 s for rock-overs): the geometric
+ * rule (holds.footModeFor) unless another technique the foot could use there (footModeOptions) holds
+ * clearly better by the statics (a roof foot that can't stand toe-pulls; the planner uses the same rule).
+ * The technique is decided BEFORE the reach check (a hook reaches higher: anatomy HOOK_ENVELOPE). Heel hook
  * (at/above hip height out to the side on a steep wall), toe hook (a pull-able hold it can't stand on),
  * drop knee (a sidepull-like foothold facing away), flag (dropped over blank wall far out to the side,
  * or crossed behind on steep walls), edge / smear otherwise. The statics pull with hooks, turn the hip
@@ -123,6 +127,9 @@ import {
   contactPoint,
   type ContactFrame,
   footModeFor,
+  footModeOptions,
+  FM_EDGE,
+  FM_HOOK,
   LIMB_IDS,
   LIMB_INDEX,
   maxReachIdx,
@@ -148,6 +155,7 @@ import {
   initialPose,
   bestLean,
   chestDepthFor,
+  chooseFootModes,
   LEAN_OUT,
   makeParams,
   newContact,
@@ -1702,8 +1710,8 @@ export class ClimberSim implements ClimberSimAPI {
    * holds the climber.
    */
   private footReach(i: number, h: HoldDef, cx: number, cy: number, tol: number): boolean {
-    const m = footModeFor(h, cx, cy, this.ax[i], this.ay[i], this.P.x, this.techAngle(cy), null);
-    const ei = m === 'heel' || m === 'toe' ? i + 2 : i;
+    const m = footModeOptions(h, cx, cy, this.ax[i], this.ay[i], this.P.x, this.techAngle(cy), null);
+    const ei = m & FM_HOOK ? i + 2 : i;
     if (!this.reachOk(i, cx, cy, tol, ei)) return false;
     if (aboveHip(this.ax[i], this.ay[i], this.upTmp.x, this.upTmp.y, cx, cy) > SIM.highStepFree && !this.handHolding()) return false;
     return true;
@@ -1730,8 +1738,7 @@ export class ClimberSim implements ClimberSimAPI {
     const h = this.snapCandidate(LIMB_IDS[i], this.hookTmp);
     if (!h) return false;
     const c = contactPoint(h, i, this.wouldMatch(i, h), this.hookTmp);
-    const m = footModeFor(h, c.x, c.y, this.ax[i], this.ay[i], this.P.x, this.techAngle(c.y), null);
-    return m === 'heel' || m === 'toe';
+    return (footModeOptions(h, c.x, c.y, this.ax[i], this.ay[i], this.P.x, this.techAngle(c.y), null) & FM_HOOK) !== 0;
   }
 
   /** Self-clipping: would limb i on (x, y) / hold h overlap another limb? (frame from frameNow()). */
@@ -1784,7 +1791,7 @@ export class ClimberSim implements ClimberSimAPI {
         o.cy = tmp.y;
       }
       L.flag = false;
-      L.mode = this.inferFootMode(i, h, L.cx, L.cy, null);
+      this.refineFootModes(i, false);
     }
     this.measureGap(i);
   }
@@ -1842,14 +1849,44 @@ export class ClimberSim implements ClimberSimAPI {
 
   /** Re-check the attached feet's techniques (a rock-over turns a heel hook into a standing foot). */
   private updateFootModes(): void {
+    const before0 = this.limbs[2].mode;
+    const before1 = this.limbs[3].mode;
+    this.refineFootModes(2, true);
+    this.refineFootModes(3, true);
     for (let i = 2; i < 4; i++) {
       const L = this.limbs[i];
-      if (!L.hold || L.dragging) continue;
-      const m = this.inferFootMode(i, L.hold, L.cx, L.cy, L.mode);
-      if (m === L.mode) continue;
-      L.mode = m;
-      if (m !== 'edge' && this.phase === 'climbing') this.events.push({ type: 'technique', limb: LIMB_IDS[i], technique: m as 'heel' | 'toe' | 'drop' });
+      const m = L.mode;
+      if (!L.hold || m === (i === 2 ? before0 : before1)) continue;
+      if (m && m !== 'edge' && this.phase === 'climbing') this.events.push({ type: 'technique', limb: LIMB_IDS[i], technique: m as 'heel' | 'toe' | 'drop' });
     }
+  }
+
+  /**
+   * The climber uses the technique that holds (statics.chooseFootModes): foot i on its hold takes the one of
+   * its geometric options (holds.footModeOptions: standing, heel / toe hook, drop knee) whose stance is
+   * least strained right now. `hyst`: a re-check keeps the current technique unless another is clearly
+   * better (SIM.footModeHyst). The other foot keeps its technique.
+   */
+  private refineFootModes(i: number, recheck: boolean): void {
+    const L = this.limbs[i];
+    if (!L.hold || L.dragging || L.flag) return;
+    this.frameNow();
+    const wall = this.techAngle(L.cy);
+    // the geometric rule (with its hysteresis on a re-check) is what the climber does by default …
+    const primary = footModeFor(L.hold, L.cx, L.cy, this.ax[i], this.ay[i], this.P.x, wall, recheck ? L.mode : null);
+    const mask = footModeOptions(L.hold, L.cx, L.cy, this.ax[i], this.ay[i], this.P.x, wall, recheck ? L.mode : null);
+    L.mode = primary;
+    if ((mask & ~FM_EDGE) === 0 && primary === 'edge') return;
+    this.buildContacts();
+    const c = this.contacts[i];
+    if (!c) return;
+    this.syncPose();
+    const prm = this.prmScratch;
+    prm.reachLimb = -1;
+    prm.maxPelvisY = Infinity;
+    // … unless another technique it could use holds clearly better (a roof foot that can't stand toe-pulls)
+    chooseFootModes(this.pose, this.contacts, prm, this.evScratch, i === 2 ? mask : 0, i === 3 ? mask : 0, SIM.footModeBias);
+    L.mode = c.mode === FOOT_HEEL ? 'heel' : c.mode === FOOT_TOE ? 'toe' : c.mode === FOOT_DROP ? 'drop' : 'edge';
   }
 
   /**
@@ -2083,7 +2120,9 @@ export class ClimberSim implements ClimberSimAPI {
     // foot techniques from the settled pose (attach() saw the old one)
     for (let i = 2; i < 4; i++) {
       const L = this.limbs[i];
-      if (L.hold) L.mode = this.inferFootMode(i, L.hold, L.cx, L.cy, null);
+      if (L.hold) {
+        this.refineFootModes(i, false);
+      }
     }
     // limb endpoints at their contacts
     this.syncPose();

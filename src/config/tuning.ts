@@ -279,6 +279,12 @@ export const SIM = {
    * (0 at the hip joint … 1 at 0.5 m above it), + half of it for any hook at all.
    */
   hookCore: 0.08,
+  /**
+   * A foot uses the technique the geometry suggests (holds.footModeFor) unless another one it could use
+   * (footModeOptions) holds with at least this much less tension (statics.chooseFootModes): a roof foot that
+   * can't stand toe-pulls, a hook that strains more than standing on the hold stands.
+   */
+  footModeBias: 0.25,
   /** Drop knee: the hip turns in — its leg's hip depth × this (not below dropKneeMinDepth, m). */
   dropKneeDepth: 0.62,
   dropKneeMinDepth: 0.12,

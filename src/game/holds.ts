@@ -591,15 +591,44 @@ export function footModeFor(
   if (wall >= SIM.heelMinAngle && pull >= (hooked ? 0.3 : 0.4) && up >= (current === 'heel' ? -0.22 : -0.1) && ownOut >= (current === 'heel' ? 0.1 : 0.15) && dist <= 0.85) return 'heel';
   // toe hook: a hold the foot can pull on but not stand on (the far side of a feature, under a lip),
   // or any pull-able foothold on a roof
-  // (on a roof a foot can't stand: anything it can pull on at all is toe-pulled; the statics give a pushing
-  // foot there nothing — research §2.1 — so a near-miss of the pull cone must not leave it 'edge')
-  if (wall >= SIM.toeMinAngle && ((pull >= (hooked ? 0.45 : 0.6) && push < (hooked ? 0.6 : 0.5)) || (wall >= 60 && pull >= (hooked ? 0.15 : 0.22)) || (wall >= 48 && pull >= (hooked ? 0.35 : 0.45)))) return 'toe';
+  if (wall >= SIM.toeMinAngle && ((pull >= (hooked ? 0.45 : 0.6) && push < (hooked ? 0.6 : 0.5)) || (wall >= 60 && pull >= 0.5))) return 'toe';
   // drop knee: a sidepull-like foothold out to the side below the hip, facing away from the body
   const hx = dcos(h.angle);
   const ahx = hx < 0 ? -hx : hx;
   const dropOk = current === 'drop' ? ahx >= 0.5 && push >= 0.4 : ahx >= 0.6 && push >= 0.5;
   if (dropOk && wall >= -2 && hx * (cx - pelvisX) > 0 && out >= 0.1 && up <= 0.05 && up >= -0.62) return 'drop';
   return 'edge';
+}
+
+/** footModeOptions bits: the techniques a foot on a hold could use. */
+export const FM_EDGE = 1;
+export const FM_HEEL = 2;
+export const FM_TOE = 4;
+export const FM_DROP = 8;
+export const FM_HOOK = FM_HEEL | FM_TOE;
+
+/**
+ * Every technique a foot on hold h at (cx, cy) could use from where its hip is (bit mask of FM_*): the one
+ * footModeFor picks (with `current` for its hysteresis), standing on it (always possible, if useless on a
+ * roof), a heel hook where the heel can pull on it (at / above hip height on its own side, on a wall of
+ * SIM.heelMinAngle+), a toe hook where the toe can pull on it (SIM.toeMinAngle+). The sim and the planner
+ * pick among them by the statics (statics.chooseFootModes): the climber uses the technique that holds —
+ * the geometric rule alone made the planner and the live climber disagree near its thresholds (a roof foot
+ * planned as a toe hook stood on its hold live and slipped).
+ */
+export function footModeOptions(h: HoldDef, cx: number, cy: number, hipX: number, hipY: number, pelvisX: number, wall: number, current: FootMode | null = null): number {
+  const primary = footModeFor(h, cx, cy, hipX, hipY, pelvisX, wall, current);
+  let m = FM_EDGE | (primary === 'heel' ? FM_HEEL : primary === 'toe' ? FM_TOE : primary === 'drop' ? FM_DROP : 0);
+  const vx = cx - hipX;
+  const vy = cy - hipY;
+  const dist = Math.sqrt(vx * vx + vy * vy);
+  if (dist < 1e-6) return m;
+  const pull = pullQuality(h, -vx / dist, -vy / dist);
+  const out = vx < 0 ? -vx : vx;
+  const ownOut = (hipX - pelvisX) * vx > 0 ? out : -out;
+  if (wall >= SIM.heelMinAngle && pull >= 0.3 && vy >= -0.22 && ownOut >= 0.1 && dist <= 0.85) m |= FM_HEEL;
+  if (wall >= SIM.toeMinAngle && pull >= 0.25) m |= FM_TOE;
+  return m;
 }
 
 export function topHolds(b: BoulderDef): HoldDef[] {

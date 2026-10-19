@@ -941,6 +941,52 @@ function hookPull(c: Contact, i: number, ax: Float64Array, ay: Float64Array, ass
 }
 const HOOK_GRIP: GripContext = { wallAngle: 0, assist: 0, pump: 0, overhang: 0 };
 
+/**
+ * The climber uses the technique that holds: for the feet on holds whose technique is open (`m2`, `m3`:
+ * holds.footModeOptions bit masks; 0 = keep the contact's mode), pick the combination with the lowest
+ * tension at `pose` (+ 30 × the feet's envelope excess: a hook reaches with the hooking leg's range, a
+ * standing foot with the standing one). `hyst` is subtracted from the combination the contacts carry on
+ * entry (a live climber doesn't flip technique for a hair of tension). Sets the contacts' modes; returns the
+ * best cost. Up to 16 stance evaluations (4 options × 4), usually 2–4.
+ */
+export function chooseFootModes(pose: Pose, contacts: Contacts, prm: StaticsParams, ev: StanceEval, m2: number, m3: number, hyst = 0): number {
+  const c2 = contacts[2];
+  const c3 = contacts[3];
+  const k2 = c2 && c2.hold ? m2 : 0;
+  const k3 = c3 && c3.hold ? m3 : 0;
+  const cur2 = c2 ? c2.mode : 0;
+  const cur3 = c3 ? c3.mode : 0;
+  if (!k2 && !k3) return 0;
+  let best = Infinity;
+  let b2 = cur2;
+  let b3 = cur3;
+  for (let a = 0; a < 4; a++) {
+    if (k2) {
+      if (!(k2 & (1 << a))) continue;
+      c2!.mode = MODE_OF[a];
+    } else if (a > 0) break;
+    for (let b = 0; b < 4; b++) {
+      if (k3) {
+        if (!(k3 & (1 << b))) continue;
+        c3!.mode = MODE_OF[b];
+      } else if (b > 0) break;
+      evaluateStance(pose, contacts, prm, ev);
+      let cost = ev.tension + 30 * (ev.excess[2] + ev.excess[3]);
+      if ((!c2 || c2.mode === cur2) && (!c3 || c3.mode === cur3)) cost -= hyst;
+      if (cost < best - 1e-9) {
+        best = cost;
+        b2 = c2 ? c2.mode : 0;
+        b3 = c3 ? c3.mode : 0;
+      }
+    }
+  }
+  if (c2) c2.mode = b2;
+  if (c3) c3.mode = b3;
+  return best;
+}
+/** footModeOptions bit index → Contact.mode (FM_EDGE, FM_HEEL, FM_TOE, FM_DROP). */
+const MODE_OF = [0, 2, 3, 4] as const;
+
 /** Side-view scratch of the profile path. */
 const SV: Side = { h: 0, z: 0 };
 /** Profile path: the toe-pull (≤ 0, body weights) each pushing foot carries as load. */
