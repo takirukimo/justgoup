@@ -43,6 +43,8 @@ interface FxExtras {
   chalkDip?(p: Vec2, intensity?: number): void;
   /** The chalk cloud of a hand slapping onto a hold after a dyno. */
   catchBurst?(p: Vec2, intensity?: number): void;
+  /** A chalk streak skidding down the wall under a missed dyno / deadpoint target. */
+  missScuff?(p: Vec2, intensity?: number): void;
 }
 
 export class SimDriver {
@@ -242,6 +244,12 @@ export class SimDriver {
         const L = st.limbs[hand];
         audio.play('grab-bad', { pan: this.pan(L.pos.x), volume: 0.9 });
         audio.exert('dyno-miss', 1);
+        // the fingers skid off the wall: under the hold when they reached it and ripped off, where
+        // they slapped the wall when the throw came up short
+        const h = this.holds.get(e.holdId);
+        const at = e.reason === 'ripped' && h ? h : L.pos;
+        if (this.fx.missScuff) this.fx.missScuff(at, e.reason === 'ripped' ? 1.15 : 0.75);
+        else renderer.fx.chalkPuff(at, 0.5);
         this.kick(0.22);
         audio.haptic([20, 30, 20]);
         // a miss with no hand left falls: the sim's 'fall' event takes the session into the fall flow
