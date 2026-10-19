@@ -5,7 +5,7 @@
 //   baseUrl defaults to http://localhost:5207 (start the dev server first:
 //   VITE_CACHE_DIR=node_modules/.vite-integration npx vite --config dev/e2e.vite.config.mjs --port 5207 --strictPort
 //   — that config never reloads the page mid-run; restart it after source changes)
-//   steps: onboarding, sendtrain, leaderboard, locker, settings, profile, community, editor, daily, communityplay, lead
+//   steps: onboarding, sendtrain, leaderboard, locker, human, settings, profile, community, editor, daily, communityplay, lead
 //   --only runs a subset (later steps seed a returning-player profile when onboarding is skipped).
 import { chromium } from 'playwright-core';
 import { mkdirSync } from 'node:fs';
@@ -117,6 +117,15 @@ async function tapText(text, scope = '#ui') {
 // ───────────────────────────── boot ─────────────────────────────
 await page.goto(`${base}/?debug=1&q=${q}&ts=${ts}`, { waitUntil: 'load', timeout: 180000 });
 await waitFor(() => (window.__jgu?.frames ?? 0) > 3, 'first frames', 180000);
+// the last sim events (logged when a bot move misses, to say why)
+await page.evaluate(() => {
+  window.__e2eEv = [];
+  window.__jgu.bus.on('sim:event', (e) => {
+    if (e.type === 'overload' || e.type === 'shake-start' || e.type === 'shake-end') return;
+    window.__e2eEv.push(JSON.stringify(e));
+    if (window.__e2eEv.length > 24) window.__e2eEv.shift();
+  });
+});
 await page.waitForTimeout(800);
 ok(!(await page.$('#boot')), 'boot overlay removed after the first frame');
 await shot('splash');
@@ -155,6 +164,23 @@ if (want('onboarding')) {
 }
 
 // ───────────────────────────── climbing helpers ─────────────────────────────
+
+/**
+ * QA shortcut for a send: put the climber on the TOP hold matched, with the feet where the planned
+ * beta ends (a bare respawn lets the sim pick feet, which on a traverse or a roof can't hold the
+ * body and falls). The real send path (celebration, results, scoring) follows.
+ */
+const sendShortcut = () =>
+  page.evaluate(async () => {
+    const sim = window.__jgu.sim;
+    const { planBeta } = await import('/src/game/solver.ts');
+    const st = sim.getState();
+    const at = { LF: st.limbs.LF.holdId, RF: st.limbs.RF.holdId };
+    for (const m of planBeta(sim.boulder, { maxMs: 2000 }) ?? []) if (m.limb === 'LF' || m.limb === 'RF') at[m.limb] = m.holdId;
+    const top = sim.boulder.holds.filter((h) => h.role === 'top').sort((a, b) => b.y - a.y)[0];
+    sim.respawn({ LH: top.id, RH: top.id, LF: at.LF ?? undefined, RF: at.RF ?? undefined });
+  });
+
 
 /** Snapshot of where things are on screen for the climbing bot. */
 async function look(holdId, limb) {
@@ -262,6 +288,89 @@ async function dragMove(limb, holdId) {
   return `miss(${after.on})`;
 }
 
+/**
+ * A planned deadpoint (BetaMove.dyno 'LH' / 'RH') thrown like a player: drag the hand toward the
+ * hold past its static reach, ease back a little, rest, then flick through and lift while moving.
+ * The gesture's touch events carry timestamps from a virtual clock (headless frames take ~1 s, so
+ * real dispatch times would turn every flick into a crawl). A double dyno ('both', a two-finger
+ * flick on the hip handle) goes through the sim's dyno() as a QA shortcut.
+ */
+async function throwMove(kind, holdId) {
+  const flightOver = () => page.evaluate(() => !window.__jgu.sim?.getState().flight);
+  if (kind === 'both') {
+    await page.evaluate((id) => {
+      const j = window.__jgu;
+      for (const e of j.sim.dyno('both', id, 1)) j.bus.emit('sim:event', e);
+    }, holdId);
+  } else {
+    const limb = kind;
+    await settleHandle(limb);
+    const s = await look(holdId, limb);
+    if (!s || s.phase !== 'climbing' || !s.handle || !s.to) return 'skip';
+    let t = Date.now() / 1000;
+    const tt = (type, pts, dt) => {
+      t += dt;
+      return cdp.send('Input.dispatchTouchEvent', { type, timestamp: t, touchPoints: pts.map((p) => ({ x: p.x, y: p.y, id: 0, radiusX: 6, radiusY: 6, force: 1 })) });
+    };
+    const a = { ...s.handle };
+    const b = { x: a.x + (s.to.x - s.from.x), y: a.y + (s.to.y - s.from.y) };
+    const lerp = (p, q, k) => ({ x: p.x + (q.x - p.x) * k, y: p.y + (q.y - p.y) * k });
+    await tt('touchStart', [a], 0);
+    await frames(1);
+    for (let i = 1; i <= 14; i++) await tt('touchMove', [lerp(a, b, (i / 14) ** 2 * (3 - 2 * (i / 14)))], 0.034);
+    await frames(2);
+    const back = lerp(a, b, 0.62);
+    for (let i = 1; i <= 6; i++) await tt('touchMove', [lerp(b, back, i / 6)], 0.03);
+    await frames(1);
+    await tt('touchMove', [back], 0.2); // rest
+    for (let i = 1; i <= 3; i++) await tt('touchMove', [lerp(back, b, i / 3)], 0.014);
+    await tt('touchEnd', [], 0.008);
+  }
+  for (let k = 0; k < 60 && !(await flightOver()); k++) await frames(1);
+  const on = await page.evaluate(([id, kind]) => {
+    const st = window.__jgu.sim?.getState();
+    if (!st) return false;
+    return kind === 'both' ? st.limbs.LH.holdId === id && st.limbs.RH.holdId === id : st.limbs[kind].holdId === id;
+  }, [holdId, kind]);
+  return on ? 'ok' : 'thrown-miss';
+}
+
+/**
+ * Weight shift through the hip handle: drag the hips toward a wall-local point (the planned reach
+ * pose) and let go; the climber keeps the position. What a player does before a long reach.
+ */
+async function hipMove(target) {
+  await settleHandle('HIP');
+  const s = await page.evaluate((t) => {
+    const j = window.__jgu;
+    const st = j.sim?.getState();
+    if (!st || st.phase !== 'climbing') return null;
+    const cr = document.getElementById('controls').getBoundingClientRect();
+    const gr = j.renderer.canvas.getBoundingClientRect();
+    const hp = j.controls.handlePosition('HIP');
+    const a = j.renderer.wallToScreen(st.pelvis, st.pelvisDepth);
+    const b = j.renderer.wallToScreen(t, st.pelvisDepth);
+    return hp ? { handle: { x: hp.x + cr.left, y: hp.y + cr.top }, dx: b.x - a.x, dy: b.y - a.y, gr } : null;
+  }, target);
+  if (!s) return false;
+  let finger = { ...s.handle };
+  await touch('touchStart', [finger]);
+  await frames(1);
+  if ((await page.evaluate(() => window.__jgu.controls.dragging)) !== 'HIP') {
+    await touch('touchEnd', []);
+    return false;
+  }
+  for (let i = 1; i <= 6; i++) {
+    finger = { x: s.handle.x + s.dx * 1.15 * (i / 6), y: s.handle.y + s.dy * 1.15 * (i / 6) };
+    await touch('touchMove', [finger]);
+    await frames(1);
+  }
+  await frames(6);
+  await touch('touchEnd', []);
+  await frames(2);
+  return true;
+}
+
 /** Rope: clip the next quickdraw as soon as a hand can reach it (what a lead climber does). */
 async function tryClip() {
   const c = await page.evaluate(async () => {
@@ -310,7 +419,13 @@ async function autoClimb({ until, maxMoves = 60, label }) {
         goalY: b.height > 6 ? lowHand + 2.2 : undefined,
       });
       if (!r) return null;
-      return r.steps.map((s) => ({ limb: s.move.limb, holdId: s.move.holdId, clip: s.clip ? { limb: s.clip.limb, id: s.clip.quickdrawId } : null }));
+      return r.steps.map((s) => ({
+        limb: s.move.limb,
+        holdId: s.move.holdId,
+        dyno: s.move.dyno ?? null,
+        hips: s.reachPose ? { x: s.reachPose.px, y: s.reachPose.py } : null,
+        clip: s.clip ? { limb: s.clip.limb, id: s.clip.quickdrawId } : null,
+      }));
     });
     if (!plan || !plan.length) {
       log(`${label}: no plan from here`);
@@ -324,11 +439,24 @@ async function autoClimb({ until, maxMoves = 60, label }) {
         if (await until()) return true;
       }
       if (step.holdId === 'smear') continue;
-      const r = await dragMove(step.limb, step.holdId);
+      let r = step.dyno ? await throwMove(step.dyno, step.holdId) : await dragMove(step.limb, step.holdId);
+      if (!step.dyno && r.startsWith('miss') && step.hips) {
+        // out of reach from where the hips are: shift the weight to the planned reach pose, try again
+        const far = await page.evaluate((t) => {
+          const p = window.__jgu.sim?.getState().pelvis;
+          return p ? Math.hypot(p.x - t.x, p.y - t.y) : 0;
+        }, step.hips);
+        if (far > 0.04 && (await hipMove(step.hips))) {
+          log(`  ${step.limb}→${step.holdId}: ${r}; hips ${(far * 100).toFixed(0)} cm toward the reach pose, again`);
+          r = await dragMove(step.limb, step.holdId);
+        }
+      }
+      if (step.dyno) log(`  ${step.dyno === 'both' ? 'double dyno' : `deadpoint ${step.dyno}`} → ${step.holdId}: ${r}`);
       moves++;
       if (r !== 'ok' && r !== 'skip') {
         misses++;
         log(`  ${step.limb}→${step.holdId}: ${r}`);
+        log(`    last sim events: ${(await page.evaluate(() => window.__e2eEv.slice(-8).join(' '))) || 'none'}`);
         replan = true;
         break;
       }
@@ -488,6 +616,86 @@ if (want('locker')) {
   await shot('title-marmot');
 }
 
+// ───────────────────────────── the plain human climber, end to end ─────────────────────────────
+if (want('human')) {
+  // locker: the human (free) is equippable; its 3D portrait renders; the voice follows the head
+  await tapText('LOCKER');
+  await waitScreen('locker');
+  await page.waitForTimeout(1200);
+  await page.locator('.lk-card', { hasText: 'Human' }).first().tap();
+  await page.waitForTimeout(1500);
+  await shot('locker-human');
+  const hl = await page.evaluate(() => ({
+    head: window.__jgu.app.profile.head,
+    voice: window.__jgu.audio.voiceId,
+    portrait: document.querySelector('#ui img[data-head="human"]')?.getAttribute('src')?.slice(0, 22) ?? '',
+  }));
+  ok(hl.head === 'human', `locker equips the human head (${hl.head})`);
+  ok(hl.voice === 'human', `the climber's voice follows the human head (${hl.voice})`);
+  ok(hl.portrait.startsWith('data:image/png'), `the human head has a rendered 3D portrait (${hl.portrait})`);
+  await tap('.btn-back', 'back');
+  await waitScreen('title');
+  await page.waitForTimeout(1500);
+  await shot('title-human');
+  // profile: the hero portrait and the head name
+  await tapText('PROFILE');
+  await waitScreen('profile');
+  await page.waitForTimeout(900);
+  const pf = await page.evaluate(() => ({ img: !!document.querySelector('.pf-pt img[data-head="human"]'), text: document.querySelector('#ui')?.textContent ?? '' }));
+  ok(pf.img && /HUMAN/i.test(pf.text), 'profile shows the human climber');
+  await shot('profile-human');
+  await tap('.btn-back', 'back');
+  await waitScreen('title');
+  // a run as the human: one send (QA shortcut: matched on TOP), then a fall ends it and submits
+  await tap('.title-play', 'PLAY');
+  await waitScreen('modes');
+  await tap('.mode-featured', 'Send Train');
+  await waitScreen('preview', 120000);
+  await veilClear();
+  await tap('.pv-hit', 'TAP TO START');
+  await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'climb start (human)', 60000);
+  await page.waitForTimeout(800);
+  await shot('climbing-human');
+  await sendShortcut();
+  await waitScreen('results', 120000);
+  await tapText('NEXT BOULDER');
+  await waitScreen('preview', 120000);
+  await veilClear();
+  await tap('.pv-hit', 'TAP TO START');
+  await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'climb start (human 2)', 60000);
+  await page.evaluate(() => window.__jgu.sim.forceFall());
+  await waitScreen('results', 90000);
+  await waitFor(() => /#\d+/.test(document.querySelector('#ui')?.textContent ?? ''), 'rank (human run)', 30000).catch(() => false);
+  await tapText('MENU');
+  await waitScreen('modes', 60000);
+  await veilClear();
+  await tap('.btn-back', 'back');
+  await waitScreen('title');
+  // leaderboard: the player's row carries the human icon, next to the ghost climbers (one is human too)
+  await tapText('LEADERBOARD');
+  await waitScreen('leaderboard');
+  await waitFor(() => !document.querySelector('.lb-skel'), 'leaderboard rows (human)', 30000);
+  await page.waitForTimeout(900);
+  const lb = await page.evaluate(async () => {
+    const rows = await window.__jgu.backend.topScores('boulder', { limit: 100 });
+    const me = window.__jgu.app.profile.playerName;
+    return {
+      mine: rows.some((r) => r.player === me && r.head === 'human'),
+      ghost: rows.some((r) => r.id?.startsWith('ghost-') && r.head === 'human'),
+      icons: document.querySelectorAll('#ui img[data-head="human"]').length,
+    };
+  });
+  ok(lb.mine, 'the run is on the board under the human head');
+  ok(lb.ghost, 'a ghost climber wears the human head too');
+  ok(lb.icons >= 1, `the leaderboard shows the human icon (${lb.icons} rows)`);
+  await shot('leaderboard-human');
+  await tap('.btn-back', 'back');
+  await waitScreen('title');
+  // back to the ibex for the rest of the run
+  await page.evaluate(() => window.__jgu.bus.emit('ui:select-head', { head: 'ibex' }));
+  await page.waitForTimeout(600);
+}
+
 if (want('settings')) {
   await tapText('SETTINGS');
   await waitScreen('settings');
@@ -588,14 +796,32 @@ if (want('editor')) {
   await tap('.pv-hit', 'TAP TO START');
   await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'test climb start (2)', 60000);
   await page.waitForTimeout(600);
-  const testSent = await autoClimb({
-    label: 'editor-test',
-    until: async () => {
-      const ph = await page.evaluate(() => window.__jgu.sim?.getState().phase ?? 'gone');
-      return ph === 'topped' || ph === 'falling' || ph === 'landed' || ph === 'gone';
-    },
-  });
-  const testPhase = await page.evaluate(() => window.__jgu.sim?.getState().phase ?? 'gone');
+  // like a player: a fall on the test climb → TRY AGAIN (a random sample can be awkward for the bot)
+  let testSent = false;
+  let testPhase = 'gone';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    testSent = await autoClimb({
+      label: `editor-test #${attempt}`,
+      until: async () => {
+        const ph = await page.evaluate(() => window.__jgu.sim?.getState().phase ?? 'gone');
+        return ph === 'topped' || ph === 'falling' || ph === 'landed' || ph === 'gone';
+      },
+    });
+    testPhase = await page.evaluate(() => window.__jgu.sim?.getState().phase ?? 'gone');
+    if (testPhase === 'topped' || attempt === 3) break;
+    log(`editor test climb attempt ${attempt} ended ${testPhase}: try again`);
+    if (testPhase === 'climbing') {
+      await page.evaluate(() => window.__jgu.sim.forceFall());
+    }
+    await waitScreen('results', 90000);
+    await page.waitForTimeout(1200);
+    await tapText('TRY AGAIN');
+    await waitScreen('preview', 120000);
+    await veilClear();
+    await tap('.pv-hit', 'TAP TO START');
+    await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'test climb start (again)', 60000);
+    await page.waitForTimeout(600);
+  }
   ok(testSent && testPhase === 'topped', `editor test climb sent by touch drags (phase ${testPhase})`);
   await waitFor(() => window.__jgu.app.current === 'editor' && window.__jgu.editor.isOpen, 'editor reopened after the send', 90000);
   await veilClear();
