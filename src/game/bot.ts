@@ -261,7 +261,7 @@ export class BetaBot {
           if (!grabbed) {
             this.log.push(`miss ${limb}->${st.move.holdId} (${ev.map((x) => x.type).join(',')})`);
             // the limb went back where it was: from this stance, try another first move
-            this.missed.push({ stance: this.stanceKey(), limb, holdId: st.move.holdId });
+            this.missed.push({ stance: this.moveStance, limb, holdId: st.move.holdId });
             this.retry();
             return;
           }
@@ -284,8 +284,15 @@ export class BetaBot {
         break;
       }
       case 'clip': {
-        if (this.clipHip) sim.setHipTarget(this.clipHip);
         const k = Math.min(1, this.t / this.opts.dragTime);
+        if (this.clipHip) {
+          // as for a hold: when the hand still comes up short of the draw, pull the hips on past the
+          // planned clip stance by the lag
+          const g = clamp((this.t - this.opts.dragTime - 0.15) / 0.4, 0, 1) * 1.5;
+          const lx = clamp(this.clipHip.x - s.pelvis.x, -0.12, 0.12) * g;
+          const ly = clamp(this.clipHip.y - s.pelvis.y, -0.12, 0.12) * g;
+          sim.setHipTarget({ x: this.clipHip.x + lx, y: this.clipHip.y + ly });
+        }
         sim.dragTo(this.clipLimb, { x: this.from.x + (this.target.x - this.from.x) * k, y: this.from.y + (this.target.y - this.from.y) * k });
         // reach for the draw until it can be clipped (the body follows the reaching hand)
         if ((k >= 1 && sim.clipCandidate(this.clipLimb, this.target)) || this.t > 1.6) {
@@ -442,6 +449,8 @@ export class BetaBot {
 
   private beginMove(st: PlanStep, limb: LimbId): void {
     const sim = this.sim;
+    // the stance the move starts from (a miss is avoided from it: the limb may not return to it)
+    this.moveStance = this.stanceKey();
     if (!sim.beginDrag(limb)) {
       this.fail(`beginDrag ${limb} refused`);
       return;
@@ -486,6 +495,8 @@ export class BetaBot {
 
   /** Static moves the climber missed, with the stance (hold ids LH|RH|LF|RF) they were tried from. */
   private readonly missed: { stance: string; limb: LimbId; holdId: string }[] = [];
+  /** stanceKey() when the current move began. */
+  private moveStance = '';
 
   private stanceKey(): string {
     const s = this.sim.getState();

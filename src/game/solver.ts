@@ -1193,7 +1193,8 @@ function planClips(planner: Planner, steps: PlanStep[], clipped: readonly string
       if (!other || other === 'smear') continue;
       const a = planner.anchorOf(n.pose, li);
       if (dhypot(a.x - cp.x, a.y - cp.y) > BODY.armMax + 0.5) continue;
-      const r = planner.reach(n, li, cp.x, cp.y, `${n.key}>clip${li}`);
+      // (cached per draw: the same stance is tried for the next draw too)
+      const r = planner.reach(n, li, cp.x, cp.y, `${n.key}>clip:${qd.id}:${li}`);
       if (!r.ok || r.tension > SOLVER.clipMax) continue;
       if (r.tension < best.tension) {
         best.k = k;
