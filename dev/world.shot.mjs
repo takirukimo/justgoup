@@ -2,6 +2,7 @@
 // render loop instead of a fixed delay — SwiftShader shader compiles vary a lot).
 // usage: node dev/world.shot.mjs "<world.html url>" out.png [--w 390] [--h 844] [--dpr 1] [--frames 40]
 //        [--eval "js run after the frames"] [--after 1500] [--seq out2.png@1.5,out3.png@3 (extra shots at +s)]
+//        [--stats] (print renderer.stats(): draw calls / triangles of the last frame + the harness fps)
 import { chromium } from 'playwright-core';
 
 const args = process.argv.slice(2);
@@ -30,6 +31,10 @@ try {
   }
   await page.screenshot({ path: out, timeout: 180000 });
   console.log('saved', out);
+  if (args.includes('--stats')) {
+    const st = await page.evaluate(() => ({ ...window.__r.stats(), quality: window.__r.getQuality(), hud: document.getElementById('hud')?.textContent ?? '' }));
+    console.log('stats', JSON.stringify(st));
+  }
   const seq = opt('seq', '');
   let t0 = 0;
   for (const item of seq.split(',').filter(Boolean)) {

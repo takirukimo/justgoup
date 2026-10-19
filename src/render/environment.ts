@@ -339,7 +339,9 @@ export class GymEnvironment {
       const hrng = new Rng(f.seed * 131 + 7);
       const types: HoldType[] = ['jug', 'edge', 'crimp', 'sloper', 'pinch', 'pocket'];
       const srng = new Rng(f.seed * 71 + 5);
-      for (let r = 0; r < f.routes; r++) {
+      // the 15 m lead hall shows four long faces at once: two routes each keep it under the triangle budget
+      const routes = rope ? Math.min(2, f.routes) : f.routes;
+      for (let r = 0; r < routes; r++) {
         const col = ROUTE_COLORS[hrng.int(0, ROUTE_COLORS.length - 1)].hex;
         let x = hrng.range(-len / 2 + 0.5, len / 2 - 0.5);
         const count = Math.round(f.height * (rope ? 1.4 : 2.4));

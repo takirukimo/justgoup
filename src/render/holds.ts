@@ -652,8 +652,8 @@ let boltProto: THREE.BufferGeometry | null = null;
 function boltGeometry(): THREE.BufferGeometry {
   if (boltProto) return boltProto;
   const parts: THREE.BufferGeometry[] = [];
-  const washer = new THREE.CylinderGeometry(0.0115, 0.0118, 0.003, 18, 1).rotateX(Math.PI / 2).translate(0, 0, 0.0015);
-  const head = new THREE.CylinderGeometry(0.0082, 0.0086, 0.0065, 18, 1).rotateX(Math.PI / 2).translate(0, 0, 0.003 + 0.00325);
+  const washer = new THREE.CylinderGeometry(0.0115, 0.0118, 0.003, 12, 1).rotateX(Math.PI / 2).translate(0, 0, 0.0015);
+  const head = new THREE.CylinderGeometry(0.0082, 0.0086, 0.0065, 12, 1).rotateX(Math.PI / 2).translate(0, 0, 0.003 + 0.00325);
   const sock = new THREE.CircleGeometry(0.0042, 6).translate(0, 0, 0.0096);
   for (const [g, ao] of [[washer, 0.1], [head, 0], [sock, 0.92]] as const) {
     const n = g.getAttribute('position').count;
@@ -745,7 +745,7 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: 0 
   const lq = v.lipAngle !== undefined ? Math.round(v.lipAngle / 5) : 99;
   const fq = v.fingers ?? 0;
   const key = `${type}:${shape ?? '-'}:${variant}:${sb}:${lod}:${dq}:${lq}:${fq}`;
-  const segU = (n: number) => (lod === 1 ? Math.max(8, Math.round(n * 0.5)) : lod === 2 ? Math.max(10, Math.round(n * 0.66)) : n);
+  const segU = (n: number) => (lod === 1 ? Math.max(6, Math.round(n * 0.4)) : lod === 2 ? Math.max(10, Math.round(n * 0.66)) : n);
   geoUsed.set(key, geoEpoch);
   const hit = geoCache.get(key);
   if (hit) {

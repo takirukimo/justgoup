@@ -278,6 +278,7 @@ async function main(): Promise<void> {
   const w = window as unknown as Record<string, unknown>;
   w.__r = r;
   w.__b = b;
+  w.__sim = sim;
 
   if (qs.get('env') === '0') {
     // side-view QA of the wall itself: hide the hall (pads, neighbouring walls)
