@@ -1032,8 +1032,14 @@ export class BoulderEditor implements EditorAPI {
     this.saveTimer = window.setTimeout(() => this.saveNow(), 300);
   }
 
+  /** Write a pending autosave right now (the page is being hidden or closed). */
+  flush(): void {
+    if (this.saveTimer) this.saveNow();
+  }
+
   private saveNow(): void {
     clearTimeout(this.saveTimer);
+    this.saveTimer = 0;
     saveStoredDraft({ v: 1, draft: cloneDraft(this.draft), passed: this.passed, published: this.published, savedAt: Date.now() });
   }
 

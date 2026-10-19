@@ -153,6 +153,12 @@ async function boot(): Promise<void> {
     app.onHidden();
     audio.suspend();
     flushProfile();
+    // an editor draft edited in the last few hundred ms is still waiting for its debounced autosave
+    try {
+      app.editor.flush();
+    } catch (err) {
+      console.warn('[jgu] editor flush failed', err);
+    }
   };
   const toForeground = (): void => {
     if (document.hidden) return;
