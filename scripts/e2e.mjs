@@ -5,7 +5,8 @@
 //   baseUrl defaults to http://localhost:5207 (start the dev server first:
 //   VITE_CACHE_DIR=node_modules/.vite-integration npx vite --config dev/e2e.vite.config.mjs --port 5207 --strictPort
 //   — that config never reloads the page mid-run; restart it after source changes)
-//   steps: onboarding, sendtrain, leaderboard, locker, human, settings, pure, profile, community, editor, daily, communityplay, lead
+//   steps: onboarding, sendtrain, leaderboard, locker, human, settings, pure, profile, community, editor, daily, communityplay, lead, startover
+//   (startover runs last: Settings → START OVER wipes the profile and reloads into the first-launch flow)
 //   (pure: Settings → Pure climbing on, a Send Train problem climbed by touch with no HUD, then off again)
 //   --only runs a subset (later steps seed a returning-player profile when onboarding is skipped).
 import { chromium } from 'playwright-core';
@@ -1237,6 +1238,51 @@ if (want('lead')) {
   await veilClear();
   await page.waitForTimeout(700);
   await shot('modes-after-lead');
+}
+
+// ───────────────────────────── Settings → Start over (last: it wipes the profile) ─────────────────────────────
+if (want('startover')) {
+  await tapText('SETTINGS');
+  await waitScreen('settings');
+  await page.waitForTimeout(900);
+  await page.locator('#ui .row-startover').scrollIntoViewIfNeeded();
+  await page.waitForTimeout(400);
+  await shot('settings-startover');
+  await tapText('START OVER');
+  await page.waitForSelector('.modal-ok', { state: 'visible', timeout: 10000 });
+  await page.waitForTimeout(600);
+  await shot('startover-confirm');
+  await Promise.all([page.waitForEvent('load', { timeout: 120000 }), page.tap('.modal-ok')]);
+  log('reloaded after START OVER');
+  await waitFor(() => (window.__jgu?.frames ?? 0) > 3, 'first frames after start over', 180000);
+  const wiped = await page.evaluate(() => {
+    const raw = localStorage.getItem('jgu.profile.v1');
+    const p = raw ? JSON.parse(raw) : null;
+    return { introSeen: !!p?.introSeen, name: p?.playerName ?? '', draft: localStorage.getItem('jgu.editor.draft'), device: !!localStorage.getItem('jgu.device.v1') };
+  });
+  ok(!wiped.introSeen && !wiped.name && !wiped.draft, `START OVER wiped the profile and drafts (${JSON.stringify(wiped)})`);
+  await waitScreen('splash', 60000);
+  await tap('.splash-hit', 'splash');
+  await waitFor(() => window.__jgu.app.current === 'intro', 'intro after start over', 30000);
+  await page.waitForSelector('.gb-skip', { state: 'visible', timeout: 60000 });
+  await page.waitForTimeout(2500);
+  await shot('startover-intro');
+  ok(true, 'START OVER replays Steini’s intro');
+  await tap('.gb-skip', 'SKIP intro');
+  await waitScreen('name', 30000);
+  ok((await page.evaluate(() => document.querySelector('.name-input')?.value ?? '')) === '', 'START OVER asks for a name again');
+  await page.fill('.name-input', 'Fresh Ibex');
+  await frames(2);
+  await tapText('CONTINUE');
+  await waitFor(() => window.__jgu.app.current === 'tutorial', 'tutorial after start over', 30000);
+  await veilClear();
+  await page.waitForSelector('.gb-skip', { state: 'visible', timeout: 60000 });
+  await page.waitForTimeout(1500);
+  await shot('startover-tutorial');
+  ok(true, 'START OVER runs the tutorial');
+  await tap('.gb-skip', 'SKIP tutorial');
+  await waitScreen('title', 60000);
+  await veilClear();
 }
 
 // ───────────────────────────── report ─────────────────────────────

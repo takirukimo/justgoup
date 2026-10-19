@@ -4246,6 +4246,11 @@
 .row-danger {
   padding: 14px 16px;
 }
+.row-startover {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
 .credits {
   display: flex;
   flex-direction: column;

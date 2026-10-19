@@ -179,6 +179,22 @@ let pendingStore: KVStore = kv;
 let timer: ReturnType<typeof setTimeout> | null = null;
 let lastWritten: string | null = null;
 let lifecycleHooked = false;
+/** Start over: no profile writes until the page reloads (nothing may write the old profile back). */
+let frozen = false;
+
+/**
+ * Stop (true) or resume (false) profile writes, dropping any write still pending. Used by Start
+ * over between wiping the device's progress and the reload into the first-launch flow.
+ */
+export function freezeProfileSaves(on: boolean): void {
+  frozen = on;
+  if (timer !== null) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  pending = null;
+  lastWritten = null;
+}
 
 function hookLifecycle(): void {
   if (lifecycleHooked) return;
@@ -205,6 +221,7 @@ export function loadProfile(store: KVStore = kv): Profile {
 
 /** Persist the profile. Writes are debounced (~300 ms); call flushProfile() to force it now. */
 export function saveProfile(p: Profile, store: KVStore = kv): void {
+  if (frozen) return;
   hookLifecycle();
   if (pending && pendingStore !== store) flushProfile();
   pending = p;
@@ -224,7 +241,7 @@ export function flushProfile(): boolean {
   }
   const p = pending;
   pending = null;
-  if (!p) return true;
+  if (!p || frozen) return true;
   let raw: string;
   try {
     raw = JSON.stringify(p);

@@ -37,23 +37,30 @@ export function createSettings(ctx: UICtx, props: P): ScreenView<P> {
     },
   });
 
-  const reset = button({
-    label: 'RESET PROGRESS',
-    icon: 'trash',
+  // Start over: a fresh first launch (splash → Steini's intro → name → tutorial) to try the game
+  // from scratch. Wipes this device only; scores already on the boards stay online.
+  const startOver = button({
+    label: 'START OVER',
+    icon: 'refresh',
     variant: 'danger',
-    cls: 'btn-wide',
+    cls: 'btn-wide set-startover',
     onTap: async () => {
       const ok = await ctx.confirm(
-        'Reset progress?',
-        'This wipes your scores, stats, unlocks and saved problems on this device. Leaderboard entries already submitted stay online.',
-        'RESET',
+        'Start over?',
+        'This wipes your name, progress, unlocks, settings, saved problems and drafts on this device, then starts the game fresh with Steini’s intro and the tutorial. Scores already on the leaderboard stay online.',
+        'START OVER',
         'KEEP MY PROGRESS',
       );
       if (!ok) return;
-      if (ctx.resetProgress()) ctx.toast('PROGRESS RESET');
-      else ctx.toast('RESET UNAVAILABLE');
+      if (!ctx.resetProgress()) ctx.toast('START OVER UNAVAILABLE');
     },
   });
+  const startOverRow = el(
+    'div',
+    'row row-danger row-startover',
+    el('span', 'row-txt', el('span', 'row-lbl', 'Start over'), el('span', 'row-sub', 'Play it from scratch: intro, name and tutorial. Wipes this device’s progress, settings and drafts.')),
+    startOver,
+  );
 
   // Assist visuals have nothing to show in Pure climbing: the row says so (and stays settable)
   const assistRow = toggleRow({ label: 'Assist visuals', sub: 'Limb labels, reach arcs, grip colours', icon: 'target', value: s.assist, onChange: (v) => commit({ assist: v }) });
@@ -64,7 +71,7 @@ export function createSettings(ctx: UICtx, props: P): ScreenView<P> {
   };
   const pureRow = toggleRow({
     label: 'Pure climbing',
-    sub: 'No HUD, no hints. Just you, the wall and your body.',
+    sub: 'Every mode: no HUD, meters, hints or route overlays. Your climber’s body is the feedback.',
     icon: 'pure',
     value: pureOf(s),
     onChange: (v) => {
@@ -101,7 +108,7 @@ export function createSettings(ctx: UICtx, props: P): ScreenView<P> {
       }),
     ),
     section('GRAPHICS', 4, el('div', 'row row-seg', el('span', 'row-txt', el('span', 'row-lbl', 'Quality'), el('span', 'row-sub', 'Auto adapts to your device')), quality.el)),
-    section('DATA', 5, el('div', 'row row-danger', reset)),
+    section('DATA', 5, startOverRow),
     stagger(
       el(
         'section',

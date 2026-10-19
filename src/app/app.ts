@@ -14,7 +14,8 @@ import type { BoulderDef, ChalkId, ColorwayId, CommunityProblem, HeadId, Leaderb
 import { CHALKS, COLORWAYS, HEADS } from '../config/skins';
 import type { BoulderEditor } from '../editor/editor';
 import { todayKey, tutorialBoulder } from '../game/generator';
-import { defaultProfile, randomClimberName, sanitizeName, saveProfile, flushProfile, type UnlockedItem } from '../net/profile';
+import { defaultProfile, freezeProfileSaves, randomClimberName, sanitizeName, saveProfile, type UnlockedItem } from '../net/profile';
+import { wipeLocalProgress } from '../net/reset';
 import { runIntro } from '../tutorial/tutorial';
 import { onPureMode, pureOf, readStoredPure, setPureMode, storePure, type SettingsExt } from '../input/pure';
 import { collectUnlocks, UNLOCK_WORD } from './progress';
@@ -52,6 +53,7 @@ export class App implements RunHost {
   private cmSort: 'new' | 'popular' = 'new';
   private fetchToken = 0;
   private backPressed = false;
+  private startingOver = false;
   private readonly offs: (() => void)[] = [];
 
   constructor(opts: AppOptions) {
@@ -72,7 +74,7 @@ export class App implements RunHost {
     this.quality = new QualityManager(base.renderer);
     this.title = new TitleScene(this.svc);
     this.editor = opts.createEditor(this.svc);
-    this.svc.ui.onResetProgress = () => this.resetProgress();
+    this.svc.ui.onResetProgress = () => this.startOver();
     // Pure climbing: the renderer's body cues and thin-hold cue run stronger (the HUD and the limb
     // controls follow the same flag on their own)
     this.offs.push(onPureMode((on) => base.renderer.setPure(on)));
@@ -450,23 +452,44 @@ export class App implements RunHost {
     if (persist) this.svc.save();
   }
 
-  private resetProgress(): void {
-    const old = this.prof;
+  /**
+   * Settings → Start over: wipe this device's progress (profile, settings, drafts, offline boards;
+   * never the global boards) and come back as a first launch: splash → Steini's intro → name →
+   * tutorial. A reload gives the cleanest fresh start; where a reload can't happen (a sandbox that
+   * blocks it) the app restarts itself in place with a fresh profile.
+   */
+  private startOver(): void {
+    if (this.startingOver) return;
+    this.startingOver = true;
+    wipeLocalProgress();
+    const { veil, audio } = this.svc;
+    audio.play('ui-back', { volume: 0.6 });
+    void (async () => {
+      await veil.cover('STARTING OVER', 'A FRESH START', true);
+      try {
+        location.reload();
+      } catch (err) {
+        console.warn('[app] reload blocked, restarting in place', err);
+      }
+      // still here (reload blocked or not available): restart in place
+      await new Promise((r) => setTimeout(r, 2500));
+      await this.restartInPlace();
+    })();
+  }
+
+  private async restartInPlace(): Promise<void> {
+    freezeProfileSaves(false);
     const fresh = defaultProfile();
-    fresh.playerName = old.playerName;
-    fresh.settings = { ...old.settings };
-    fresh.introSeen = true;
     this.prof = fresh;
+    this.nav = ['title'];
+    this.applySettings(fresh.settings, false);
     this.svc.renderer.setSkin(fresh.head, fresh.colorway, fresh.chalk);
     this.svc.audio.setVoice(fresh.head);
-    saveProfile(fresh);
-    flushProfile();
-    try {
-      localStorage.removeItem('jgu.editor.draft');
-    } catch {
-      /* storage blocked */
-    }
-    if (this.svc.ui.current === 'settings') this.svc.ui.update('settings', { profile: fresh });
+    this.startingOver = false;
+    this.title.enter('title');
+    const run = this.start();
+    await this.svc.veil.reveal();
+    await run;
   }
 
   // ═══════════════════════════════ runs ═══════════════════════════════
