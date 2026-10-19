@@ -143,6 +143,7 @@ import {
   FOOT_TOE,
   initialPose,
   bestLean,
+  chestDepthFor,
   LEAN_OUT,
   makeParams,
   newContact,
@@ -150,6 +151,7 @@ import {
   placeChest,
   setContact,
   StanceEval,
+  steepness,
   type Contact,
   type Contacts,
   type Pose,
@@ -533,6 +535,7 @@ export class ClimberSim implements ClimberSimAPI {
       chest: { x: 0, y: 1.5 },
       com: { x: 0, y: 1.2 },
       pelvisDepth: 0.25,
+      chestDepth: chestDepthFor(0.25, 0),
       bodyYaw: 0,
       velocity: { x: 0, y: 0 },
       limbs,
@@ -2852,10 +2855,11 @@ export class ClimberSim implements ClimberSimAPI {
       if (gripping) {
         const fresh = Math.max(L.cap / Math.max(this.capPumpF[i], 1e-6), 0.01);
         f = L.load / fresh;
-        // lock-off: how bent the loaded arm is in 3D (the shoulder sits ≈ pelvisDepth off the wall)
+        // lock-off: how bent the loaded arm is in 3D (the shoulder sits ≈ pelvisDepth off the wall, or the
+        // chest's depth where it hangs further out: under steep panels)
         const rx = L.cx - this.ax[i];
         const ry = L.cy - this.ay[i];
-        const ds = clamp(this.depth, 0.18, 0.5);
+        const ds = clamp(Math.max(this.depth, this.chestDepth()), 0.18, 0.5);
         const ext = Math.sqrt(rx * rx + ry * ry + ds * ds) / BODY.armMax;
         const bend = 1 - smoothstep(0.42, 0.7, ext);
         f *= 1 + FA.lockoffCost * bend;
@@ -3257,6 +3261,17 @@ export class ClimberSim implements ClimberSimAPI {
 
   // ═══════════════════════════════ state sync ═══════════════════════════════
 
+  /**
+   * Chest depth off the wall (m) the body model assumes: on the wall the statics' chestDepthFor (further
+   * out under steep panels: body tension); in the air or on the rope a little beyond the hips.
+   */
+  private chestDepth(): number {
+    if (this.phase === 'climbing' || this.phase === 'idle' || this.phase === 'topped') {
+      if (!this.flight) return chestDepthFor(this.depth, steepness(Math.max(0, this.gs)));
+    }
+    return this.depth + 0.05;
+  }
+
   private syncState(): void {
     const s = this.state;
     s.phase = this.phase;
@@ -3267,6 +3282,7 @@ export class ClimberSim implements ClimberSimAPI {
     s.com.x = this.P.x + BODY.comT * (this.C.x - this.P.x);
     s.com.y = this.P.y + BODY.comT * (this.C.y - this.P.y);
     s.pelvisDepth = this.depth;
+    s.chestDepth = this.chestDepth();
     s.bodyYaw = this.yaw;
     s.velocity.x = this.Pv.x * MP + this.Cv.x * MC;
     s.velocity.y = this.Pv.y * MP + this.Cv.y * MC;

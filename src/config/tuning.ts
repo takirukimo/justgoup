@@ -129,6 +129,18 @@ export const SIM = {
   legDepthLen: 0.7,
   /** Minimum vertical lever (m) between hands and feet for the out-of-plane balance. */
   minLever: 0.35,
+  /**
+   * Body tension under steep panels (research §2.1 / §6.2: hip depth d ≈ 0.25 m "in" … 0.40 m "out"):
+   * on an overhang or a roof toe-pull and hooks hold the hips up, but the pelvis never hugs the wall.
+   * Over the stance's effective wall angle steepDepthFrom → steepDepthTo (°) its depth floor rises to
+   * steepPelvisDepth, and the chest hangs a little further out than the hips (arms nearly straight from
+   * the holds): steepChestDepth. Both reach the renderer (ClimberState.pelvisDepth / chestDepth); the
+   * statics balance the CoM between them (statics.evaluateStance).
+   */
+  steepDepthFrom: 25,
+  steepDepthTo: 60,
+  steepPelvisDepth: 0.28,
+  steepChestDepth: 0.36,
 
   /**
    * Hand capacity per hold type (fraction of body weight), before size/angle factors, for a fresh

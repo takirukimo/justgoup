@@ -19,7 +19,8 @@
 // hold is on (grip base: sloper slope, overhang loss; feet: steep-wall loss, smears; per-foot normal
 // force in its own panel), and the out-of-plane balance is solved in the true side view: the "effective
 // wall" of a stance is the plane through its hands and feet (the chord from the feet to the hands in 3D),
-// the CoM sits `depth` off the wall along the blended normal under it, and the keep-in pull is the same
+// the CoM sits its depth off the wall along the blended normal under it (between the pelvis's and the
+// chest's, which hangs further out under steep panels: body tension), and the keep-in pull is the same
 // formula with the chord's angle, lever and CoM offset (on a flat wall it reduces exactly to the one
 // above). The in-plane weight is cos of that effective angle (StanceEval.cth / sth for the dynamics).
 // Reach across a fold uses the fold-aware metric (anatomy.envEvalOn). With profile null nothing changes.
@@ -220,6 +221,7 @@ export class StanceEval {
   uy = 1;
   /** Envelope excess (m) of the reach target of the dragged limb (0 when none). */
   reachExcess = 0;
+  /** Pelvis depth off the wall (m, estimateDepth; the CoM sits between it and chestDepthFor). */
   depth = 0.25;
   handsOn = 0;
   feetOn = 0;
@@ -281,7 +283,37 @@ const GRIP: GripContext = { wallAngle: 0, assist: 0, pump: 0, overhang: 0, frict
 const sq = (x: number, y: number): number => Math.sqrt(x * x + y * y);
 
 /** Estimated pelvis distance from the wall for a pose (bent legs push the hips out). */
+const STEEP_SIN0 = dsin(SIM.steepDepthFrom * DEG);
+const STEEP_SIN1 = dsin(SIM.steepDepthTo * DEG);
+
+/** 0..1: how far a stance's effective wall angle (its sine) is into the steep band (SIM.steepDepthFrom → steepDepthTo). */
+export function steepness(sinA: number): number {
+  return smoothstep(STEEP_SIN0, STEEP_SIN1, sinA);
+}
+
+/**
+ * Chest (base of the neck) depth off the wall (m) for a pelvis depth and a steepness (0..1): the classic
+ * 0.15 + 0.36 · pelvis on vertical walls; under steep panels the chest hangs out to SIM.steepChestDepth
+ * (and at least 5 cm beyond the hips): body tension with nearly straight arms.
+ */
+export function chestDepthFor(pelvis: number, steep: number): number {
+  const base = clamp(0.15 + 0.36 * pelvis, 0.17, 0.42);
+  return steep > 0 ? Math.max(base, steep * Math.max(SIM.steepChestDepth, pelvis + 0.05)) : base;
+}
+
+/**
+ * Pelvis depth off the wall (m) for a stance: from the legs' in-plane extension (a straight leg pulls
+ * the hips in), hooks pulling them in further, or — feet off — the arms. Under steep panels never below
+ * the body-tension floor (SIM.steepPelvisDepth × steepness).
+ */
 export function estimateDepth(p: Pose, contacts: Contacts, ax: Float64Array, ay: Float64Array, wallAngle: number, sinOverride = NaN): number {
+  const s = Math.max(0, sinOverride === sinOverride ? sinOverride : dsin(wallAngle * DEG));
+  const floor = SIM.steepPelvisDepth * steepness(s);
+  const d = estimateDepthRaw(p, contacts, ax, ay, s);
+  return d > floor ? d : floor;
+}
+
+function estimateDepthRaw(p: Pose, contacts: Contacts, ax: Float64Array, ay: Float64Array, s: number): number {
   let n = 0;
   let sum = 0;
   let hooks = 0;
@@ -316,7 +348,6 @@ export function estimateDepth(p: Pose, contacts: Contacts, ax: Float64Array, ay:
     }
   }
   const comY = p.py + BODY.comT * (p.cy - p.py);
-  const s = Math.max(0, sinOverride === sinOverride ? sinOverride : dsin(wallAngle * DEG));
   return clamp(0.2 + (nh ? s * Math.max(0, hy / nh - comY) * 0.85 : 0), 0.15, 1.2);
 }
 
@@ -492,8 +523,11 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
       sth = tZ;
     }
   }
-  const depth = estimateDepth(pose, contacts, ax, ay, prm.wallAngle, prof === null ? NaN : sth);
-  out.depth = depth;
+  const pelvisDepth = estimateDepth(pose, contacts, ax, ay, prm.wallAngle, prof === null ? NaN : sth);
+  out.depth = pelvisDepth;
+  // the CoM's depth: between the pelvis and the chest, which hangs further out under steep panels
+  const steep = steepness(sth > 0 ? sth : 0);
+  const depth = steep > 0 ? pelvisDepth + BODY.comT * Math.max(0, chestDepthFor(pelvisDepth, steep) - pelvisDepth) : pelvisDepth;
 
   // ── out-of-plane balance ──
   let Nh = 0;

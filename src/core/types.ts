@@ -246,6 +246,12 @@ export interface ClimberState {
   com: Vec2;
   /** Distance of the pelvis from the wall surface (m). */
   pelvisDepth: number;
+  /**
+   * Optional (sim → renderer): distance of the chest (base of the neck) from the wall surface (m) the
+   * sim's body model assumes — ≈ 0.15 + 0.36 · pelvisDepth on vertical walls, further out under steep
+   * panels (body tension: SIM.steepChestDepth). Absent when the sim doesn't compute it.
+   */
+  chestDepth?: number;
   /** Rotation of the body about the vertical axis (radians): barn-door swing / flagging twist. */
   bodyYaw: number;
   /** Full-body velocity (m/s, wall-local) – used for fall/flail animation. */

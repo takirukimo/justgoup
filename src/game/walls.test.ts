@@ -4,13 +4,15 @@
 
 import { describe, expect, it } from 'vitest';
 import type { HoldDef } from '../core/types';
+import type { SimEvent } from '../core/contracts';
+import { DEG } from '../core/math';
 import { SIM } from '../config/tuning';
 import { ClimberSim } from './climber-sim';
-import { autoClimb } from './bot';
+import { autoClimb, BetaBot } from './bot';
 import { planBetaDetailed } from './solver';
 import { envEval, envEvalOn } from './anatomy';
-import { evaluateStance, FOOT_TOE, initialPose, makeParams, newContact, optimizePose, setContact, StanceEval, type Contacts, type Pose } from './statics';
-import { makeProfile, panelsFromLengths, PROFILE_PRESETS, surfaceToLocal3D, worldHeight } from './wall-profile';
+import { chestDepthFor, evaluateStance, FOOT_TOE, initialPose, makeParams, newContact, optimizePose, setContact, StanceEval, steepness, type Contacts, type Pose } from './statics';
+import { angleAt, makeProfile, panelsFromLengths, PROFILE_PRESETS, surfaceToLocal3D, worldHeight } from './wall-profile';
 import { hold, makeBoulder, moveLimb, run } from './test-helpers';
 
 const J = (id: string, x: number, y: number, role: 'start' | 'hand' | 'top' | 'foot' = 'hand', a = -90, size = 0.1): HoldDef => hold(id, x, y, 'jug', size, role, a);
@@ -150,6 +152,48 @@ describe('ClimberSim on folded walls', () => {
     const sim = new ClimberSim(b);
     const r = autoClimb(sim);
     expect(r.sent, r.bot.log.join('; ')).toBe(true);
+  });
+
+  it('under the roof the body keeps a body-tension distance from the wall (hips ≈0.3 m, chest further out)', { timeout: 60_000 }, () => {
+    const b = caveProblem();
+    const sim = new ClimberSim(b);
+    const byId = new Map(b.holds.map((h) => [h.id, h] as const));
+    const bot = new BetaBot(sim);
+    sim.start();
+    let ev: SimEvent[] = [];
+    let roof = 0;
+    let minPelvis = Infinity;
+    let minChest = Infinity;
+    for (let t = 0; t < 120 && !bot.done && !bot.failed; t += 1 / 60) {
+      bot.update(1 / 60, ev);
+      ev = sim.step(1 / 60);
+      const s = sim.getState();
+      if (s.phase !== 'climbing' || s.airborne) continue;
+      // hanging under the roof: both hands and every foot on the 85° panel
+      const on = (['LH', 'RH', 'LF', 'RF'] as const).map((l) => s.limbs[l].holdId);
+      if (on.some((id) => !id || angleAt(cave.prof, byId.get(id)!.y) < 80)) continue;
+      roof++;
+      minPelvis = Math.min(minPelvis, s.pelvisDepth);
+      minChest = Math.min(minChest, s.chestDepth!);
+    }
+    expect(sim.getState().phase).toBe('topped');
+    expect(roof).toBeGreaterThan(30);
+    // research §2.1: hips "in" ≈ 0.25 m; never the 0.14 m of a hip pressed to the roof
+    expect(minPelvis).toBeGreaterThanOrEqual(SIM.steepPelvisDepth - 0.03);
+    expect(minChest).toBeGreaterThanOrEqual(SIM.steepChestDepth - 0.03);
+  });
+
+  it('the steep-panel depth floor leaves vertical walls alone (the chest follows the classic 0.15 + 0.36 · pelvis)', () => {
+    expect(steepness(0)).toBe(0);
+    expect(steepness(Math.sin(20 * DEG))).toBe(0);
+    expect(steepness(Math.sin(70 * DEG))).toBe(1);
+    for (const d of [0.14, 0.25, 0.4]) expect(chestDepthFor(d, 0)).toBeCloseTo(Math.min(0.42, Math.max(0.17, 0.15 + 0.36 * d)));
+    expect(chestDepthFor(0.28, 1)).toBeCloseTo(SIM.steepChestDepth);
+    const sim = new ClimberSim(makeBoulder([J('s1', -0.2, 1.6, 'start'), J('s2', 0.2, 1.6, 'start'), J('f1', -0.2, 0.5, 'foot', -90, 0.08), J('f2', 0.2, 0.5, 'foot', -90, 0.08), J('t', 0, 4.1, 'top')], { wallAngle: 0 }));
+    sim.start();
+    run(sim, 1);
+    const s = sim.getState();
+    expect(s.chestDepth).toBeCloseTo(chestDepthFor(s.pelvisDepth, 0), 5);
   });
 
   it('a fall from under the roof lands on the pad below (straight down in 3D)', () => {
