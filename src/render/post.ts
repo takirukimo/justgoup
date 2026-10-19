@@ -47,7 +47,9 @@ const FinalShader = {
       float r2 = dot(d, d);
       vec3 col;
       if (uCA > 0.0) {
-        vec2 off = d * r2 * uCA;
+        // confined to the corners (r2²): thin holds near the bottom / side edges keep clean
+        // silhouettes instead of red / cyan fringes
+        vec2 off = d * r2 * r2 * uCA;
         col.r = texture2D(tDiffuse, uv + off).r;
         col.g = texture2D(tDiffuse, uv).g;
         col.b = texture2D(tDiffuse, uv - off).b;
@@ -118,7 +120,7 @@ export class PostFX {
       this.rtMsaa.dispose();
     }
     this.final.uniforms.uGrain.value = p.grain ? 0.032 : 0;
-    this.final.uniforms.uCA.value = p.chromatic ? 0.012 : 0;
+    this.final.uniforms.uCA.value = p.chromatic ? 0.016 : 0;
     this.setSize(this.w, this.h, this.dpr);
   }
 
