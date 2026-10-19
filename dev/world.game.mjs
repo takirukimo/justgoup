@@ -127,7 +127,9 @@ async function respawnAt(f, steepest = false) {
       // lead: clip every draw below the hands first (as if climbed to here), so a slip is a rope
       // catch and not a ground fall that ends the run
       const sess = window.__jgu.app.activeSession;
-      if (sess && sess.rope) for (const q of sess.rope.quickdraws) if (q.y < hy - 0.4 && !sess.rope.isClipped?.(q.id)) sess.onClipped(q.id);
+      // (straight on the rope system: the session's clip handler would also record this stance as
+      // the catch respawn point)
+      if (sess && sess.rope) for (const q of sess.rope.quickdraws) if (q.y < hy - 0.4) sess.rope.clip(q.id);
       sim.respawn(placement);
       return { hy: +hy.toFixed(2), placement };
     },

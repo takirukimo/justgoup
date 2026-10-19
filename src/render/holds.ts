@@ -1085,6 +1085,13 @@ export interface HoldMount {
   lift: number;
 }
 
+/** Draw-range start past any index count: renderBufferDirect returns before issuing a draw. */
+const HIDDEN_RANGE = 1 << 30;
+/** Height of a route-hold shadow proxy band (m along the wall). */
+const SHADOW_BAND = 2.4;
+/** The shadow proxy's material (never drawn in the main pass; its depth variant renders the shadow). */
+const _shadowProxyMat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
+
 const _ray = new THREE.Raycaster();
 const _probe = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
 _probe.matrixAutoUpdate = false;
@@ -1097,6 +1104,11 @@ export class HoldSet {
   /** Holds bolted onto volumes: their mounting point + orientation on the volume face. */
   readonly mounts = new Map<string, HoldMount>();
   private decoMesh: THREE.Mesh | null = null;
+  /**
+   * The route holds merged in bands up the wall, drawn ONLY into the key-light shadow map (one call
+   * per band instead of one per hold; each band is still culled against the light's frustum).
+   */
+  private shadowMeshes: THREE.Mesh[] = [];
   private tapeMesh: THREE.Mesh | null = null;
   private aoMesh: THREE.Mesh | null = null;
   private routeMats: SurfaceMaterial[] = [];
@@ -1208,7 +1220,9 @@ export class HoldSet {
         holdMatrix(h, this.frame, m);
         m.decompose(mesh.position, mesh.quaternion, mesh.scale);
       }
-      mesh.castShadow = true;
+      // in the game every route hold casts through the merged shadow proxy; the editor's holds move
+      // one by one, so there each casts its own
+      mesh.castShadow = !!opts.separateAll;
       mesh.receiveShadow = true;
       mesh.name = `hold:${h.id}`;
       mesh.userData.holdId = h.id;
@@ -1240,19 +1254,55 @@ export class HoldSet {
         this.group.add(this.decoMesh);
       }
     }
+    if (!opts.separateAll) this.buildShadowProxy();
     this.buildAo(holds);
     this.buildTapes(boulder, holds, opts);
     trimHoldCache();
   }
 
   /**
-   * Contact AO under every hold / volume: a soft dark patch on the wall around its footprint.
-   * The patch is laid out in wall-surface coordinates and cut at every panel fold it crosses, so
-   * each piece lies flat on its own panel (no flat quad sticking out into the air past a roof lip,
-   * none buried in the next panel at an inside corner). Past a CONVEX fold (a lip: the next panel
-   * turns away) the hold, which is rigid on its own panel, stands off the surface: the patch fades
-   * out within a few cm of the lip there. Into a concave fold (an inside corner) it wraps on.
+   * The route holds' key-light shadows in a few draws: their geometry merged, per band of
+   * SHADOW_BAND m up the wall, into meshes that skip the main pass (an empty draw range there: three
+   * draws nothing, not even an empty call) and open their full range only while the shadow map
+   * renders them (onBeforeShadow / onAfterShadow). A lead route's ~90 shadow-pass calls become ~6,
+   * a boulder's ~20 become 2, and a tight key on the climber still culls the bands out of its reach.
    */
+  private buildShadowProxy(): void {
+    const bands = new Map<number, THREE.BufferGeometry[]>();
+    for (const [id, mesh] of this.meshes) {
+      const h = this.holds.get(id);
+      if (!h) continue;
+      mesh.updateMatrix();
+      const src = mesh.geometry;
+      const g = new THREE.BufferGeometry();
+      const pos = src.getAttribute('position');
+      g.setAttribute('position', pos.clone());
+      // mergeGeometries wants all parts indexed (or none)
+      if (src.index) g.setIndex(src.index.clone());
+      else g.setIndex(Array.from({ length: pos.count }, (_, i) => i));
+      g.applyMatrix4(mesh.matrix);
+      const k = Math.floor(h.y / SHADOW_BAND);
+      let list = bands.get(k);
+      if (!list) bands.set(k, (list = []));
+      list.push(g);
+    }
+    for (const parts of bands.values()) {
+      const merged = mergeGeometries(parts, false);
+      for (const p of parts) p.dispose();
+      if (!merged) continue;
+      merged.computeBoundingSphere();
+      merged.setDrawRange(HIDDEN_RANGE, 0);
+      const proxy = new THREE.Mesh(merged, _shadowProxyMat);
+      proxy.castShadow = true;
+      proxy.receiveShadow = false;
+      proxy.name = 'holds:shadow-proxy';
+      proxy.onBeforeShadow = () => merged.setDrawRange(0, Infinity);
+      proxy.onAfterShadow = () => merged.setDrawRange(HIDDEN_RANGE, 0);
+      this.shadowMeshes.push(proxy);
+      this.group.add(proxy);
+    }
+  }
+
   private buildAo(holds: readonly HoldDef[]): void {
     if (!holds.length) return;
     const pos: number[] = [];
@@ -1418,11 +1468,12 @@ export class HoldSet {
     this.holds.clear();
     this.geoms.clear();
     this.mounts.clear();
-    for (const mesh of [this.decoMesh, this.aoMesh, this.tapeMesh]) {
+    for (const mesh of [this.decoMesh, this.aoMesh, this.tapeMesh, ...this.shadowMeshes]) {
       if (!mesh) continue;
       this.group.remove(mesh);
       mesh.geometry.dispose();
     }
+    this.shadowMeshes = [];
     if (this.tapeMat) {
       this.tapeMat.map?.dispose();
       this.tapeMat.dispose();
