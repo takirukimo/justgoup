@@ -19,7 +19,7 @@ export class Modal {
   confirm(title: string, body: string, ok = 'CONFIRM', cancel = 'CANCEL'): Promise<boolean> {
     this.close(false);
     return new Promise<boolean>((resolve) => {
-      const danger = /reset|delete|erase|discard|quit|abandon|wipe/i.test(ok);
+      const danger = /reset|delete|erase|discard|quit|abandon|wipe|start over/i.test(ok);
       const done = (v: boolean): void => {
         if (this.pending !== finish) return;
         this.pending = null;
