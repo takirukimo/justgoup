@@ -40,6 +40,8 @@ export const IMPORT = {
   maxExcludes: 3,
   /** A tap that moves less than this (css px) is a tap, not a pan. */
   tapSlop: 9,
+  /** COLOUR: a press held this long (ms) without moving aims with the loupe; lifting picks. */
+  aimHold: 260,
   maxZoom: 6,
   /** Slider → detection debounce (ms). */
   detectDebounce: 140,
@@ -174,6 +176,9 @@ export class PhotoImporter {
   private pinch: { d0: number; zoom0: number; mid: Pt; anchor: Pt } | null = null;
   private panning = false;
   private lastTap = { t: 0, x: 0, y: 0 };
+  /** COLOUR: press-and-hold aiming (the loupe follows the finger, lifting picks). */
+  private aim: { id: number; at: Pt } | null = null;
+  private aimTimer: ReturnType<typeof setTimeout> | null = null;
   private loupeTimer: ReturnType<typeof setTimeout> | null = null;
   private resizeObs: ResizeObserver | null = null;
 
@@ -329,6 +334,7 @@ export class PhotoImporter {
     this.resizeObs?.disconnect();
     if (this.detectTimer) clearTimeout(this.detectTimer);
     if (this.loupeTimer) clearTimeout(this.loupeTimer);
+    if (this.aimTimer) clearTimeout(this.aimTimer);
     this.engine.dispose();
     this.analyzer?.dispose();
     this.analyzer = null;
@@ -493,7 +499,7 @@ export class PhotoImporter {
           this.pickMode === 'match'
             ? inc.length
               ? 'Add a tap where the light changes, or find the holds.'
-              : 'Tap one of your problem’s holds. Pinch to zoom in.'
+              : 'Tap one of your problem’s holds, or press and hold to aim. Pinch to zoom.'
             : 'Tap a look-alike colour that isn’t yours, like purple next to blue.';
         s.append(head('Tap your colour', hint), seg, sw);
         const wallTap = inc.length ? inc.map((x) => colorAdvice(x.lab, this.wallLab)).find((a) => a) : null;
@@ -511,15 +517,19 @@ export class PhotoImporter {
         slider.max = '100';
         slider.step = '1';
         slider.value = String(Math.round(this.sensitivity * 100));
-        slider.setAttribute('aria-label', 'Detection sensitivity');
-        const val = el('span', 'ph-range-v', `${Math.round(this.sensitivity * 100)}`);
+        slider.setAttribute('aria-label', 'Sensitivity: fewer or more holds');
+        slider.setAttribute('aria-valuetext', `${slider.value} of 100`);
         slider.addEventListener('input', () => {
           this.sensitivity = Number(slider.value) / 100;
-          setText(val, slider.value);
+          slider.setAttribute('aria-valuetext', `${slider.value} of 100`);
+          slider.style.setProperty('--v', `${slider.value}%`);
           this.scheduleDetect();
         });
-        const sens = el('label', 'ph-sens', el('span', 'ph-lbl', 'SENSITIVITY'), slider, val);
-        s.append(head(title, 'Tap a hold to drop it, or an empty spot to add one.'));
+        slider.style.setProperty('--v', `${slider.value}%`);
+        const sens = el('label', 'ph-sens', el('span', 'ph-sens-end', 'FEWER'), slider, el('span', 'ph-sens-end', 'MORE'));
+        const blocking = advice.length > 0 && advice[0].level === 'bad' && !this.detecting;
+        // a blocking message is the instruction: the usual hint makes room for it
+        s.append(blocking ? el('div', 'ph-head', el('h2', 'ph-title', title)) : head(title, 'Tap a hold to drop it, or an empty spot to add one.'));
         if (advice.length && !this.detecting) s.appendChild(this.adviceEl(advice[0]));
         s.appendChild(sens);
         if (this.claude && !this.claudeHidden) s.appendChild(this.claudeBlock());
@@ -1103,7 +1113,17 @@ export class PhotoImporter {
       if (this.top) lift();
     }
     this.rolesTouched = true;
-    this.say(this.roleMode === 'start' ? `${this.resolveRoles().starts.length} start holds` : this.top ? 'Top set' : 'Top cleared');
+    const r = this.resolveRoles();
+    let said = this.roleMode === 'start' ? `${r.starts.length} start hold${r.starts.length === 1 ? '' : 's'}` : this.top ? 'Top set' : 'Top cleared';
+    // the other mark still missing: switch to it, so marking a fresh problem is tap, tap, tap
+    if (this.roleMode === 'start' && r.starts.length >= 1 && r.top === null) {
+      this.roleMode = 'top';
+      said += '. Now tap the top';
+    } else if (this.roleMode === 'top' && r.top !== null && !r.starts.length) {
+      this.roleMode = 'start';
+      said += '. Now tap a start hold';
+    }
+    this.say(said);
     this.renderSheet();
     this.draw();
   }
@@ -1350,6 +1370,17 @@ export class PhotoImporter {
       st.setPointerCapture(e.pointerId);
       const p = local(e);
       this.pointers.set(e.pointerId, { x: p.x, y: p.y, x0: p.x, y0: p.y, t0: performance.now() });
+      this.cancelAim();
+      if (this.step === 'color' && this.pointers.size === 1) {
+        const id = e.pointerId;
+        this.aimTimer = setTimeout(() => {
+          this.aimTimer = null;
+          const q = this.pointers.get(id);
+          if (!q || this.panning || this.pinch || this.pointers.size !== 1) return;
+          this.aim = { id, at: { x: q.x, y: q.y } };
+          this.aimAt(this.aim.at);
+        }, IMPORT.aimHold);
+      }
       if (this.pointers.size === 2) {
         const [a, b] = [...this.pointers.values()];
         const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
@@ -1365,6 +1396,12 @@ export class PhotoImporter {
       const dy = p.y - q.y;
       q.x = p.x;
       q.y = p.y;
+      if (this.aim && this.aim.id === e.pointerId) {
+        this.aim.at = p;
+        this.aimAt(p);
+        return;
+      }
+      if (this.aimTimer && Math.hypot(p.x - q.x0, p.y - q.y0) > IMPORT.tapSlop) this.cancelAim();
       if (this.pinch && this.pointers.size >= 2) {
         const [a, b] = [...this.pointers.values()];
         const d = Math.hypot(a.x - b.x, a.y - b.y) || 1;
@@ -1388,6 +1425,17 @@ export class PhotoImporter {
       if (!q) return;
       this.pointers.delete(e.pointerId);
       if (st.hasPointerCapture(e.pointerId)) st.releasePointerCapture(e.pointerId);
+      if (this.aim && this.aim.id === e.pointerId) {
+        const at = this.aim.at;
+        this.aim = null;
+        this.hideLoupe();
+        if (e.type !== 'pointercancel') this.tap(at);
+        return;
+      }
+      if (this.aimTimer) {
+        clearTimeout(this.aimTimer);
+        this.aimTimer = null;
+      }
       if (this.pinch) {
         if (this.pointers.size === 0) this.pinch = null;
         return;
@@ -1451,6 +1499,39 @@ export class PhotoImporter {
   }
 
   // ═══════════════════════════════ loupe ═══════════════════════════════
+
+  /** Aiming: the loupe shows the photo under the finger, magnified, with the colour it would pick. */
+  private aimAt(screen: Pt): void {
+    if (!this.rect) return;
+    const p = this.toImage(screen);
+    if (p.x < 0 || p.y < 0 || p.x > this.rectW || p.y > this.rectH) {
+      this.hideLoupe();
+      return;
+    }
+    this.drawLoupe(this.rect, p, screen, Math.max(4, 4 * this.scale()), (g, k, cx, cy) => {
+      g.strokeStyle = 'rgba(13, 14, 16, 0.75)';
+      g.lineWidth = 4;
+      g.beginPath();
+      g.arc(cx, cy, Math.max(6, 3.5 * k), 0, Math.PI * 2);
+      g.stroke();
+      g.strokeStyle = this.pickMode === 'exclude' ? '#ff8a66' : '#fff';
+      g.lineWidth = 2;
+      g.stroke();
+    });
+    // the ring takes the colour under the crosshair
+    const d = this.rect.getContext('2d', { willReadFrequently: true })!.getImageData(Math.round(clamp(p.x, 0, this.rectW - 1)), Math.round(clamp(p.y, 0, this.rectH - 1)), 1, 1).data;
+    this.loupe.style.setProperty('--sw', `rgb(${d[0]}, ${d[1]}, ${d[2]})`);
+    this.loupe.classList.add('tinted', 'aiming');
+  }
+
+  private cancelAim(): void {
+    if (this.aimTimer) clearTimeout(this.aimTimer);
+    this.aimTimer = null;
+    if (this.aim) {
+      this.aim = null;
+      this.hideLoupe();
+    }
+  }
 
   private showCornerLoupe(i: number): void {
     if (!this.quad || !this.photo) return;
@@ -1531,7 +1612,7 @@ export class PhotoImporter {
   }
 
   private hideLoupe(): void {
-    this.loupe.classList.remove('on');
+    this.loupe.classList.remove('on', 'aiming');
   }
 
   // ═══════════════════════════════ drawing ═══════════════════════════════
@@ -1585,6 +1666,7 @@ export class PhotoImporter {
     if (this.spot) g.drawImage(this.spot, o.x, o.y, img.width * s, img.height * s);
     const inc = this.included();
     const roles = this.step === 'roles' ? this.resolveRoles() : null;
+    this.badges.length = 0;
     // set-aside regions: dimmed back down, dashed
     for (const h of this.holds) {
       if (h.included) continue;
@@ -1663,13 +1745,18 @@ export class PhotoImporter {
     g.stroke();
     g.shadowBlur = 0;
     // floor / top labels along the edges
-    g.font = "600 10px 'JetBrains Mono', ui-monospace, monospace";
-    g.fillStyle = 'rgba(246, 244, 239, 0.86)';
+    g.font = "700 10.5px 'JetBrains Mono', ui-monospace, monospace";
+    g.fillStyle = '#f6f4ef';
     g.textAlign = 'center';
     const lbl = (a: Pt, b: Pt, text: string, dy: number): void => {
       g.save();
       g.translate((a.x + b.x) / 2, (a.y + b.y) / 2 + dy);
       g.rotate(Math.atan2(b.y - a.y, b.x - a.x));
+      // a dark outline keeps the label legible over a white wall or a bright window
+      g.lineJoin = 'round';
+      g.lineWidth = 3;
+      g.strokeStyle = 'rgba(8, 9, 10, 0.78)';
+      g.strokeText(text, 0, 0);
       g.fillText(text, 0, 0);
       g.restore();
     };
@@ -1710,11 +1797,21 @@ export class PhotoImporter {
     return { x: c.x + r * 0.72 + 4, y: c.y - r * 0.72 - 4 };
   }
 
+  /** Badges already drawn this frame (css px rects): a crowded line skips the ones that would overlap. */
+  private badges: { x: number; y: number; w: number }[] = [];
+
   private badge(h: PhotoHold, text: string, claude: boolean): void {
     const g = this.g;
-    const p = this.topRight(h);
+    const tr = this.topRight(h);
     g.font = "700 10px 'JetBrains Mono', ui-monospace, monospace";
     const w = Math.max(16, g.measureText(text).width + 8);
+    const free = (q: Pt): boolean => this.badges.every((b) => Math.abs(b.x - q.x) > (b.w + w) / 2 - 2 || Math.abs(b.y - q.y) > 14);
+    // top-right of the hold, else its other upper corner, else above it; none free: outline only (zoom in to read)
+    const r = Math.max(6, (h.major / 2) * this.scale());
+    const c = this.toScreen(h);
+    const p = [tr, { x: c.x - r * 0.72 - 4, y: tr.y }, { x: c.x, y: c.y - r - 10 }].find(free);
+    if (!p) return;
+    this.badges.push({ x: p.x, y: p.y, w });
     g.fillStyle = claude ? '#9ad4de' : '#f6f4ef';
     roundRect(g, p.x - w / 2, p.y - 8, w, 16, 8);
     g.fill();
@@ -1736,7 +1833,8 @@ export class PhotoImporter {
     }
     g.font = "700 10px 'JetBrains Mono', ui-monospace, monospace";
     const w = g.measureText(text).width + 12;
-    g.fillStyle = style === 'pink' ? '#d54051' : 'rgba(13, 14, 16, 0.86)';
+    // a shade under CHIRAL pink so the white 10 px label reads at AA (5.1:1; #D54051 is 4.49:1)
+    g.fillStyle = style === 'pink' ? '#c93849' : 'rgba(13, 14, 16, 0.86)';
     roundRect(g, p.x - 6, p.y - 9, w, 18, 5);
     g.fill();
     if (style === 'ghost') {

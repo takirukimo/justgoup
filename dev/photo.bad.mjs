@@ -2,14 +2,16 @@
 // can't open, a thumbnail, a small photo, a colour tap on the wall itself, a colour that matches one hold,
 // a sit start, a wall with no beta, and Claude declining. Every step must say what's wrong and offer a way
 // on (never a dead end). Screenshots of each message.
-// usage: node dev/photo.bad.mjs [baseUrl] [outDir]   (CLAUDE=deny|busy|bad, default deny)
+// usage: node dev/photo.bad.mjs [baseUrl] [outDir]   (CLAUDE=deny|busy|bad, default deny; VW / VH: viewport)
 import { chromium } from 'playwright-core';
 
 const base = process.argv[2] || 'http://127.0.0.1:5472';
 const outDir = process.argv[3] || '/tmp/claude-0/shots/photo';
 const CLAUDE = process.env.CLAUDE || 'deny';
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || '/opt/pw-browsers/chromium', args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
-const page = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true });
+const VW = Number(process.env.VW || 390);
+const VH = Number(process.env.VH || 844);
+const page = await browser.newPage({ viewport: { width: VW, height: VH }, deviceScaleFactor: 2, hasTouch: true, isMobile: true });
 page.setDefaultTimeout(60000);
 const logs = [];
 page.on('console', (m) => logs.push(`[${m.type()}] ${m.text()}`));
@@ -20,7 +22,7 @@ const check = (c, msg) => {
   if (!c) ok = false;
 };
 const shot = async (n) => {
-  const p = `${outDir}/bad-${n}.png`;
+  const p = `${outDir}/bad-${VW}x${VH}-${n}.png`;
   await page.screenshot({ path: p });
   console.log('shot', p);
 };
@@ -39,6 +41,15 @@ const file = async (name, mimeType, buffer) => {
   await page.waitForTimeout(700);
 };
 const png = (url) => Buffer.from(url.split(',')[1], 'base64');
+/** Wait until the importer has re-fitted the photo to the stage (the sheet's height changes with its content). */
+const settled = async () => {
+  await page.waitForFunction(() => {
+    const i = window.__photo.importer;
+    const r = document.querySelector('.ph-stage').getBoundingClientRect();
+    return i && Math.abs(i.sw - r.width) < 0.5 && Math.abs(i.sh - r.height) < 0.5;
+  });
+  await page.waitForTimeout(150);
+};
 const SAMPLE1 = { seed: 3, view: 'below', route: '#F2C230', wall: 'charcoal' };
 const dragCorners = async () => {
   const target = await page.evaluate(() => window.__photo.trueCorners());
@@ -99,6 +110,7 @@ const bare = await page.evaluate(() => {
     for (let x = -1.8; x < 1.8; x += 0.1) if (s.holds.every((h) => Math.hypot(h.x - x, h.y - y) > h.r + 0.35)) return { x, y };
   return null;
 });
+await settled();
 await tapWall(bare.x, bare.y);
 await page.waitForTimeout(900);
 check(/looks like the wall/.test(await text('.ph-adv')), `a tap on the wall is called out (${await text('.ph-adv')})`);
@@ -143,9 +155,7 @@ const lone = await page.evaluate(() => {
   return h && { x: h.x, y: h.y, color: h.color };
 });
 console.log('lone hold colour', lone?.color);
-// flush layout so the importer's stage size is current before aiming
-await page.evaluate(() => document.querySelector('.ph-stage').getBoundingClientRect());
-await page.waitForTimeout(300);
+await settled();
 await tapWall(lone.x, lone.y);
 await page.waitForTimeout(900);
 
@@ -176,8 +186,7 @@ while (await page.locator('.ph-sw').count()) {
 }
 // the sheet changed height: let the stage re-fit the photo before aiming
 await page.waitForTimeout(700);
-await page.evaluate(() => document.querySelector('.ph-stage').getBoundingClientRect());
-await page.waitForTimeout(300);
+await settled();
 const h0 = await page.evaluate(() => window.__photo.holdScreen(0));
 await page.touchscreen.tap(h0.x, h0.y);
 await page.waitForTimeout(900);
