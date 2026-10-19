@@ -119,7 +119,9 @@ import { clamp, clamp01, damp, DEG, smoothstep } from '../core/math';
 import {
   canMatch,
   clipPoint,
+  contactFrame,
   contactPoint,
+  type ContactFrame,
   footModeFor,
   LIMB_IDS,
   LIMB_INDEX,
@@ -234,6 +236,11 @@ interface LimbRt {
   hy: number;
   /** Move counter value of this limb's last lift / placement (newest crossing limb goes in front). */
   stamp: number;
+  /** Contact geometry for the renderer (holds.contactFrame), refreshed on attach / technique change. */
+  readonly frame: ContactFrame;
+  readonly cPos: Vec2;
+  readonly cNormal: { x: number; y: number; z: number };
+  readonly cGrip: Vec2;
 }
 
 export interface SimStats {
@@ -311,6 +318,10 @@ function newLimb(): LimbRt {
     hx: 0,
     hy: -1,
     stamp: 0,
+    frame: { nx: 0, ny: 0, nz: 1, gx: 0, gy: 1 },
+    cPos: { x: 0, y: 0 },
+    cNormal: { x: 0, y: 0, z: 1 },
+    cGrip: { x: 0, y: 1 },
   };
 }
 
@@ -355,6 +366,9 @@ function snapshot(id: LimbId): LimbSnapshot {
     busy: false,
     layer: 0,
     front: false,
+    contactPos: null,
+    contactNormal: null,
+    gripDir: null,
     ...(id === 'LH' || id === 'RH' ? { pump: 0, friction: 1, shakingOut: false, chalking: false, flying: false, flightTarget: null } : {}),
   };
 }
@@ -3358,6 +3372,17 @@ export class ClimberSim implements ClimberSimAPI {
       o.shake = L.shake;
       o.busy = L.busy;
       if (i >= 2) o.footMode = L.flag ? 'flag' : (L.hold || L.smear) && !L.dragging ? L.mode ?? 'edge' : undefined;
+      if ((L.hold || L.smear) && !L.dragging && !L.busy) {
+        // contact geometry for the renderer (the exact contact, the touched surface, the grip side)
+        this.contactGeometry(i);
+        o.contactPos = L.cPos;
+        o.contactNormal = L.cNormal;
+        o.gripDir = L.cGrip;
+      } else {
+        o.contactPos = null;
+        o.contactNormal = null;
+        o.gripDir = null;
+      }
       if (i < 2) {
         o.pump = this.handPump[i];
         o.friction = this.handFric[i];
@@ -3373,6 +3398,30 @@ export class ClimberSim implements ClimberSimAPI {
       }
       o.layer = layer;
       o.front = layer > 0;
+    }
+  }
+
+  /** Refresh limb i's contact geometry (LimbSnapshot.contactPos / contactNormal / gripDir) from its contact. */
+  private contactGeometry(i: number): void {
+    const L = this.limbs[i];
+    const h = L.hold;
+    const vol = h && h.onVolume ? this.holdById.get(h.onVolume) ?? null : null;
+    const f = contactFrame(h, i, i >= 2 ? L.mode : null, vol && vol.type === 'volume' ? vol : null, L.frame);
+    L.cPos.x = L.cx;
+    L.cPos.y = L.cy;
+    L.cNormal.x = f.nx;
+    L.cNormal.y = f.ny;
+    L.cNormal.z = f.nz;
+    if (!h) {
+      // a smear presses from the hip's side
+      const dx = this.ax[i] - L.cx;
+      const dy = this.ay[i] - L.cy;
+      const l = Math.hypot(dx, dy) || 1;
+      L.cGrip.x = dx / l;
+      L.cGrip.y = dy / l;
+    } else {
+      L.cGrip.x = f.gx;
+      L.cGrip.y = f.gy;
     }
   }
 

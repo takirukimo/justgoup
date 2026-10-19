@@ -153,13 +153,26 @@ export function placementBlocked(
 }
 
 /**
- * Grip point of a hold: on the incut side, i.e. slightly away from where the body should be.
- * Two hands matched on one hold are spread along the hold's tangent.
+ * Where on a hold a hand grips / a foot presses, as a fraction of HoldDef.size from its centre toward the
+ * grip side (−good direction), measured on the drawn geometry (render/holds.ts profiles, hold-local +y):
+ *  hands — an edge's / crimp's shelf (≈ 0.25–0.30), the back of a jug's cavity behind the lip (0.31–0.44),
+ *          a sloper's upper dome, inside a pocket's hole (its upper part, ≈ 0.2), a pinch's rib;
+ *  feet  — where a shoe stands: a foot chip's upper shoulder (≈ 0.5–0.8; its front is flat), the toe in a
+ *          jug's bucket, an edge's shelf, a sloper's upper dome, a pocket's rim above the hole.
+ * (Volumes: their top facet, ≤ 0.14 m in.)
+ */
+const HAND_INSET: Record<HoldType, number> = { jug: 0.32, edge: 0.32, crimp: 0.32, sloper: 0.32, pinch: 0.32, pocket: 0.22, volume: 0.45, foot: 0.32 };
+const FOOT_INSET: Record<HoldType, number> = { jug: 0.32, edge: 0.3, crimp: 0.3, sloper: 0.36, pinch: 0.34, pocket: 0.34, volume: 0.45, foot: 0.58 };
+
+/**
+ * Grip point of a hold: on the incut side, i.e. slightly away from where the body should be (HAND_INSET /
+ * FOOT_INSET: the grip surface of the drawn hold). Two hands matched on one hold are spread along the
+ * hold's tangent.
  */
 export function contactPoint(h: HoldDef, limbIdx: number, matched: boolean, out: Vec2): Vec2 {
   const ca = dcos(h.angle);
   const sa = dsin(h.angle);
-  const inset = h.type === 'volume' ? Math.min(h.size * 0.45, 0.14) : h.size * 0.32;
+  const inset = h.type === 'volume' ? Math.min(h.size * 0.45, 0.14) : h.size * (limbIdx < 2 ? HAND_INSET[h.type] : FOOT_INSET[h.type]);
   let x = h.x - ca * inset;
   let y = h.y - sa * inset;
   if (matched) {
@@ -180,6 +193,120 @@ export function contactPoint(h: HoldDef, limbIdx: number, matched: boolean, out:
   out.y = y;
   return out;
 }
+
+/**
+ * Contact geometry of a limb on a hold (sim → renderer): the outward unit normal (nx, ny, nz) of the surface
+ * the hand / foot touches, in the wall-local frame of the panel under the contact (x right, y up the
+ * surface, z out of the wall), and the in-plane unit direction (gx, gy) from that surface toward the side
+ * the limb grips / presses from (LimbSnapshot.contactNormal / gripDir).
+ *
+ * The grip surfaces match the drawn hold geometry (render/holds.ts profiles, unit = HoldDef.size, the grip
+ * side on hold-local +y = −good direction), with contactPoint() at 0.32 · size on that side:
+ *  • edge / crimp — the shelf the fingers sit on (≈ 0.30 · size, `edgeDepthMm` deep), facing up (−good
+ *    direction) and tilted by the lip: incut into the wall, slopey out of it,
+ *  • jug — inside the lip (the cavity behind it, 0.31–0.44 · size): its inner face hooks into the wall,
+ *  • sloper — the upper dome (the chalked grip side), tilted out by the effective slope (−lip),
+ *  • pocket — inside the hole, the pads on its rim, tilted in,
+ *  • pinch — the rib's sides (normal ≈ the grip side, square to the wall),
+ *  • volume — its face, tilted well out (a hand presses on it; a foot stands on its top facet),
+ *  • a standing foot — the hold's top (the same grip side: a foot pushes where a hand pulls from below), a
+ *    foot chip's dome tilted out; hooks — the far face the heel / toe pulls on.
+ * A hold bolted onto a volume (onVolume, `vol`) sits square to the volume's face, which faces the climber
+ * from the volume's centre: the whole frame tilts toward the hold's offset from that centre.
+ * `mode` is the foot technique (null for hands). Writes `out` and returns it.
+ */
+export interface ContactFrame {
+  nx: number;
+  ny: number;
+  nz: number;
+  gx: number;
+  gy: number;
+}
+
+/** Tilt (degrees, + = out of the wall) of the gripped surface normal by hold type: hands, standing feet. */
+const HAND_TILT: Record<HoldType, number> = { jug: -20, edge: 0, crimp: 0, sloper: 35, pinch: 0, pocket: -25, volume: 45, foot: 20 };
+const FOOT_TILT: Record<HoldType, number> = { jug: 5, edge: 5, crimp: 5, sloper: 30, pinch: 10, pocket: 0, volume: 30, foot: 35 };
+
+export function contactFrame(h: HoldDef | null, li: number, mode: FootMode | null, vol: HoldDef | null, out: ContactFrame): ContactFrame {
+  if (!h) {
+    // a smear: the rubber on the wall itself
+    out.nx = 0;
+    out.ny = 0;
+    out.nz = 1;
+    out.gx = 0;
+    out.gy = 1;
+    return out;
+  }
+  const hx = dcos(h.angle);
+  const hy = dsin(h.angle);
+  const hand = isHandIdx(li);
+  const hook = mode === 'heel' || mode === 'toe';
+  let tilt: number;
+  if (hand) {
+    tilt = HAND_TILT[h.type];
+    if (h.type === 'edge' || h.type === 'crimp') tilt = -clamp(lipAngleOf(h), -30, 30);
+    else if (h.type === 'sloper') tilt = clamp(-lipAngleOf(h), 0, 70);
+  } else if (hook) tilt = mode === 'heel' ? -10 : -15;
+  else {
+    tilt = FOOT_TILT[h.type];
+    if (h.type === 'edge' || h.type === 'crimp') tilt = 5 - 0.5 * clamp(lipAngleOf(h), -30, 30);
+    else if (h.type === 'sloper') tilt = clamp(-lipAngleOf(h), 0, 70);
+  }
+  const t = tilt * DEG;
+  const ct = dcos(t);
+  const st = dsin(t);
+  // the gripped surface faces away from the good direction (−h), tilted out (+z) / in (−z)
+  let nx = -hx * ct;
+  let ny = -hy * ct;
+  let nz = st;
+  // hands and hooks wrap the surface from the good side; a pushing foot presses from the surface's side
+  let gx = hand || hook ? hx : -hx;
+  let gy = hand || hook ? hy : -hy;
+  if (vol) {
+    // square to the volume's face: rotate z toward the hold's offset m from the volume centre by φ
+    let mx = h.x - vol.x;
+    let my = h.y - vol.y;
+    const ml = Math.sqrt(mx * mx + my * my);
+    if (ml > 1e-6) {
+      mx /= ml;
+      my /= ml;
+      const phi = clamp(ml / Math.max(vol.size, 0.05), 0, 1) * 45 * DEG;
+      const c = dcos(phi);
+      const s = dsin(phi);
+      // Rodrigues about a = z × m = (−my, mx, 0)
+      const ax = -my;
+      const ay = mx;
+      const rot = (vx: number, vy: number, vz: number, o: { x: number; y: number; z: number }): void => {
+        const cx = ay * vz;
+        const cy = -ax * vz;
+        const cz = ax * vy - ay * vx;
+        const d = (ax * vx + ay * vy) * (1 - c);
+        o.x = vx * c + cx * s + ax * d;
+        o.y = vy * c + cy * s + ay * d;
+        o.z = vz * c + cz * s;
+      };
+      rot(nx, ny, nz, ROT);
+      nx = ROT.x;
+      ny = ROT.y;
+      nz = ROT.z;
+      // the grip direction stays in the wall plane: the in-plane part of the rotated tangent
+      rot(gx, gy, 0, ROT);
+      const gl = Math.sqrt(ROT.x * ROT.x + ROT.y * ROT.y);
+      if (gl > 1e-6) {
+        gx = ROT.x / gl;
+        gy = ROT.y / gl;
+      }
+    }
+  }
+  const nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+  out.nx = nx / nl;
+  out.ny = ny / nl;
+  out.nz = nz / nl;
+  out.gx = gx;
+  out.gy = gy;
+  return out;
+}
+const ROT = { x: 0, y: 0, z: 0 };
 
 /** Bolt → carabiner point where the rope (and the clipping hand) goes. */
 export function clipPoint(q: QuickdrawDef, out: Vec2): Vec2 {
