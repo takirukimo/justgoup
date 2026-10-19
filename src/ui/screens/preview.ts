@@ -2,7 +2,7 @@
 
 import type { ScreenProps } from '../../core/contracts';
 import { bus } from '../../core/events';
-import { ROUTE_COLORS } from '../../config/brand';
+import { BRAND, ROUTE_COLORS } from '../../config/brand';
 import { gradeWord } from '../../game/grades';
 import { backButton, el, label, setChildren } from '../dom';
 import { icon } from '../icons';
@@ -60,7 +60,7 @@ export function createPreview(ctx: UICtx, props: P): ScreenView<P> {
               ? `BOULDER ${String(run.streak + 1).padStart(2, '0')}`
               : run.mode === 'daily'
                 ? 'TODAY'
-                : 'CHIRAL HQ';
+                : BRAND.gym;
     setChildren(
       card,
       el('div', 'pv-row1', label(`${mode} · ${runBits}${wall.style ? ` · ${wall.style}` : ''}`, 'pv-kicker'), el('span', 'pv-read', icon('eye'), 'READ THE LINE')),

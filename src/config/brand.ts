@@ -27,7 +27,8 @@ export const BRAND = {
   /** Game title (owner's decision: STEIBOCK, Swiss German for ibex). */
   game: 'STEIBOCK',
   tagline: 'BY CHIRAL SPORTS',
-  gym: 'CHIRAL HQ',
+  /** The gym the game is set in (owner: no "HQ"). */
+  gym: 'CHIRAL SPORTS',
   guideName: 'Steini',
 
   /** CHIRAL SPORTS pink (official). */

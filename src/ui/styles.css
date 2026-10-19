@@ -1000,107 +1000,64 @@
 
 /* ───────────────────────────── splash ───────────────────────────── */
 
+/* The key art full-bleed; the STEIBOCK lockup and TAP TO START sit low, over the dark of the
+   climber's trousers, with a scrim under them so they read on any crop. */
 .scr-splash {
   pointer-events: auto;
   background: var(--c-basalt);
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
+  gap: clamp(26px, 5.5cqh, 52px);
   text-align: center;
   padding-top: calc(var(--safe-t) + 22px);
-  padding-bottom: calc(var(--safe-b) + 22px);
+  padding-bottom: calc(var(--safe-b) + clamp(30px, 6.5cqh, 64px));
 }
 .splash-bg {
   position: absolute !important;
   inset: 0;
   overflow: hidden;
   pointer-events: none;
+  background: var(--c-basalt);
 }
-.topo-drift {
+.splash-art {
   position: absolute;
-  inset: -12%;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 50% 30%;
+  animation:
+    art-in 2.4s var(--ease) both,
+    art-drift 26s ease-in-out 2.4s infinite alternate;
 }
-.topo-a {
-  opacity: 0.075;
-  animation: topo-drift-a 48s ease-in-out infinite alternate;
+@keyframes art-in {
+  from {
+    opacity: 0;
+    transform: scale(1.06);
+  }
 }
-.topo-b {
-  opacity: 0.035;
-  transform: scale(1.7) rotate(14deg);
-  animation: topo-drift-b 70s ease-in-out infinite alternate;
+@keyframes art-drift {
+  from {
+    transform: scale(1);
+  }
+  to {
+    transform: scale(1.045) translate3d(0, -0.8%, 0);
+  }
 }
-.splash-sweep {
-  position: absolute;
-  inset: -12%;
-  background: linear-gradient(180deg, transparent 0%, rgba(var(--c-signal-rgb), 0) 38%, rgba(var(--c-signal-rgb), 0.9) 50%, rgba(var(--c-signal-rgb), 0) 62%, transparent 100%);
-  background-size: 100% 250%;
-  background-repeat: no-repeat;
-  -webkit-mask-image: var(--topo);
-  mask-image: var(--topo);
-  -webkit-mask-size: cover;
-  mask-size: cover;
-  -webkit-mask-position: center;
-  mask-position: center;
-  opacity: 0.55;
-  animation: topo-drift-a 48s ease-in-out infinite alternate, sweep 6.5s linear infinite;
-}
-.splash-vig {
+.splash-scrim {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(ellipse 80% 55% at 50% 46%, transparent 0%, rgba(13, 14, 16, 0.55) 70%, rgba(13, 14, 16, 0.95) 100%),
-    linear-gradient(180deg, rgba(13, 14, 16, 0.6), transparent 22%, transparent 78%, rgba(13, 14, 16, 0.8));
-}
-@keyframes topo-drift-a {
-  from {
-    transform: translate3d(-2%, -1.5%, 0) scale(1.02);
-  }
-  to {
-    transform: translate3d(2%, 1.5%, 0) scale(1.08);
-  }
-}
-@keyframes topo-drift-b {
-  from {
-    transform: scale(1.7) rotate(14deg) translate3d(-3%, 0, 0);
-  }
-  to {
-    transform: scale(1.8) rotate(18deg) translate3d(3%, 2%, 0);
-  }
-}
-@keyframes sweep {
-  from {
-    background-position: 0 100%;
-  }
-  to {
-    background-position: 0 0%;
-  }
-}
-.splash-frame {
-  position: absolute !important;
-  inset: calc(var(--safe-t) + 12px) calc(var(--safe-r) + 12px) calc(var(--safe-b) + 12px) calc(var(--safe-l) + 12px);
-  pointer-events: none;
-}
-.splash-top {
-  display: flex;
-  justify-content: space-between;
-  width: 100%;
-  padding: 0 8px;
+    linear-gradient(180deg, rgba(13, 14, 16, 0.42) 0%, rgba(13, 14, 16, 0) 16%),
+    linear-gradient(180deg, rgba(13, 14, 16, 0) 42%, rgba(13, 14, 16, 0.55) 62%, rgba(13, 14, 16, 0.9) 84%, rgba(13, 14, 16, 0.97) 100%);
 }
 .splash-center {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 26px;
-  margin-top: -3cqh;
 }
-.splash-sub {
-  font-family: var(--f-mono);
-  font-size: 9.5px;
-  font-weight: 500;
-  letter-spacing: 0.34em;
-  margin-right: -0.34em;
-  text-transform: uppercase;
-  color: var(--c-fog);
-  animation: splash-fade 0.9s var(--ease) 1.25s both;
+.splash-center .lk-title {
+  text-shadow: 0 2px 24px rgba(0, 0, 0, 0.55);
 }
 /* Entrance: the horn mark rises in, the letters assemble from a wider spread (transform +
    opacity only, so it stays smooth), then the brand line draws its rules outwards. */
@@ -1194,18 +1151,6 @@
   50% {
     opacity: 0.5;
   }
-}
-.splash-legal {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 6px 16px;
-  width: 100%;
-  padding: 0 8px;
-}
-.splash-legal .t-label {
-  font-size: 8.5px;
-  color: var(--c-fog);
 }
 .splash-hit {
   position: absolute !important;
@@ -5402,11 +5347,6 @@
   }
   .jgu-ui .fa-bag {
     display: none;
-  }
-  /* narrow phones: the two legal lines stack, centred, instead of running into each other */
-  .splash-legal {
-    flex-direction: column;
-    align-items: center;
   }
   .screens,
   .guide-layer {

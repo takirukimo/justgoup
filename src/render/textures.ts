@@ -380,7 +380,7 @@ export function createWallTextures(o: WallTextureOpts): WallTextureSet {
     }
   }
 
-  // ── 5. tone-on-tone wordmark + logo mark (glossier paint: shows in roughness + height) ──
+  // ── 5. tone-on-tone logo mark (glossier paint: shows in roughness + height) ──
   drawWallBranding(o, { A, Hh, R }, X, Y, M);
 
   // ── 6. panel seams ──
@@ -700,64 +700,48 @@ function drawWallBranding(
   Y: (y: number) => number,
   M: (m: number) => number,
 ): void {
-  // Tone-on-tone CHIRAL SPORTS artwork in a slightly glossier paint: it reads in the albedo as a
-  // whisper, in the roughness as a sheen when the key light grazes it, and as a hair of relief.
+  // The tone-on-tone CHIRAL mark in a slightly glossier paint: it reads in the albedo as a whisper,
+  // in the roughness as a sheen when the key light grazes it, and as a hair of relief. No lettering
+  // on the climbing wall itself (owner): the CHIRAL SPORTS wordmark lives on the sign, pads and banners.
   const tone = WALL.logoTone;
   const halfW = o.width / 2;
 
-  // kind: 'word' horizontal wordmark (x = centre), 'vword' vertical wordmark reading top → bottom
-  // like the tee's back print (x = column's left edge), 'mark' the two-swoosh mark (x = left edge),
-  // 'lockup' mark + wordmark (x = left edge). y = TOP edge, size = letter / mark height (m).
-  type Art = { kind: 'word' | 'vword' | 'mark' | 'lockup'; x: number; y: number; size: number };
+  // x = the mark's left edge, y = its TOP edge, size = its height (m)
+  type Art = { x: number; y: number; size: number };
   const arts: Art[] = [];
   const sections = wallSections(o);
   if (o.mode === 'boulder' && sections.length > 1) {
-    // folded wall: every piece of art sits inside one flat section (never broken over a fold) —
-    // the wordmark high on the longest section, the mark low on the right of the section the start is on
-    const wordW = Math.min(o.width - 0.7, 4.1);
-    const wordH = wordW / BRAND_ASPECT.word;
+    // folded wall: the mark sits inside one flat section (never broken over a fold), low on the
+    // right of the first section after the longest one that has room for it
     let best = sections[0];
     for (const sec of sections) if (sec.y1 - sec.y0 > best.y1 - best.y0) best = sec;
-    if (best.y1 - best.y0 > wordH + 0.3) arts.push({ kind: 'word', x: 0, y: best.y1 - Math.min(0.32, (best.y1 - best.y0 - wordH) / 2), size: wordH });
     const markW = Math.min(1.55, o.width * 0.34);
     const markH = markW / BRAND_ASPECT.mark;
     for (const sec of sections) {
       if (sec === best || sec.y1 - sec.y0 < markH + 0.24) continue;
-      arts.push({ kind: 'mark', x: halfW - 0.32 - markW, y: sec.y0 + (sec.y1 - sec.y0 + markH) / 2, size: markH });
+      arts.push({ x: halfW - 0.32 - markW, y: sec.y0 + (sec.y1 - sec.y0 + markH) / 2, size: markH });
       break;
     }
   } else if (o.mode === 'boulder') {
-    // the wordmark spans the upper wall; a large mark sits low on the right, clear of the start
-    const wordW = Math.min(o.width - 0.7, 4.1);
-    arts.push({ kind: 'word', x: 0, y: Math.min(o.wallHeight - 0.22, 4.3), size: wordW / BRAND_ASPECT.word });
+    // a large mark low on the right, clear of the start
     const markW = Math.min(1.85, o.width * 0.4);
-    arts.push({ kind: 'mark', x: halfW - 0.32 - markW, y: 2.28, size: markW / BRAND_ASPECT.mark });
+    arts.push({ x: halfW - 0.32 - markW, y: 2.28, size: markW / BRAND_ASPECT.mark });
   } else {
-    // lead tower: the tee's vertical wordmark runs down the right side, a large mark mid-height
-    // on the left and the lockup up at the chains
-    const vh = Math.min(0.44, o.width * 0.1);
-    arts.push({ kind: 'vword', x: halfW - 0.24 - vh, y: Math.min(o.wallHeight - 1.6, 12.9), size: vh });
+    // lead tower: a large mark mid-height on the left
     const markW = Math.min(1.7, o.width * 0.38);
-    arts.push({ kind: 'mark', x: -halfW + 0.34, y: 7.3, size: markW / BRAND_ASPECT.mark });
-    const lockW = Math.min(o.width - 1.4, 3.0);
-    arts.push({ kind: 'lockup', x: -halfW + 0.34, y: Math.min(o.wallHeight - 0.62, 14.38), size: lockW / BRAND_ASPECT.lockup });
+    arts.push({ x: -halfW + 0.34, y: 7.3, size: markW / BRAND_ASPECT.mark });
   }
 
   for (const a of arts) {
     // skip artwork that doesn't touch this segment (rope walls are split into several textures)
-    const len = a.kind === 'vword' ? a.size * BRAND_ASPECT.word : a.size;
-    if (a.y - len > o.y1 + 0.05 || a.y < o.y0 - 0.05) continue;
+    if (a.y - a.size > o.y1 + 0.05 || a.y < o.y0 - 0.05) continue;
     for (const layer of [L.A, L.Hh, L.R]) {
       const ctx = layer.ctx;
       const isA = layer === L.A;
       const isH = layer === L.Hh;
       ctx.save();
       ctx.fillStyle = isA ? tone : isH ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.14)';
-      const px = M(a.size);
-      if (a.kind === 'word') drawWordmark(ctx, X(a.x), Y(a.y), px, 'center');
-      else if (a.kind === 'vword') drawWordmarkVertical(ctx, X(a.x), Y(a.y), px);
-      else if (a.kind === 'lockup') drawLockup(ctx, X(a.x), Y(a.y), px);
-      else drawMark(ctx, X(a.x), Y(a.y), px * BRAND_ASPECT.mark);
+      drawMark(ctx, X(a.x), Y(a.y), M(a.size) * BRAND_ASPECT.mark);
       ctx.restore();
     }
   }
@@ -782,7 +766,7 @@ function drawSpecDetails(
   ctx.textBaseline = 'alphabetic';
   // per-panel labels + registration crosses
   for (const p of panels) {
-    const label = `${BRAND.name} // PANEL ${String(p.no).padStart(2, '0')} // ${Math.round(p.angle)}°`;
+    const label = `PANEL ${String(p.no).padStart(2, '0')} // ${Math.round(p.angle)}°`;
     ctx.fillStyle = ink;
     ctx.fillText(label, X(p.x0) + M(0.035), Y(p.y0) - M(0.03));
     // registration cross at the panel's top-right
@@ -838,7 +822,7 @@ function drawSpecDetails(
     ctx.fillRect(bx, Y(by) - lineH * 3.2, Math.max(2, M(0.004)), lineH * 3.1);
     ctx.fillStyle = ink;
     const wallNo = String(o.wallNo ?? 1).padStart(2, '0');
-    ctx.fillText(`${BRAND.gym} — ${o.mode === 'rope' ? 'LEAD' : 'WALL'} ${wallNo}`, bx + M(0.016), Y(by) - lineH * 2.25);
+    ctx.fillText(`${o.mode === 'rope' ? 'LEAD' : 'WALL'} ${wallNo}`, bx + M(0.016), Y(by) - lineH * 2.25);
     ctx.fillStyle = inkDim;
     const secs = wallSections(o);
     const angleText = secs.length > 1 ? `PROFILE ${secs.map((q) => Math.round(q.angle)).join('/')}°` : `ANGLE ${angle >= 0 ? '+' : ''}${angle}°`;
@@ -1328,28 +1312,16 @@ export function createLabelAtlas(color: string, gradeText: string, name: string,
 export const SIGN_ASPECT = 8;
 
 /**
- * Backlit CHIRAL HQ sign: the official lockup, a hairline divider and "HQ", white on transparent
- * (used as an emissive map; the renderer tints it warm white).
+ * Backlit CHIRAL SPORTS sign: the official lockup, white on transparent (used as an emissive map;
+ * the renderer tints it CHIRAL pink).
  */
 export function signTexture(): THREE.CanvasTexture {
   const W = 2048;
   const H = W / SIGN_ASPECT;
   const ctx = ctx2d(makeCanvas(W, H));
   ctx.fillStyle = '#fff';
-  ctx.strokeStyle = '#fff';
-  const lockH = 124;
-  const hqCap = lockH * 0.8;
-  const hqOpts = { weight: 1.05, tracking: 1.7 };
-  const gap = lockH * 0.55;
-  const total = lockH * BRAND_ASPECT.lockup + gap * 2 + 5 + measureStrokeText('HQ', hqCap, hqOpts);
-  let x = (W - total) / 2;
-  const y = (H - lockH) / 2;
-  x += drawLockup(ctx, x, y, lockH) + gap;
-  ctx.globalAlpha = 0.5;
-  ctx.fillRect(x, y - lockH * 0.08, 5, lockH * 1.16);
-  x += 5 + gap;
-  ctx.globalAlpha = 0.8;
-  drawStrokeText(ctx, 'HQ', x, y + lockH - hqCap, hqCap, hqOpts);
+  const lockH = 140;
+  drawLockup(ctx, (W - lockH * BRAND_ASPECT.lockup) / 2, (H - lockH) / 2, lockH);
   return canvasTexture(ctx.canvas, { srgb: true, anisotropy: 4 });
 }
 

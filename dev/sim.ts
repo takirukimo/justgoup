@@ -59,7 +59,7 @@ function load(): void {
   lastEvents = [];
   sim.start();
   $('name').textContent = b.name;
-  $('meta').textContent = `CHIRAL HQ · ${b.mode === 'rope' ? 'LEAD TOWER' : 'BOULDER'} · SEED ${b.seed.toString(36).toUpperCase()}`;
+  $('meta').textContent = `CHIRAL SPORTS · ${b.mode === 'rope' ? 'LEAD TOWER' : 'BOULDER'} · SEED ${b.seed.toString(36).toUpperCase()}`;
   $('angle').textContent = `${b.wallAngle > 0 ? '+' : ''}${b.wallAngle}°`;
   const chip = $('grade');
   chip.textContent = `${gradeLabel(b.grade)} · ${fontGrade(b.grade)}`;

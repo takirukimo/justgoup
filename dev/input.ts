@@ -61,7 +61,7 @@ function load(): void {
   renderer.setCameraMode('follow', { instant: true });
   restartAt = -1;
   $('name').textContent = `${b.name} · ${gradeLabel(b.grade)}`;
-  $('meta').textContent = `CHIRAL HQ · INPUT LAB · ${b.mode === 'rope' ? 'LEAD' : 'BOULDER'} ${b.wallAngle > 0 ? '+' : ''}${b.wallAngle}° · SEED ${seed}`;
+  $('meta').textContent = `CHIRAL SPORTS · INPUT LAB · ${b.mode === 'rope' ? 'LEAD' : 'BOULDER'} ${b.wallAngle > 0 ? '+' : ''}${b.wallAngle}° · SEED ${seed}`;
 }
 
 function pushLog(s: string): void {
