@@ -63,8 +63,8 @@ describe('defaultProfile', () => {
     expect(p.head).toBe('ibex');
     expect(p.colorway).toBe('basalt');
     expect(p.chalk).toBe('classic');
-    expect(p.unlocked.heads).toEqual(['ibex']);
-    expect(p.unlocked.colorways).toEqual(['basalt', 'glacier']);
+    expect(p.unlocked.heads).toEqual(['ibex', 'human']); // the plain human (CHIRAL cap) is free from the start
+    expect(p.unlocked.colorways).toEqual(['basalt', 'white', 'pink', 'glacier']); // the three CHIRAL tees + glacier
     expect(p.unlocked.chalks).toEqual(['classic']);
     expect(p.stats.totalScore).toBe(0);
     expect(p.myProblems).toEqual([]);
@@ -76,7 +76,7 @@ describe('defaultProfile', () => {
     const b = defaultProfile();
     a.unlocked.heads.push('goat');
     a.best.daily['2026-10-17'] = 5;
-    expect(b.unlocked.heads).toEqual(['ibex']);
+    expect(b.unlocked.heads).toEqual(['ibex', 'human']);
     expect(b.best.daily).toEqual({});
   });
 });
@@ -91,7 +91,7 @@ describe('evaluateUnlocks', () => {
     const p = defaultProfile();
     p.tutorialDone = true;
     expect(evaluateUnlocks(p)).toEqual([{ kind: 'head', id: 'marmot', name: 'Marmot' }]);
-    expect(p.unlocked.heads).toEqual(['ibex', 'marmot']);
+    expect(p.unlocked.heads).toEqual(['ibex', 'marmot', 'human']);
   });
 
   it('unlocks by lifetime points across heads, colorways and chalks (heads first)', () => {
@@ -197,15 +197,15 @@ describe('migrateProfile / loadProfile', () => {
     expect(p.head).toBe('ibex');
     expect(p.colorway).toBe('basalt');
     expect(p.chalk).toBe('classic');
-    expect(p.unlocked.heads).toEqual(['ibex', 'eagle']);
-    expect(p.unlocked.colorways).toEqual(['basalt', 'glacier']);
+    expect(p.unlocked.heads).toEqual(['ibex', 'eagle', 'human']);
+    expect(p.unlocked.colorways).toEqual(['basalt', 'white', 'pink', 'glacier']);
     expect(p.unlocked.chalks).toEqual(['classic']);
   });
 
   it('keeps an equipped item that is unlocked', () => {
     const p = migrateProfile({ head: 'eagle', unlocked: { heads: ['eagle'] } });
     expect(p.head).toBe('eagle');
-    expect(p.unlocked.heads).toEqual(['ibex', 'eagle']);
+    expect(p.unlocked.heads).toEqual(['ibex', 'eagle', 'human']);
   });
 
   it('sanitises numbers, settings, daily bests and drafts', () => {

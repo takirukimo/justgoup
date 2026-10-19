@@ -588,6 +588,29 @@ describe('SupabaseBackend', () => {
     expect((m.calls[0].body as { id: string }).id).toBe('0f0f0f0f-aaaa-4bbb-8ccc-123456789abc');
   });
 
+  it('keeps a human-head run on a project whose schema predates the human head', async () => {
+    const m = mockFetch((req) => {
+      if (req.url.endsWith('/rpc/score_rank')) return { body: 4 };
+      const head = (req.body as { head?: string }).head;
+      return head === 'human'
+        ? { status: 400, body: { code: '23514', message: 'new row for relation "scores" violates check constraint "scores_head_check"' } }
+        : { status: 201 };
+    });
+    const b = new SupabaseBackend(URL_, KEY, { fetch: m.fn });
+    const warn = console.warn;
+    console.warn = () => undefined;
+    try {
+      expect(await b.submitScore(run('Gipfel Gabi', 777, { head: 'human' }))).toEqual({ rank: 4 });
+    } finally {
+      console.warn = warn;
+    }
+    expect(m.calls.map((c) => (c.body as { head?: string } | undefined)?.head ?? null)).toEqual(['human', 'ibex', null]);
+    expect((m.calls[0].body as { id: string }).id).toBe((m.calls[1].body as { id: string }).id); // the same row
+    // other rejections still fail
+    const bad = mockFetch(() => ({ status: 400, body: { code: '23514', message: 'violates check constraint "scores_score_check"' } }));
+    await expect(new SupabaseBackend(URL_, KEY, { fetch: bad.fn }).submitScore(run('X', 1, { head: 'human' }))).rejects.toThrow();
+  });
+
   it('queries leaderboards and maps rows to camelCase', async () => {
     const rows = [
       { id: 'a', player: 'Föhn', mode: 'daily', score: 900, sends: 1, max_grade: 0, head: 'eagle', daily_key: '2026-10-17', created_at: '2026-10-17T08:00:00Z' },

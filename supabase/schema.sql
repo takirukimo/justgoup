@@ -63,7 +63,7 @@ alter table public.scores add constraint scores_max_grade_check check (max_grade
 
 alter table public.scores drop constraint if exists scores_head_check;
 alter table public.scores add constraint scores_head_check check (
-  head in ('ibex', 'chamois', 'goat', 'marmot', 'snowleopard', 'eagle', 'lynx', 'ram', 'vulture')
+  head in ('ibex', 'chamois', 'goat', 'marmot', 'snowleopard', 'eagle', 'lynx', 'ram', 'vulture', 'human')
 ) not valid;
 
 -- daily_key: YYYY-MM-DD, present exactly when mode = 'daily'.

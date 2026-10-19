@@ -144,10 +144,13 @@ export class SupabaseBackend implements BackendAPI {
     const entry = normalizeOutgoingScore(e);
     const id = isUuid(entry.id) ? entry.id : uuid();
     try {
-      await this.request('POST', 'scores', { body: scoreToRow(entry, id), prefer: 'return=minimal' });
+      await this.insertScore(entry, id);
     } catch (err) {
-      // A retried insert whose first attempt already landed: same id → unique violation. Fine.
-      if (!isDuplicate(err)) throw err;
+      // A project still on an older supabase/schema.sql rejects heads added later (the 'human'
+      // climber) with its head check: keep the run, filed under the default head.
+      if (!isHeadRejected(err) || entry.head === 'ibex') throw err;
+      console.warn('[net] this Supabase project predates the', entry.head, 'head (re-run supabase/schema.sql); saved the score as ibex');
+      await this.insertScore({ ...entry, head: 'ibex' }, id);
     }
     try {
       const rank = await this.request<unknown>('POST', 'rpc/score_rank', {
@@ -157,6 +160,15 @@ export class SupabaseBackend implements BackendAPI {
       return { rank: Number.isInteger(n) && n >= 1 ? n : null };
     } catch {
       return { rank: null }; // the score is saved; a missing rank is cosmetic
+    }
+  }
+
+  private async insertScore(entry: ScoreEntry, id: string): Promise<void> {
+    try {
+      await this.request('POST', 'scores', { body: scoreToRow(entry, id), prefer: 'return=minimal' });
+    } catch (err) {
+      // A retried insert whose first attempt already landed: same id → unique violation. Fine.
+      if (!isDuplicate(err)) throw err;
     }
   }
 
@@ -301,6 +313,13 @@ function httpError(what: string, status: number, body: string): BackendError {
     return new BackendError(`${base} — is supabase/schema.sql installed on this project?`, 'invalid', { status, detail, retryable: false });
   }
   return new BackendError(base, 'invalid', { status, detail, retryable: false });
+}
+
+/** The insert broke the scores table's head check (23514 on scores_head_check). */
+function isHeadRejected(err: unknown): boolean {
+  if (!(err instanceof BackendError)) return false;
+  const d = err.detail ?? '';
+  return d.startsWith('23514') && /head/i.test(d);
 }
 
 function isDuplicate(err: unknown): boolean {

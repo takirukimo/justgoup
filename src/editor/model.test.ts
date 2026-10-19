@@ -195,7 +195,8 @@ describe('drafts', () => {
     delete d.profile;
     d.wallAngle = 20;
     expect(h.undo(d)).toBe(true);
-    expect(d.profile?.length).toBe(3);
+    const restored: BoulderDef = d; // (TS narrowed d.profile to undefined at the delete above)
+    expect(restored.profile?.length).toBe(3);
     expect(d.wallAngle).toBe(60);
   });
 

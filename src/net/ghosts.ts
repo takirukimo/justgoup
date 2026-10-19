@@ -26,6 +26,8 @@ export const GHOST_CLIMBERS: readonly GhostClimber[] = [
   { name: 'Crimpmeister', head: 'chamois', level: 0.82 },
   { name: 'Föhn', head: 'eagle', level: 0.68 },
   { name: 'Mira K.', head: 'lynx', level: 0.56 },
+  // the plain human climber in the black CHIRAL SPORTS cap (shows on the boulder and rope boards)
+  { name: 'Gipfel Gabi', head: 'human', level: 0.48 },
   { name: 'Basalt Bob', head: 'marmot', level: 0.42 },
   { name: 'Gneiss Guy', head: 'goat', level: 0.3 },
   { name: 'Dyno Dani', head: 'snowleopard', level: 0.2 },
