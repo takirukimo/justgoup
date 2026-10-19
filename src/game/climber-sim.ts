@@ -405,6 +405,16 @@ export class ClimberSim implements ClimberSimAPI {
   private readonly prmScratch: StaticsParams;
   private readonly ax = new Float64Array(4);
   private readonly ay = new Float64Array(4);
+  /**
+   * The settled stance a hand drag started from (the autonomic posture for the remaining contacts) and
+   * that hand (−1: none). While the hand reaches past its envelope the body stretches toward it; a throw
+   * released from the stretch is judged from this stance (ClimberSim.throwPlan): the climber sinks back
+   * into it and pops, so the stretch neither eats the legs' push nor shrinks the throw it previews.
+   */
+  private readonly stance: Pose = { px: 0, py: 1, cx: 0, cy: 1.5 };
+  private stanceHand = -1;
+  private readonly sax = new Float64Array(4);
+  private readonly say = new Float64Array(4);
 
   private phase: ClimberPhase = 'idle';
   private acc = 0;
@@ -560,6 +570,7 @@ export class ClimberSim implements ClimberSimAPI {
     this.matchT = 0;
     this.noHandsT = 0;
     this.hipTarget = null;
+    this.stanceHand = -1;
     this.clipped.length = 0;
     this.ropeAnchor = null;
     this.ropeTaut = false;
@@ -663,6 +674,14 @@ export class ClimberSim implements ClimberSimAPI {
     if (L.shakeOut) this.endShakeOut(i);
     if (i < 2) this.forearms[i].release();
     this.retarget();
+    if (i < 2) {
+      // the stance this reach starts from (throws are judged from it, not from the stretch)
+      this.stance.px = this.P.x;
+      this.stance.py = this.P.y;
+      this.stance.cx = this.C.x;
+      this.stance.cy = this.C.y;
+      this.stanceHand = i;
+    } else this.stanceHand = -1;
     this.syncState();
     return true;
   }
@@ -693,6 +712,7 @@ export class ClimberSim implements ClimberSimAPI {
       L.busyT = GAME.clipTime;
       L.busyDraw = q;
       out.push({ type: 'clip', quickdrawId: q.id });
+      this.stanceHand = -1;
       // hold still while the rope goes in: the other three limbs keep the current position
       this.posture.px = this.P.x;
       this.posture.py = this.P.y;
@@ -730,6 +750,7 @@ export class ClimberSim implements ClimberSimAPI {
     } else {
       out.push({ type: 'return', limb, holdId: this.returnLimb(i) });
     }
+    if (this.stanceHand === i) this.stanceHand = -1;
     this.retarget();
     this.syncState();
     return out;
@@ -944,7 +965,7 @@ export class ClimberSim implements ClimberSimAPI {
     const both = o.dragging && this.dynoTarget(1 - i, o.tx, o.ty) === h && canMatch(0, h);
     const hands = both ? [0, 1] : [i];
     const plan = this.throwPlan(hands, h, 1);
-    return { holdId: h.id, kind: both || !(o.hold && !o.busy) ? 'dyno' : 'deadpoint', rise: plan.rise, feasible: plan.need <= plan.vmax + 1e-9 };
+    return { holdId: h.id, kind: both || !(o.hold && !o.busy) ? 'dyno' : 'deadpoint', rise: plan.rise, feasible: plan.reaches };
   }
 
   /** A usable hand hold near (x, y) beyond the static reach of hand i but within throwing range, or null. */
@@ -989,14 +1010,14 @@ export class ClimberSim implements ClimberSimAPI {
     return this.launch([i], h, power);
   }
 
-  /** Most launch speed (m/s) the climber can produce now: legs over their remaining extension + arms. */
-  private launchSpeedMax(): number {
+  /** Most launch speed (m/s) the climber can produce from hip anchors (ax, ay): legs over their remaining extension + arms. */
+  private launchSpeedMax(ax: Float64Array = this.ax, ay: Float64Array = this.ay): number {
     let ext = 0;
     let nf = 0;
     for (let i = 2; i < 4; i++) {
       const L = this.limbs[i];
       if (!(L.hold || L.smear) || L.dragging) continue;
-      ext += Math.max(0, BODY.legMax * 0.97 - Math.hypot(this.ax[i] - L.cx, this.ay[i] - L.cy));
+      ext += Math.max(0, BODY.legMax * 0.97 - Math.hypot(ax[i] - L.cx, ay[i] - L.cy));
       nf++;
     }
     const legs = nf ? Math.sqrt(2 * SIM.dynoLegAccel * (ext / nf)) * (1 - SIM.dynoSteepLegLoss * Math.max(0, this.gs)) : 0;
@@ -1006,7 +1027,7 @@ export class ClimberSim implements ClimberSimAPI {
     return Math.sqrt(legs * legs + arms * arms);
   }
 
-  private readonly planOut = { vx: 0, vy: 0, tApex: 0, rise: 0, speed: 0, need: 0, vmax: 0, tx: [0, 0], ty: [0, 0] };
+  private readonly planOut = { vx: 0, vy: 0, tApex: 0, rise: 0, speed: 0, need: 0, vmax: 0, reaches: true, tx: [0, 0], ty: [0, 0] };
 
   /**
    * Ballistic launch for moving hands toward h: the body displacement that brings each hand inside its
@@ -1017,8 +1038,14 @@ export class ClimberSim implements ClimberSimAPI {
     const u = this.frameNow();
     const o = this.planOut;
     const both = hands.length === 2;
+    // a hand reaching past its envelope has stretched the body toward the hold: judge the throw from the
+    // settled stance the reach started from (stanceHand), not from the stretch
+    const fromStance = this.stanceHand >= 0 && hands.includes(this.stanceHand);
+    if (fromStance) computeAnchors(this.stance, this.sax, this.say);
     let Dx = 0;
     let Dy = 0;
+    let Sx = 0;
+    let Sy = 0;
     for (let k = 0; k < hands.length; k++) {
       const i = hands[k];
       const c = contactPoint(h, i, both, this.releaseTmp);
@@ -1031,10 +1058,20 @@ export class ClimberSim implements ClimberSimAPI {
       const need = en.excess > 0 ? en.excess + SIM.dynoMargin : 0;
       Dx += (vx / l) * need;
       Dy += (vy / l) * need;
+      if (fromStance) {
+        const es = envEvalOn(this.prof, i, this.sax[i], this.say[i], u.x, u.y, c.x, c.y);
+        const wx = c.x - this.sax[i];
+        const wy = c.y - this.say[i];
+        const m = Math.hypot(wx, wy) || 1;
+        const ns = es.excess > 0 ? es.excess + SIM.dynoMargin : 0;
+        Sx += (wx / m) * ns;
+        Sy += (wy / m) * ns;
+      }
     }
     Dx /= hands.length;
     Dy /= hands.length;
-    o.rise = Math.hypot(Dx, Dy);
+    // the preview's rise: beyond the static reach of the stance the throw starts from
+    o.rise = fromStance ? Math.max(Math.hypot(Dx, Dy), Math.hypot(Sx, Sy) / hands.length) : Math.hypot(Dx, Dy);
     const gp = Math.max(0.5, SIM.gravity * this.gc);
     const hop = Math.max(Dy + SIM.dynoAimPast, SIM.dynoMinHop, SIM.dynoLateralHop * Math.abs(Dx));
     let vy = Math.sqrt(2 * gp * hop);
@@ -1045,6 +1082,13 @@ export class ClimberSim implements ClimberSimAPI {
     vx *= p;
     vy *= p;
     o.vmax = this.launchSpeedMax();
+    if (fromStance) {
+      // sink back into the stance and pop: the legs' full push from there, less the height (in-plane) the
+      // stretch had already gained, which the body has to climb again on the way up (energy)
+      const lift = MP * (this.P.y - this.stance.py) + MC * (this.C.y - this.stance.cy);
+      const vs = this.launchSpeedMax(this.sax, this.say);
+      o.vmax = Math.max(o.vmax, Math.sqrt(Math.max(0, vs * vs - 2 * gp * Math.max(0, lift))));
+    }
     let sp = Math.hypot(vx, vy);
     o.need = sp;
     if (sp > o.vmax) {
@@ -1056,12 +1100,53 @@ export class ClimberSim implements ClimberSimAPI {
     o.vy = vy;
     o.speed = sp;
     o.tApex = Math.max(0.04, vy / gp);
+    o.reaches = this.throwReaches(hands, o, gp, u);
     return o;
+  }
+
+  /**
+   * Does this launch get the throwing hand(s) into the catch window (SIM.dynoCatchTol) at the apex? The
+   * body is shifted rigidly to the apex of the (capped) launch; contacts that stay on — a deadpoint's other
+   * hand, the feet the legs still reach (launch()'s rules) — hold it back at their envelope edge.
+   */
+  private throwReaches(hands: number[], o: typeof this.planOut, gp: number, u: Vec2): boolean {
+    const sx = o.vx * o.tApex;
+    const sy = o.vy * o.tApex - 0.5 * gp * o.tApex * o.tApex;
+    const ex = (i: number, t: number, x: number, y: number): number => envEvalOn(this.prof, i, this.ax[i] + sx * t, this.ay[i] + sy * t, u.x, u.y, x, y).excess;
+    // the furthest fraction of the shift a staying contact allows (bisection on its envelope edge)
+    const limit = (i: number, x: number, y: number): number => {
+      if (ex(i, 1, x, y) <= 1e-3) return 1;
+      let lo = 0;
+      let hi = 1;
+      for (let k = 0; k < 7; k++) {
+        const m = (lo + hi) / 2;
+        if (ex(i, m, x, y) <= 1e-3) lo = m;
+        else hi = m;
+      }
+      return lo;
+    };
+    let t = 1;
+    let deadpoint = hands.length === 1;
+    if (deadpoint) {
+      const O = this.limbs[1 - hands[0]];
+      if (!O.hold || O.busy) deadpoint = false;
+      else if (ex(1 - hands[0], 1, O.cx, O.cy) > 0.06) deadpoint = false; // it lets go too: a dyno
+      else t = Math.min(t, limit(1 - hands[0], O.cx, O.cy));
+    }
+    if (deadpoint)
+      for (let i = 2; i < 4; i++) {
+        const L = this.limbs[i];
+        if (!(L.hold || L.smear) || L.dragging) continue;
+        if (ex(i, 1, L.cx, L.cy) <= 0.03) t = Math.min(t, limit(i, L.cx, L.cy));
+      }
+    for (let k = 0; k < hands.length; k++) if (ex(hands[k], t, o.tx[k], o.ty[k]) > SIM.dynoCatchTol * 0.85) return false;
+    return true;
   }
 
   private launch(hands: number[], h: HoldDef, power: number): SimEvent[] {
     const out: SimEvent[] = [];
     const plan = this.throwPlan(hands, h, power);
+    this.stanceHand = -1;
     const both = hands.length === 2;
     const u = this.frameNow();
     // where the body will be at the apex (rigid shift), to see which contacts can stay on
@@ -1457,6 +1542,7 @@ export class ClimberSim implements ClimberSimAPI {
       if (h && (i < 2 ? usableByHand(h) : usableByFoot(h))) place[i] = h.id;
     }
     this.autoFill(place);
+    this.stanceHand = -1;
     for (const L of this.limbs) {
       L.busy = false;
       L.busyDraw = null;

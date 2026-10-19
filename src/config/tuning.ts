@@ -417,9 +417,14 @@ export const SIM = {
   dynoCatchPump: 0.05,
   /** Fraction of the body's speed left after a caught throw (the arms absorb the rest). */
   dynoKeep: 0.35,
-  /** Release flick (wall-local m/s along the line to the hold) that commits a throw, and the flick of an ideal one. */
+  /**
+   * Release flick (wall-local m/s along the line to the hold) that commits a throw, and the flick of an
+   * ideal one (power 1; power = flick / ref, clamped 0.6–1.4, mirrored by input/release.ts flickPower).
+   * A phone flick measures ≈4–12 m/s on the wall: a 6 m/s reference spreads power over that range
+   * (4 → 0.67, 6 → 1, 8 → 1.33) instead of saturating every real flick at 1.4.
+   */
   dynoMinFlick: 1.2,
-  dynoFlickRef: 3.0,
+  dynoFlickRef: 6.0,
   /** Longest flight (s) before the sim calls it a miss. */
   dynoMaxFlight: 1.2,
 

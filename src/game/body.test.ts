@@ -812,6 +812,70 @@ describe('deadpoints and dynos (research §2.5, §6.6)', () => {
     expect(flick().map((e) => e.type)).toEqual(['return']);
   });
 
+  it('a hand held past its reach stretches the body, but the throw is judged from the stance it left: the preview neither shrinks nor lies', () => {
+    const trial = (y: number) => {
+      const h = hold('h1', 0.25, y, 'jug', 0.1, 'hand');
+      const sim = new ClimberSim(deadpointWall(h), { sweat: 0 });
+      sim.start();
+      run(sim, 1);
+      const p0 = sim.getState().pelvis.y;
+      expect(sim.beginDrag('RH')).toBe(true);
+      sim.dragTo('RH', h);
+      run(sim, 0.1);
+      const early = sim.dynoCandidate('RH', h)!;
+      for (let k = 0; k < 48; k++) {
+        sim.dragTo('RH', h);
+        sim.step(1 / 60);
+      }
+      const stretch = sim.getState().pelvis.y - p0;
+      const late = sim.dynoCandidate('RH', h)!;
+      const from = sim.getState().limbs.RH.pos;
+      const l = Math.hypot(h.x - from.x, h.y - from.y);
+      const v = SIM.dynoFlickRef;
+      const ev = sim.endDrag('RH', { velocity: { x: ((h.x - from.x) / l) * v, y: ((h.y - from.y) / l) * v } });
+      run(sim, 1.2, ev);
+      return { stretch, early, late, caught: ev.some((e) => e.type === 'dyno-catch'), short: ev.some((e) => e.type === 'dyno-miss' && e.reason === 'short') };
+    };
+    const near = trial(3.15);
+    // the body followed the reaching hand up (reach pull) …
+    expect(near.stretch).toBeGreaterThan(0.1);
+    // … but the preview still measures the throw from the stance: the rise doesn't shrink with the stretch
+    expect(near.late.holdId).toBe('h1');
+    expect(near.late.rise).toBeGreaterThan(near.early.rise - 0.03);
+    expect(near.late.rise).toBeGreaterThan(0.3);
+    // and it is honest: feasible → caught
+    expect(near.late.feasible).toBe(true);
+    expect(near.caught).toBe(true);
+    // too far from this stance: TOO FAR, and the throw does fall short
+    const far = trial(3.35);
+    expect(far.late.feasible).toBe(false);
+    expect(far.short).toBe(true);
+  });
+
+  it('flick power spreads over real phone flicks (≈4–12 m/s): 6 m/s is an ideal throw, harder flicks commit more', () => {
+    const target = hold('h1', 0.25, 3.0, 'jug', 0.1, 'hand');
+    const power = (speed: number): number => {
+      const sim = crouched(target);
+      expect(sim.beginDrag('RH')).toBe(true);
+      sim.dragTo('RH', { x: 0.25, y: 2.97 });
+      sim.step(1 / 60);
+      const from = sim.getState().limbs.RH.pos;
+      const l = Math.hypot(0.25 - from.x, 2.97 - from.y);
+      const ev = sim.endDrag('RH', { velocity: { x: ((0.25 - from.x) / l) * speed, y: ((2.97 - from.y) / l) * speed } });
+      const s = ev.find((e) => e.type === 'dyno-start');
+      return s && s.type === 'dyno-start' ? s.power : NaN;
+    };
+    const p4 = power(4);
+    const p6 = power(6);
+    const p8 = power(8);
+    expect(p4).toBeGreaterThan(0.6);
+    expect(p4).toBeLessThan(p6);
+    expect(p6).toBeCloseTo(1, 1);
+    expect(p8).toBeGreaterThan(p6);
+    expect(p8).toBeLessThan(1.4);
+    expect(power(20)).toBe(1.4);
+  });
+
   it('dynoCandidate flags a throw the climber cannot make', () => {
     const sim = new ClimberSim(deadpointWall(hold('far', 0.3, 3.85, 'jug', 0.1, 'hand')), { sweat: 0 });
     sim.start();
