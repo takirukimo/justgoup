@@ -28,6 +28,7 @@ export const EDITOR_GLYPHS = {
   clear: S('<path d="M4 6.8h16M9.2 6.8V3.8h5.6v3M6 6.8l1 13.4h10l1-13.4"/><path d="M9.5 11l5 5M14.5 11l-5 5"/>'),
   beta: S('<circle cx="6" cy="18" r="2.2"/><circle cx="12" cy="11" r="2.2"/><circle cx="18" cy="5" r="2.2"/><path d="M7.6 16.3l2.8-3.3M13.6 9.3l2.8-2.6" stroke-dasharray="1.6 1.6"/>'),
   palette: S('<path d="M12 3.5a8.5 8.5 0 1 0 0 17c1.2 0 1.8-.8 1.8-1.7 0-1.3-1.1-1.6-1.1-2.7 0-1 .8-1.6 1.8-1.6h2.4a3.6 3.6 0 0 0 3.6-3.6C20.5 6.8 16.7 3.5 12 3.5z"/><circle cx="7.6" cy="11.4" r="1.1" fill="currentColor" stroke="none"/><circle cx="10" cy="7.4" r="1.1" fill="currentColor" stroke="none"/><circle cx="14.8" cy="7.6" r="1.1" fill="currentColor" stroke="none"/>'),
+  photo: S('<path d="M3.5 8.5h3.6l1.7-2.6h6.4l1.7 2.6h3.6v11h-17z"/><circle cx="12" cy="13.6" r="3.4"/><circle cx="17.6" cy="11" r=".6" fill="currentColor" stroke="none"/>'),
   minus: S('<path d="M5 12h14"/>'),
   plus: S('<path d="M12 5v14M5 12h14"/>'),
 } as const;

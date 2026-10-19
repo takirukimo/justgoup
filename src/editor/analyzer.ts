@@ -3,7 +3,7 @@
 // same code on the main thread in a later task so the UI can paint its "reading" state first.
 
 import type { BetaMove } from '../core/contracts';
-import type { BoulderDef } from '../core/types';
+import type { BoulderDef, RouteStyle } from '../core/types';
 import AnalysisWorker from './analysis.worker?worker&inline';
 import { handleRequest, type AnalysisRequest, type AnalysisResponse } from './analysis';
 
@@ -40,8 +40,8 @@ export class Analyzer {
     });
   }
 
-  generate(seed: number, grade: number): Promise<BoulderDef> {
-    return this.send({ kind: 'generate', id: ++this.seq, seed, grade }).then((r) => {
+  generate(seed: number, grade: number, style?: RouteStyle): Promise<BoulderDef> {
+    return this.send({ kind: 'generate', id: ++this.seq, seed, grade, style }).then((r) => {
       if (r.kind === 'generate') return r.boulder;
       if (r.kind === 'error') throw new Error(r.message);
       throw new Error('unexpected analysis response');

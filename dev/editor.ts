@@ -7,6 +7,8 @@
 //   intro=1        show Steini's first-visit line
 //   q=low|medium|high
 //   auto=fell|sent run the test-climb stand-in automatically (QA scripts)
+//   photo=stub     a stand-in photo importer (src/photo's signature): shows its own screen, then hands
+//                  back a generated problem (photo=cancel: hands back null)
 
 import { GameRenderer } from '../src/render/renderer';
 import { GameUI } from '../src/ui/ui';
@@ -43,6 +45,21 @@ ui.setPortraitProvider((h) => renderer.portrait(h, 160));
 await renderer.init();
 
 const editor = new BoulderEditor(uiRoot, renderer, ui);
+const photo = qs.get('photo');
+if (photo === 'stub' || photo === 'cancel') {
+  editor.photoImporter = ({ root }) =>
+    new Promise((resolve) => {
+      state.events.push('photo');
+      const scr = document.createElement('div');
+      scr.style.cssText = 'position:absolute;inset:0;z-index:30;display:grid;place-items:center;background:rgba(13,14,16,.94);color:#F6F4EF;font:700 18px/1.2 "Barlow Condensed",sans-serif;letter-spacing:.14em;pointer-events:auto';
+      scr.textContent = 'PHOTO IMPORT · STUB';
+      root.appendChild(scr);
+      setTimeout(() => {
+        scr.remove();
+        resolve(photo === 'cancel' ? null : { ...generateBoulder({ seed: 41, grade: 2, style: 'compression', holdsOnVolumes: true }), name: 'From The Photo' });
+      }, 900);
+    });
+}
 const state: NonNullable<Window['__ed']> = { editor, renderer, ui, events: [], lastTest: null, lastPublish: null };
 window.__ed = state;
 

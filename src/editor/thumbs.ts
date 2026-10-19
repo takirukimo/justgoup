@@ -56,6 +56,7 @@ function build(h: ThumbHold, color: string): { tris: Tri[]; minX: number; maxX: 
   const pos = g.getAttribute('position');
   const col = g.getAttribute('color');
   const surf = g.getAttribute('aSurf');
+  const nrm = g.getAttribute('normal');
   const idx = g.getIndex();
   const n = pos.count;
   // yaw then pitch (seen from the front, a little from above and to the left)
@@ -112,6 +113,28 @@ function build(h: ThumbHold, color: string): { tris: Tri[]; minX: number; maxX: 
     ny /= l;
     nz /= l;
     if (nz <= 0.02) continue; // facing away
+    // shade with the mesh's own (smooth) vertex normals where it has them: curved holds read round
+    if (nrm) {
+      let sx = 0;
+      let syy = 0;
+      let sz = 0;
+      for (const v of [a, b, c]) {
+        const x = nrm.getX(v);
+        const y = nrm.getY(v);
+        const z = nrm.getZ(v);
+        const x1 = x * cy + z * sy;
+        const z1 = -x * sy + z * cy;
+        sx += x1;
+        syy += y * cp - z1 * sp;
+        sz += y * sp + z1 * cp;
+      }
+      const ll = Math.hypot(sx, syy, sz);
+      if (ll > 1e-6 && (sx * nx + syy * ny + sz * nz) / ll > 0.2) {
+        nx = sx / ll;
+        ny = syy / ll;
+        nz = sz / ll;
+      }
+    }
     const tone = col ? (col.getX(a) + col.getX(b) + col.getX(c)) / 3 : 1;
     const gloss = surf ? (surf.getW(a) + surf.getW(b) + surf.getW(c)) / 3 : 0;
     const chalk = surf ? (surf.getX(a) + surf.getX(b) + surf.getX(c)) / 3 : 0;

@@ -11,12 +11,13 @@ import './editor.css';
 
 import type { BetaMove, EditorAPI, RendererAPI, UIAPI } from '../core/contracts';
 import { bus } from '../core/events';
-import type { BoulderDef, HoldDef, Vec2 } from '../core/types';
+import type { BoulderDef, HoldDef, RouteStyle, Vec2 } from '../core/types';
 import { clamp, lerp } from '../core/math';
 import { gradeLabel } from '../game/grades';
 import { Analyzer, type SolveResult } from './analyzer';
 import { EditorOverlay, type OverlayGhost, type OverlayState, type Projector } from './overlay';
-import { EditorPanel, type Drawer, type EditorPanelState, type PanelActions, type StatusKind } from './panel';
+import { EditorPanel, SAMPLE_STYLES, type Drawer, type EditorPanelState, type PanelActions, type StatusKind } from './panel';
+import { loadPhotoImport, type OpenPhotoImport } from './photo';
 import { EditorView, type ZoomAnchor } from './view';
 import type { WallCardState } from './wallcard';
 import { exactVolumeShape } from './shapes';
@@ -56,6 +57,7 @@ import {
 import {
   clampToBounds,
   clearanceAt,
+  draftFromSample,
   cleanName,
   cloneDraft,
   createDraft,
@@ -143,19 +145,27 @@ function profileKey(b: BoulderDef): string {
   return `${b.profile ? b.profile.map((p) => `${p.y0}:${p.angle}`).join(',') : ''}|${b.height}`;
 }
 
-function readPrefs(): { snap: boolean; sampleGrade: number } {
+interface Prefs {
+  snap: boolean;
+  sampleGrade: number;
+  /** Kind of bouldering a sample is set as (null: the generator's pick). */
+  sampleStyle: RouteStyle | null;
+}
+
+function readPrefs(): Prefs {
   try {
-    const v = JSON.parse(localStorage.getItem(PREFS_KEY) ?? 'null') as { snap?: unknown; sampleGrade?: unknown } | null;
+    const v = JSON.parse(localStorage.getItem(PREFS_KEY) ?? 'null') as { snap?: unknown; sampleGrade?: unknown; sampleStyle?: unknown } | null;
     return {
       snap: typeof v?.snap === 'boolean' ? v.snap : true,
       sampleGrade: typeof v?.sampleGrade === 'number' && Number.isFinite(v.sampleGrade) ? clamp(Math.round(v.sampleGrade), 0, 10) : 3,
+      sampleStyle: SAMPLE_STYLES.find((s) => s.style === v?.sampleStyle)?.style ?? null,
     };
   } catch {
-    return { snap: true, sampleGrade: 3 };
+    return { snap: true, sampleGrade: 3, sampleStyle: null };
   }
 }
 
-function writePrefs(p: { snap: boolean; sampleGrade: number }): void {
+function writePrefs(p: Prefs): void {
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(p));
   } catch {
@@ -166,6 +176,8 @@ function writePrefs(p: { snap: boolean; sampleGrade: number }): void {
 export class BoulderEditor implements EditorAPI {
   /** Optional: author stamped on published problems (the app may also fill it from the profile). */
   author = '';
+  /** Optional: a photo importer to use instead of src/photo's (harnesses, tests). */
+  photoImporter: OpenPhotoImport | null = null;
 
   private opened = false;
   private draft: BoulderDef = createDraft();
@@ -190,6 +202,9 @@ export class BoulderEditor implements EditorAPI {
   private checkOpen = false;
   private betaOn = false;
   private sampleGrade = 3;
+  private sampleStyle: RouteStyle | null = null;
+  /** The photo importer owns the screen. */
+  private importing = false;
   private generating = false;
 
   private analyzer = new Analyzer();
@@ -257,6 +272,7 @@ export class BoulderEditor implements EditorAPI {
     const prefs = readPrefs();
     this.snap = prefs.snap;
     this.sampleGrade = prefs.sampleGrade;
+    this.sampleStyle = prefs.sampleStyle;
     // zoom anchors are picked through the renderer's ray cast (works across a folded wall's panels)
     this.view.setPicker((x, y) => this.renderer.screenToWall(x, y));
     // holds bolt onto volumes exactly where the renderer seats them (its own volume geometry)
@@ -517,6 +533,7 @@ export class BoulderEditor implements EditorAPI {
       snap: this.snap,
       drawer: this.drawer,
       sampleGrade: this.sampleGrade,
+      sampleStyle: this.sampleStyle,
       generating: this.generating,
       selection: sel ? this.selectionInfo(sel) : null,
     };
@@ -1042,7 +1059,7 @@ export class BoulderEditor implements EditorAPI {
       },
       toggleSnap: () => {
         this.snap = !this.snap;
-        writePrefs({ snap: this.snap, sampleGrade: this.sampleGrade });
+        this.savePrefs();
         this.toast(this.snap ? 'Snap to T-nuts · 0.1 m grid' : 'Free placement');
         this.render();
       },
@@ -1057,10 +1074,16 @@ export class BoulderEditor implements EditorAPI {
       newDraft: () => void this.newDraft(),
       sampleGrade: (delta) => {
         this.sampleGrade = clamp(this.sampleGrade + delta, 0, 10);
-        writePrefs({ snap: this.snap, sampleGrade: this.sampleGrade });
+        this.savePrefs();
         this.render();
       },
       loadSample: () => void this.loadSample(),
+      setSampleStyle: (st) => {
+        this.sampleStyle = st;
+        this.savePrefs();
+        this.render();
+      },
+      importPhoto: () => void this.importPhoto(),
       clearAll: () => void this.clearAll(),
       sizeStart: () => {
         if (this.selected() && this.continuous !== 'size') this.beginContinuous('size');
@@ -1215,14 +1238,15 @@ export class BoulderEditor implements EditorAPI {
     if (this.generating) return;
     const grade = this.sampleGrade;
     if (this.draft.holds.length) {
-      const ok = await this.ui.confirm('Load a sample?', `Replaces the wall with a generated ${gradeLabel(grade)} problem you can remix.`, 'REPLACE', 'CANCEL');
+      const kind = this.sampleStyle ? `${SAMPLE_STYLES.find((x) => x.style === this.sampleStyle)?.label.toLowerCase() ?? ''} ` : '';
+      const ok = await this.ui.confirm('Load a sample?', `Replaces the wall with a generated ${gradeLabel(grade)} ${kind}problem you can remix.`, 'REPLACE', 'CANCEL');
       if (!ok || !this.opened) return;
     }
     this.generating = true;
     this.render();
     const seed = 1 + Math.floor(Math.random() * 0x7ffffffe);
     try {
-      const b = await this.analyzer.generate(seed, grade);
+      const b = await this.analyzer.generate(seed, grade, this.sampleStyle ?? undefined);
       if (!this.opened) return;
       this.draft = normalizeDraft(b);
       this.draft.grade = grade;
@@ -1234,6 +1258,57 @@ export class BoulderEditor implements EditorAPI {
       this.generating = false;
       this.render();
     }
+  }
+
+  private savePrefs(): void {
+    writePrefs({ snap: this.snap, sampleGrade: this.sampleGrade, sampleStyle: this.sampleStyle });
+  }
+
+  /** Photo → route (src/photo): the importer takes the screen, its problem becomes the draft. */
+  private async importPhoto(): Promise<void> {
+    if (this.importing || this.generating) return;
+    const open = this.photoImporter ?? (await loadPhotoImport());
+    if (!this.opened) return;
+    if (!open) {
+      this.toast('Photo import isn’t in this build yet', 'bad');
+      return;
+    }
+    if (this.draft.holds.length) {
+      const ok = await this.ui.confirm('Import from a photo?', 'Your photo’s problem replaces this wall. The current draft will be discarded.', 'IMPORT', 'CANCEL');
+      if (!ok || !this.opened) return;
+    }
+    this.importing = true;
+    this.closeDrawer();
+    this.render();
+    this.saveNow();
+    this.panel?.setAway(true);
+    let b: BoulderDef | null = null;
+    try {
+      b = await open({ root: this.root, renderer: this.renderer, ui: this.ui });
+    } catch {
+      this.toast('Could not read that photo · try another one', 'bad');
+    } finally {
+      this.importing = false;
+      this.panel?.setAway(false);
+    }
+    if (!this.opened) return;
+    // the importer may have used the 3D view: the editor's wall and camera come back
+    if (this.ui.current !== 'editor') this.ui.show('editor', {});
+    this.renderer.setClimberVisible(false);
+    this.renderer.setCameraMode('editor');
+    if (!b || !Array.isArray(b.holds)) {
+      this.wallDirty = true;
+      this.wallCooldown = 0;
+      this.pushView();
+      this.render();
+      return;
+    }
+    const grade = Number.isFinite(b.grade) ? b.grade : 0;
+    this.draft = draftFromSample({ ...b, mode: 'boulder', grade });
+    this.resetForNewDraft();
+    this.layoutView(true);
+    const n = this.draft.holds.length;
+    this.toast(`${this.draft.name} · ${n} hold${n === 1 ? '' : 's'} from your photo · check start and top`, 'good');
   }
 
   private async clearAll(): Promise<void> {
@@ -1817,7 +1892,7 @@ export class BoulderEditor implements EditorAPI {
   // ═══════════════════════════════ keyboard ═══════════════════════════════
 
   private readonly onKey = (e: KeyboardEvent): void => {
-    if (!this.opened || !this.panel) return;
+    if (!this.opened || !this.panel || this.importing) return;
     const t = e.target as HTMLElement | null;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') && (t as HTMLInputElement).type === 'text') return;
     if (this.root.querySelector('.modal')) return;

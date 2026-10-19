@@ -4,7 +4,7 @@
 // Pure view: it renders EditorPanelState and reports intents through PanelActions.
 // Built from the UI design system (src/ui/dom.ts helpers, .btn / .seg / .range / .grade / .t-label).
 
-import type { HoldDef } from '../core/types';
+import type { HoldDef, RouteStyle } from '../core/types';
 import { ROUTE_COLORS } from '../config/brand';
 import { fontGrade, gradeColor, gradeLabel } from '../game/grades';
 import { button, el, label, setText, toggle } from '../ui/dom';
@@ -29,6 +29,20 @@ import { drawThumb } from './thumbs';
 import { setWallGlyph, WallCard, wallGlyph, type WallCardActions, type WallCardState } from './wallcard';
 
 export type Drawer = 'color' | 'wall' | 'more';
+
+/** Kinds of bouldering a sample can be set as ("choose which type of bouldering you want to do"). */
+export const SAMPLE_STYLES: readonly { style: RouteStyle | null; label: string }[] = [
+  { style: null, label: 'ANY' },
+  { style: 'slab', label: 'SLAB' },
+  { style: 'vertical', label: 'VERTICAL' },
+  { style: 'overhang', label: 'OVERHANG' },
+  { style: 'cave', label: 'CAVE' },
+  { style: 'mixed', label: 'MIXED' },
+  { style: 'dyno', label: 'DYNO' },
+  { style: 'traverse', label: 'TRAVERSE' },
+  { style: 'compression', label: 'COMPRESSION' },
+  { style: 'zigzag', label: 'ZIGZAG' },
+];
 
 export type StatusKind = 'empty' | 'invalid' | 'solving' | 'ok' | 'nobeta' | 'sent' | 'live';
 
@@ -56,6 +70,7 @@ export interface EditorPanelState {
   snap: boolean;
   drawer: Drawer | null;
   sampleGrade: number;
+  sampleStyle: RouteStyle | null;
   generating: boolean;
   /** Selected hold and its 1-based index in the draft (+ the volume it is on, the holds on it). */
   selection: { hold: HoldDef; index: number; volumeName?: string; mounts?: number } | null;
@@ -83,6 +98,8 @@ export interface PanelActions extends WallCardActions {
   newDraft(): void;
   sampleGrade(delta: number): void;
   loadSample(): void;
+  setSampleStyle(s: RouteStyle | null): void;
+  importPhoto(): void;
   clearAll(): void;
   sizeStart(): void;
   sizeInput(v: number): void;
@@ -156,6 +173,7 @@ export class EditorPanel {
   private swatches: HTMLButtonElement[] = [];
   private wallCard: WallCard;
   private sampleVal: HTMLElement;
+  private styleBtns: { style: RouteStyle | null; b: HTMLButtonElement }[] = [];
   private sampleBtn: HTMLButtonElement;
 
   private toolColor: HTMLButtonElement;
@@ -348,6 +366,27 @@ export class EditorPanel {
         ),
         this.sampleBtn,
       ),
+      (() => {
+        const row = el('div', 'ed-styles');
+        row.setAttribute('role', 'group');
+        row.setAttribute('aria-label', 'Kind of bouldering for the sample');
+        for (const st of SAMPLE_STYLES) {
+          const b = el('button', 'ed-style', st.label);
+          b.type = 'button';
+          b.setAttribute('aria-label', st.style ? `${st.label.toLowerCase()} problem` : 'any kind of problem');
+          b.addEventListener('click', () => a.setSampleStyle(st.style));
+          this.styleBtns.push({ style: st.style, b });
+          row.appendChild(b);
+        }
+        return row;
+      })(),
+      el(
+        'div',
+        'ed-sample ed-photo',
+        glyph('photo', 'ed-sample-ic'),
+        el('div', 'ed-sample-t', el('span', 'ed-sample-l', 'Import from photo'), label('A REAL PROBLEM · ONE COLOUR')),
+        button({ label: 'IMPORT', variant: 'glass', cls: 'ed-photo-go', onTap: () => a.importPhoto() }),
+      ),
       el(
         'div',
         'ed-more-row',
@@ -486,6 +525,10 @@ export class EditorPanel {
     if (s.drawer === 'wall' || this.last.drawerWasWall === '1') this.wallCard.render(s.wall);
     this.last.drawerWasWall = s.drawer === 'wall' ? '1' : '';
     setText(this.sampleVal, gradeLabel(s.sampleGrade));
+    for (const sb of this.styleBtns) {
+      toggle(sb.b, 'on', sb.style === s.sampleStyle);
+      sb.b.setAttribute('aria-pressed', String(sb.style === s.sampleStyle));
+    }
     this.sampleBtn.disabled = s.generating;
     toggle(this.sampleBtn, 'is-busy', s.generating);
     setText(this.sampleBtn.querySelector('.btn-lbl') as HTMLElement, s.generating ? 'SETTING…' : 'LOAD');
@@ -682,6 +725,11 @@ export class EditorPanel {
     this.pubBtn.classList.remove('ed-pulse');
     void this.pubBtn.offsetWidth;
     this.pubBtn.classList.add('ed-pulse');
+  }
+
+  /** Hide the whole editor UI while another screen (the photo importer) owns it. */
+  setAway(on: boolean): void {
+    toggle(this.el, 'ed-away', on);
   }
 
   /** Client rect of the WALL drawer card. */
