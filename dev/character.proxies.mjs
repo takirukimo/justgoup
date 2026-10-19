@@ -11,7 +11,7 @@ const r = await page.evaluate(async () => {
     const H = m.rig.headLocal;
     const n = m.rig.headN;
     out[id] = [];
-    for (let j = 0; j < n; j++) out[id].push([H[j * 4], H[j * 4 + 1], H[j * 4 + 2], H[j * 4 + 3]].map((v) => +v.toFixed(3)));
+    for (let j = 0; j < n; j++) out[id].push([0, 1, 2, 3, 4, 5, 6].map((k) => +H[j * 8 + k].toFixed(3)));
   }
   return out;
 });

@@ -354,7 +354,26 @@ export const JOINT_LIMITS = {
   headYaw: 75,
   headPitchUp: 60,
   headPitchDown: 45,
+  /** Lateral neck flexion (ear toward the shoulder), used to tip the head out of a raised arm's way. */
+  headRoll: 32,
 } as const;
+
+/**
+ * Head moves that take the face / skull out of a raised arm, cheapest first: rows of [yaw (either
+ * way), pitch, roll (away from the arm first), effort]. A tilt is cheap for a skull pressed by the upper
+ * arm, a turn for a snout swinging into the forearm; big combined moves come last.
+ */
+const HEAD_ARM_MOVES: Float32Array = (() => {
+  const rows: number[][] = [];
+  for (const y of [0, 0.17, 0.34, 0.51, 0.68, 0.85, 1.02, 1.2])
+    for (const r of [0, 0.14, 0.28, 0.42, 0.55])
+      for (const p of [0, -0.18, 0.18, -0.32, 0.32, 0.48]) {
+        if (!y && !r && !p) continue;
+        rows.push([y, p, r, y / 0.85 + r / 0.42 + Math.abs(p) / 0.3]);
+      }
+  rows.sort((a, b) => a[3] - b[3]);
+  return new Float32Array(rows.slice(0, 72).flat());
+})();
 
 /** Max angle (radians) of a polar table at azimuth `omegaDeg`. */
 function polarMax(t: PolarTable, omegaDeg: number): number {
@@ -455,12 +474,20 @@ function segSeg(p1: THREE.Vector3, q1: THREE.Vector3, p2: THREE.Vector3, q2: THR
   return _cp1.distanceTo(_cp2);
 }
 
+/** Floats per head collision proxy: segment a (x, y, z), segment b (x, y, z), radius, spare. */
+export const HEAD_PROXY_STRIDE = 8;
+/** Most head collision proxies a head gets. */
+export const HEAD_PROXY_MAX = 16;
+
 /**
- * Collision spheres for a head (skull, snout, ears, beard and horns, or the human's cap), fitted once
+ * Collision proxies for a head (skull, snout, ears, beard and horns, or the human's cap), fitted once
  * from its geometry with a small k-means: the fur and the keratin (horns / beak) or cap are clustered
- * separately so the ibex's big swept horns get their own chain of spheres. Centres are in the head's PARENT frame
- * (the neck bone), so call it with the head's local transform already set. Writes [x, y, z, r] rows
- * into `out` and returns the number of spheres.
+ * separately so the ibex's big swept horns get their own chain. Each cluster becomes a CAPSULE along
+ * its principal axis when that is clearly tighter than a sphere (a horn segment is a slim tube, the
+ * long ibex face a tapered log: a sphere around either would stand far proud of the real surface and
+ * push arms off thin air), else a sphere (a = b). Points are in the head's PARENT frame (the neck
+ * bone), so call it with the head's local transform already set. Writes HEAD_PROXY_STRIDE floats per
+ * proxy into `out` ([ax, ay, az, bx, by, bz, r, 0]) and returns the number of proxies.
  */
 export function fitHeadProxies(head: THREE.Object3D, out: Float32Array): number {
   const parent = head.parent;
@@ -488,7 +515,7 @@ export function fitHeadProxies(head: THREE.Object3D, out: Float32Array): number 
   });
   if (parent) parent.add(head);
   let n = 0;
-  const maxN = Math.floor(out.length / 4);
+  const maxN = Math.floor(out.length / HEAD_PROXY_STRIDE);
   for (const g of groups) {
     const np = g.pts.length / 3;
     if (np < 8) continue;
@@ -559,20 +586,73 @@ export function fitHeadProxies(head: THREE.Object3D, out: Float32Array): number 
         C[c * 3 + 2] = acc[c * 4 + 2] / acc[c * 4 + 3];
       }
     }
-    // radius: a percentile of the member distances (ear tips / brim edges poke out a little; no
-    // spheres fatter than the part they stand for)
+    // per cluster: a sphere (radius = a percentile of the member distances: ear tips / brim edges
+    // poke out a little) or, when clearly tighter, a capsule along the principal axis
     for (let c = 0; c < k; c++) {
-      const ds: number[] = [];
-      for (let i = 0; i < np; i++) {
-        if (lab[i] !== c) continue;
-        ds.push(Math.sqrt((P[i * 3] - C[c * 3]) ** 2 + (P[i * 3 + 1] - C[c * 3 + 1]) ** 2 + (P[i * 3 + 2] - C[c * 3 + 2]) ** 2));
+      if (n >= maxN) break;
+      const mem: number[] = [];
+      for (let i = 0; i < np; i++) if (lab[i] === c) mem.push(i);
+      if (mem.length < 4) continue;
+      const ox = C[c * 3];
+      const oy = C[c * 3 + 1];
+      const oz = C[c * 3 + 2];
+      const ds = mem.map((i) => Math.hypot(P[i * 3] - ox, P[i * 3 + 1] - oy, P[i * 3 + 2] - oz)).sort((a, b) => a - b);
+      const rs = Math.max(0.015, ds[Math.floor(ds.length * g.pct)]);
+      // principal axis (power iteration on the covariance, from the farthest member)
+      let xx = 0, xy = 0, xz = 0, yy = 0, yz = 0, zz = 0;
+      let far = mem[0];
+      let farD = -1;
+      for (const i of mem) {
+        const dx = P[i * 3] - ox, dy = P[i * 3 + 1] - oy, dz = P[i * 3 + 2] - oz;
+        xx += dx * dx; xy += dx * dy; xz += dx * dz; yy += dy * dy; yz += dy * dz; zz += dz * dz;
+        const d = dx * dx + dy * dy + dz * dz;
+        if (d > farD) {
+          farD = d;
+          far = i;
+        }
       }
-      if (ds.length < 4) continue;
-      ds.sort((a, b) => a - b);
-      out[n * 4] = C[c * 3];
-      out[n * 4 + 1] = C[c * 3 + 1];
-      out[n * 4 + 2] = C[c * 3 + 2];
-      out[n * 4 + 3] = Math.max(0.015, ds[Math.floor(ds.length * g.pct)]);
+      let ex = P[far * 3] - ox, ey = P[far * 3 + 1] - oy, ez = P[far * 3 + 2] - oz;
+      for (let it = 0; it < 24; it++) {
+        const nx = xx * ex + xy * ey + xz * ez;
+        const ny = xy * ex + yy * ey + yz * ez;
+        const nz = xz * ex + yz * ey + zz * ez;
+        const l = Math.hypot(nx, ny, nz) || 1;
+        ex = nx / l;
+        ey = ny / l;
+        ez = nz / l;
+      }
+      const ts: number[] = [];
+      const perp: number[] = [];
+      for (const i of mem) {
+        const dx = P[i * 3] - ox, dy = P[i * 3 + 1] - oy, dz = P[i * 3 + 2] - oz;
+        const t = dx * ex + dy * ey + dz * ez;
+        ts.push(t);
+        perp.push(Math.hypot(dx - t * ex, dy - t * ey, dz - t * ez));
+      }
+      ts.sort((a, b) => a - b);
+      perp.sort((a, b) => a - b);
+      const rc = Math.max(0.012, perp[Math.floor(perp.length * Math.min(0.92, g.pct + 0.12))]);
+      // the caps reach rc past the segment ends: pull the ends in by half of it
+      const t0 = ts[Math.floor(ts.length * 0.05)] + rc * 0.5;
+      const t1 = ts[Math.floor(ts.length * 0.95)] - rc * 0.5;
+      const len = t1 - t0;
+      const o = n * HEAD_PROXY_STRIDE;
+      // a capsule when it is clearly slimmer than the sphere (what an arm passing by feels)
+      if (len > 0.01 && rc < rs * 0.85) {
+        out[o] = ox + ex * t0;
+        out[o + 1] = oy + ey * t0;
+        out[o + 2] = oz + ez * t0;
+        out[o + 3] = ox + ex * t1;
+        out[o + 4] = oy + ey * t1;
+        out[o + 5] = oz + ez * t1;
+        out[o + 6] = rc;
+      } else {
+        out[o] = out[o + 3] = ox;
+        out[o + 1] = out[o + 4] = oy;
+        out[o + 2] = out[o + 5] = oz;
+        out[o + 6] = rs;
+      }
+      out[o + 7] = 0;
       n++;
     }
   }
@@ -878,9 +958,9 @@ export class BodyRig {
   private cL1 = 0;
   private cL2 = 0;
   // collision proxies (rig space)
-  private headLocal = new Float32Array(4 * 16);
+  private headLocal = new Float32Array(HEAD_PROXY_STRIDE * HEAD_PROXY_MAX);
   private headN = 0;
-  private headW = new Float32Array(4 * 16);
+  private headW = new Float32Array(HEAD_PROXY_STRIDE * HEAD_PROXY_MAX);
   private chestA = new THREE.Vector3();
   private chestB = new THREE.Vector3();
   private bellyA = new THREE.Vector3();
@@ -889,6 +969,7 @@ export class BodyRig {
   private pelvB = new THREE.Vector3();
   private neckB = new THREE.Vector3();
   private hs = new THREE.Vector3();
+  private hs2 = new THREE.Vector3();
   private push = [0, 1, 2, 3].map(() => new THREE.Vector3());
   private endPush = [0, 1, 2, 3].map(() => new THREE.Vector3());
   private headAvoid = 0;
@@ -905,6 +986,9 @@ export class BodyRig {
   /** Extra head turn / nod that keeps the face out of the arms (damped). */
   private headArmYaw = 0;
   private headArmPitch = 0;
+  private headArmRoll = 0;
+  /** Side (0 left, 1 right) of the arm closest to the head in the last headArmClearance(). */
+  private headArmSide = 0;
   /** Contacts resolved in the last solve (QA counter). */
   contacts = 0;
   /** Limit evaluations / chain solves in the last solve (QA counters). */
@@ -2105,6 +2189,7 @@ export class BodyRig {
     }
     for (let s = 0; s < 2; s++) this.solveArm(g, s);
     for (let s = 0; s < 2; s++) this.solveLeg(g, s);
+    this.finishHead(g, dt);
     this.contacts = 0;
     if (this.collide) this.resolveCollisions(g);
     else this.headAvoidT = 0;
@@ -2212,64 +2297,137 @@ export class BodyRig {
     const kw = dt <= 0 ? 1 : 1 - Math.exp(-dt * 14);
     this.headWallPitch += (wallTarget - this.headWallPitch) * kw;
     this.headWallYaw += (wallYaw - this.headWallYaw) * (dt <= 0 ? 1 : 1 - Math.exp(-dt * 9));
-    const yawW = this.yaw + this.headWallYaw;
-    // keep the face (snout, horns, cap brim) out of the arms: a long ibex face swings into an arm when
-    // the head turns to watch a hand reach across. Test the head against both arms as last solved and
-    // take the smallest turn (then nod) that clears them, keeping the side already chosen.
+    // the arm dodge (finishHead) runs once the arms are solved for this frame; until then the
+    // head sits at its look + wall pose with last frame's dodge
+    this.hBaseYaw = this.yaw + this.headWallYaw;
+    this.hBasePitch = this.pitch + this.headWallPitch;
+    this.hBaseRoll = g.headRoll;
+    this.writeHead(neck, this.hBasePitch + this.headArmPitch, this.hBaseYaw + this.headArmYaw, this.hBaseRoll + this.headArmRoll);
+  }
+
+  /** The head dodge target (yaw, pitch, roll offsets) chosen last frame. */
+  private dodge = [0, 0, 0];
+  private hBaseYaw = 0;
+  private hBasePitch = 0;
+  private hBaseRoll = 0;
+
+  private writeHead(neck: THREE.Bone, pitch: number, yaw: number, roll: number): void {
+    _e.set(pitch, yaw, roll, 'YXZ');
+    _q1.setFromEuler(_e);
+    neck.quaternion.copy(this.qChest).multiply(_q1);
+    this.joints.head.set(0, BODY.neck, 0).applyQuaternion(neck.quaternion).add(neck.position);
+  }
+
+  /**
+   * Keep the face (snout, horns, cap brim) and the skull out of the arms, against the arms as solved
+   * THIS frame (so a fast reach is met, not chased): a long ibex face swings into an arm when the head
+   * turns to watch a hand reach across, and a hand reaching right over the head brings the upper arm
+   * in against the skull or the horn roots. Take the cheapest head move that clears both arms: a turn
+   * (either way, the side already chosen first), a tilt away from the arm (ear toward the other
+   * shoulder, the way a climber ducks under a high reach) and a nod, alone or combined; when nothing
+   * clears, the move that clears the most (if it gains enough to be worth it). The head moves into a
+   * dodge quickly and eases back out slowly. Then the wall deficit for the chest lean.
+   */
+  private finishHead(g: BodyGoal, dt: number): void {
+    const L = JOINT_LIMITS;
+    const neck = this.bones[BONE.neck];
+    const WALL_NEED = 0.025;
+    const yawW = this.hBaseYaw;
+    const p0 = this.hBasePitch;
+    const r0 = this.hBaseRoll;
     let armYaw = 0;
     let armPitch = 0;
+    let armRoll = 0;
     if (this.headN > 0) {
-      const p0 = this.pitch + this.headWallPitch;
       const need = 0.008;
-      const m0 = this.headArmClearance(neck, p0, yawW + this.headArmYaw * 0.5, g.headRoll);
-      if (m0 < need) {
-        const pref = this.headArmYaw !== 0 ? Math.sign(this.headArmYaw) : 1;
-        // a turn that clears the arms may not swing the face back into the wall
-        const wallOk = this.wallOn ? Math.min(WALL_NEED * 0.5, this.headClearance(neck, p0, g.headRoll, yawW)) : -Infinity;
-        let found = false;
-        for (let k = 1; k <= 6 && !found; k++) {
-          const step = k * 0.17;
-          for (let sgI = 0; sgI < 2; sgI++) {
-            const sg = sgI === 0 ? pref : -pref;
-            const y = yawW + sg * step;
-            if (Math.abs(y) > L.headYaw * DEG + 0.25) continue;
-            if (this.headArmClearance(neck, p0, y, g.headRoll) >= need && (!this.wallOn || this.headClearance(neck, p0, g.headRoll, y) >= wallOk)) {
-              armYaw = sg * step;
-              found = true;
-              break;
+      const m0 = this.headArmClearance(neck, p0, yawW, r0);
+      const dy = this.dodge[0];
+      const dp = this.dodge[1];
+      const dr = this.dodge[2];
+      // last frame's dodge still clears (and keeps the face off the wall): hold it (no re-search,
+      // no hopping between near-equal moves while the arm stays up)
+      if (
+        m0 < need &&
+        (dy !== 0 || dp !== 0 || dr !== 0) &&
+        Math.abs(yawW + dy) <= L.headYaw * DEG + 0.25 &&
+        Math.abs(r0 + dr) <= L.headRoll * DEG &&
+        this.headArmClearance(neck, p0 + dp, yawW + dy, r0 + dr) >= need &&
+        (!this.wallOn || this.headClearance(neck, p0 + dp, r0 + dr, yawW + dy) >= Math.min(WALL_NEED * 0.5, this.headClearance(neck, p0, r0, yawW)))
+      ) {
+        armYaw = dy;
+        armPitch = dp;
+        armRoll = dr;
+      } else if (m0 < need) {
+        const side = this.headArmSide;
+        const prefY = this.headArmYaw !== 0 ? Math.sign(this.headArmYaw) : side === 1 ? 1 : -1;
+        // tilt the top of the head away from the arm (positive roll tips it toward −X)
+        const rs = this.headArmRoll !== 0 ? Math.sign(this.headArmRoll) : side === 1 ? 1 : -1;
+        const yLim = L.headYaw * DEG + 0.25;
+        const rLim = L.headRoll * DEG;
+        const pLo = -L.headPitchDown * DEG - 0.1;
+        const pHi = L.headPitchUp * DEG;
+        // a move that clears the arms may not swing the face back into the wall
+        const wallOk = this.wallOn ? Math.min(WALL_NEED * 0.5, this.headClearance(neck, p0, r0, yawW)) : -Infinity;
+        let best = -Infinity;
+        let bestM = m0;
+        let evals = 0;
+        for (let c = 0; c < HEAD_ARM_MOVES.length && evals < 400; c += 4) {
+          const ay = HEAD_ARM_MOVES[c];
+          const ap = HEAD_ARM_MOVES[c + 1];
+          const effort = HEAD_ARM_MOVES[c + 3];
+          if (p0 + ap < pLo || p0 + ap > pHi) continue;
+          let done = false;
+          for (let rI = 0; rI < (HEAD_ARM_MOVES[c + 2] === 0 ? 1 : 2) && !done; rI++) {
+            const ar = HEAD_ARM_MOVES[c + 2] * (rI === 0 ? rs : -rs);
+            if (Math.abs(r0 + ar) > rLim) continue;
+            for (let sgI = 0; sgI < (ay === 0 ? 1 : 2); sgI++) {
+              const y = yawW + (sgI === 0 ? prefY : -prefY) * ay;
+              if (Math.abs(y) > yLim) continue;
+              const m = this.headArmClearance(neck, p0 + ap, y, r0 + ar);
+              evals++;
+              if (m < bestM + 0.004) continue;
+              if (this.wallOn && this.headClearance(neck, p0 + ap, r0 + ar, y) < wallOk) continue;
+              // the other way round costs a little more (no flapping between equal sides)
+              const score = m - 0.012 * (effort + (sgI + rI) * 0.35);
+              if (m >= need || score > best) {
+                best = m >= need ? Infinity : score;
+                bestM = m;
+                armYaw = y - yawW;
+                armPitch = ap;
+                armRoll = ar;
+              }
+              if (m >= need) {
+                done = true;
+                break;
+              }
             }
           }
+          if (done) break;
         }
-        if (!found) {
-          // turning alone cannot clear it (an arm right across the face): nod down past it as well
-          for (let pI = 0; pI < 2; pI++) {
-            const pp = pI === 0 ? -0.3 : 0.3;
-            if (this.headArmClearance(neck, p0 + pp, yawW + pref * 0.5, g.headRoll) >= need) {
-              armYaw = pref * 0.5;
-              armPitch = pp;
-              break;
-            }
-          }
-        }
+        // a partial move only when it buys a real gain
+        if (bestM < need && bestM - m0 < 0.012) armYaw = armPitch = armRoll = 0;
       }
     }
-    const ka = dt <= 0 ? 1 : 1 - Math.exp(-dt * 10);
-    this.headArmYaw += (armYaw - this.headArmYaw) * ka;
-    this.headArmPitch += (armPitch - this.headArmPitch) * ka;
-    const pitchF = this.pitch + this.headWallPitch + this.headArmPitch;
+    this.dodge[0] = armYaw;
+    this.dodge[1] = armPitch;
+    this.dodge[2] = armRoll;
+    const kIn = dt <= 0 ? 1 : 1 - Math.exp(-dt * 18);
+    const kOut = dt <= 0 ? 1 : 1 - Math.exp(-dt * 7);
+    this.headArmYaw += (armYaw - this.headArmYaw) * (Math.abs(armYaw) > Math.abs(this.headArmYaw) ? kIn : kOut);
+    this.headArmPitch += (armPitch - this.headArmPitch) * (Math.abs(armPitch) > Math.abs(this.headArmPitch) ? kIn : kOut);
+    this.headArmRoll += (armRoll - this.headArmRoll) * (Math.abs(armRoll) > Math.abs(this.headArmRoll) ? kIn : kOut);
+    const pitchF = p0 + this.headArmPitch;
     const yawF = yawW + this.headArmYaw;
+    const rollF = r0 + this.headArmRoll;
     if (this.wallOn && this.headN > 0) {
-      const m = this.headClearance(neck, pitchF, g.headRoll, yawF) - 0.01;
+      const m = this.headClearance(neck, pitchF, rollF, yawF) - 0.01;
       this.headWallDeficit = Math.max(0, -m);
       this.headWallSpare = Math.max(0, m);
     } else {
       this.headWallDeficit = 0;
       this.headWallSpare = 1;
     }
-    _e.set(pitchF, yawF, g.headRoll, 'YXZ');
-    _q1.setFromEuler(_e);
-    neck.quaternion.copy(this.qChest).multiply(_q1);
-    this.joints.head.set(0, BODY.neck, 0).applyQuaternion(neck.quaternion).add(neck.position);
+    this.writeHead(neck, pitchF, yawF, rollF);
   }
 
   /**
@@ -2284,19 +2442,24 @@ export class BodyRig {
     const H = this.headLocal;
     let m = Infinity;
     for (let j = 0; j < this.headN; j++) {
-      this.hs.set(H[j * 4], H[j * 4 + 1], H[j * 4 + 2]).applyQuaternion(_qa).add(neck.position);
-      const r = H[j * 4 + 3];
+      const o = j * HEAD_PROXY_STRIDE;
+      this.hs.set(H[o], H[o + 1], H[o + 2]).applyQuaternion(_qa).add(neck.position);
+      this.hs2.set(H[o + 3], H[o + 4], H[o + 5]).applyQuaternion(_qa).add(neck.position);
+      const r = H[o + 6];
       for (let s = 0; s < 2; s++) {
-        const c1 = pointSegDist(this.hs, J.shoulder[s], J.elbow[s]) - r - R_UPPER[1];
-        const c2 = pointSegDist(this.hs, J.elbow[s], J.wrist[s]) - r - R_FORE[0];
-        if (c1 < m) m = c1;
-        if (c2 < m) m = c2;
+        const c1 = segSeg(this.hs, this.hs2, J.shoulder[s], J.elbow[s]) - r - R_UPPER[1];
+        const c2 = segSeg(this.hs, this.hs2, J.elbow[s], J.wrist[s]) - r - R_FORE[0];
+        const c = Math.min(c1, c2);
+        if (c < m) {
+          m = c;
+          this.headArmSide = s;
+        }
       }
     }
     return m;
   }
 
-  /** Smallest wall clearance of the head spheres for a head pitch (and yaw; default the current one), rig space. */
+  /** Smallest wall clearance of the head proxies for a head pitch (and yaw; default the current one), rig space. */
   private headClearance(neck: THREE.Bone, pitch: number, roll: number, yaw = this.yaw): number {
     _e.set(pitch, yaw, roll, 'YXZ');
     _q1.setFromEuler(_e);
@@ -2304,9 +2467,17 @@ export class BodyRig {
     let m = Infinity;
     const H = this.headLocal;
     for (let j = 0; j < this.headN; j++) {
-      this.hs.set(H[j * 4], H[j * 4 + 1], H[j * 4 + 2]).applyQuaternion(_qa).add(neck.position);
-      const c = this.wallDepth(this.hs) - H[j * 4 + 3];
+      const o = j * HEAD_PROXY_STRIDE;
+      const r = H[o + 6];
+      // a capsule's deepest point against the (piecewise flat) wall is one of its ends
+      this.hs.set(H[o], H[o + 1], H[o + 2]).applyQuaternion(_qa).add(neck.position);
+      const c = this.wallDepth(this.hs) - r;
       if (c < m) m = c;
+      if (H[o] !== H[o + 3] || H[o + 1] !== H[o + 4] || H[o + 2] !== H[o + 5]) {
+        this.hs.set(H[o + 3], H[o + 4], H[o + 5]).applyQuaternion(_qa).add(neck.position);
+        const c2 = this.wallDepth(this.hs) - r;
+        if (c2 < m) m = c2;
+      }
     }
     return m;
   }
@@ -2927,11 +3098,16 @@ export class BodyRig {
     const H = this.headLocal;
     const W = this.headW;
     for (let j = 0; j < this.headN; j++) {
-      this.hs.set(H[j * 4], H[j * 4 + 1], H[j * 4 + 2]).applyQuaternion(nq).add(np);
-      W[j * 4] = this.hs.x;
-      W[j * 4 + 1] = this.hs.y;
-      W[j * 4 + 2] = this.hs.z;
-      W[j * 4 + 3] = H[j * 4 + 3];
+      const o = j * HEAD_PROXY_STRIDE;
+      this.hs.set(H[o], H[o + 1], H[o + 2]).applyQuaternion(nq).add(np);
+      W[o] = this.hs.x;
+      W[o + 1] = this.hs.y;
+      W[o + 2] = this.hs.z;
+      this.hs.set(H[o + 3], H[o + 4], H[o + 5]).applyQuaternion(nq).add(np);
+      W[o + 3] = this.hs.x;
+      W[o + 4] = this.hs.y;
+      W[o + 5] = this.hs.z;
+      W[o + 6] = H[o + 6];
     }
   }
 
@@ -3047,10 +3223,12 @@ export class BodyRig {
         const leg = 2 + s;
         // arms vs head (skull, snout, ears, beard, horns) and neck
         for (let j = 0; j < this.headN; j++) {
-          this.hs.set(W[j * 4], W[j * 4 + 1], W[j * 4 + 2]);
-          const r = W[j * 4 + 3];
-          hits += this.hitBody(s, 0, 0.3, this.hs, this.hs, r, it === 0);
-          hits += this.hitBody(s, 1, 0, this.hs, this.hs, r, it === 0);
+          const o = j * HEAD_PROXY_STRIDE;
+          this.hs.set(W[o], W[o + 1], W[o + 2]);
+          this.hs2.set(W[o + 3], W[o + 4], W[o + 5]);
+          const r = W[o + 6];
+          hits += this.hitBody(s, 0, 0.3, this.hs, this.hs2, r, it === 0);
+          hits += this.hitBody(s, 1, 0, this.hs, this.hs2, r, it === 0);
         }
         hits += this.hitBody(s, 0, 0.45, g.chest, this.neckB, 0.055, false);
         hits += this.hitBody(s, 1, 0, g.chest, this.neckB, 0.055, false);
@@ -3152,7 +3330,7 @@ export class BodyRig {
     return rows.join('\n');
   }
 
-  /** QA: number of head collision spheres (forEachProxy visits them after chest, belly, pelvis, neck). */
+  /** QA: number of head collision proxies (forEachProxy visits them after chest, belly, pelvis, neck). */
   get headProxyCount(): number {
     return this.headN;
   }
@@ -3164,9 +3342,12 @@ export class BodyRig {
     cb(this.bellyA, this.bellyB, 0.097, 0.097);
     cb(this.pelvA, this.pelvB, 0.088, 0.088);
     cb(this.bones[BONE.neck].position, this.neckB, 0.055, 0.055);
+    const W = this.headW;
     for (let j = 0; j < this.headN; j++) {
-      this.hs.set(this.headW[j * 4], this.headW[j * 4 + 1], this.headW[j * 4 + 2]);
-      cb(this.hs, this.hs, this.headW[j * 4 + 3], this.headW[j * 4 + 3]);
+      const o = j * HEAD_PROXY_STRIDE;
+      this.hs.set(W[o], W[o + 1], W[o + 2]);
+      this.hs2.set(W[o + 3], W[o + 4], W[o + 5]);
+      cb(this.hs, this.hs2, W[o + 6], W[o + 6]);
     }
     for (let s = 0; s < 2; s++) {
       cb(J.shoulder[s], J.elbow[s], R_UPPER[0], R_UPPER[1]);

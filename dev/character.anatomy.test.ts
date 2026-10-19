@@ -17,7 +17,7 @@ import { BetaBot } from '../src/game/bot';
 import { RopeSystem } from '../src/game/rope';
 import { BONE, ClimberModel } from '../src/render/climber';
 import { WallFrame } from '../src/render/wall-frame';
-import { measureRig, PEN_BAD, FLOOR_BAD, type Measure } from './character-probe';
+import { measureRig, segDist, PEN_BAD, FLOOR_BAD, type Measure } from './character-probe';
 
 interface Tally {
   frames: number;
@@ -42,6 +42,13 @@ interface Tally {
   fbFrames: number;
   pen5Frames: number;
   penLog: string[];
+  /** Frames with a head proxy (skull, snout, horns…) more than PEN_BAD into an arm. */
+  headArmFrames: number;
+  /** Frames with a hand reaching overhead (a wrist above the head joint), and those with a head ↔ arm overlap. */
+  overheadFrames: number;
+  headArmOverhead: number;
+  /** Worst head ↔ arm overlap (m) of the overhead frames. */
+  headArmWorst: number;
 }
 
 const fresh = (): Tally => ({
@@ -65,6 +72,10 @@ const fresh = (): Tally => ({
   fbFrames: 0,
   pen5Frames: 0,
   penLog: [],
+  headArmFrames: 0,
+  overheadFrames: 0,
+  headArmOverhead: 0,
+  headArmWorst: 0,
 });
 
 /** An elbow / knee moving this much more than its limb's ends in one 60 Hz frame reads as a pop. */
@@ -101,6 +112,39 @@ function wallPen(model: ClimberModel, frame: WallFrame): { v: number; what: stri
     }
   });
   return { v: worst, what };
+}
+
+const _ha: { a: THREE.Vector3; b: THREE.Vector3; r: number }[] = Array.from({ length: 16 }, () => ({ a: new THREE.Vector3(), b: new THREE.Vector3(), r: 0 }));
+/** Deepest head proxy ↔ arm (upper arm / forearm capsule) overlap and the side of that arm. */
+function headArm(model: ClimberModel): { pen: number; side: number } {
+  const headN = model.rig.headProxyCount;
+  let k = 0;
+  model.rig.forEachProxy((a, b, ra) => {
+    if (k >= 4 && k < 4 + headN) {
+      const h = _ha[k - 4];
+      h.a.copy(a);
+      h.b.copy(b);
+      h.r = ra;
+    }
+    k++;
+  });
+  const J = model.rig.joints;
+  let pen = 0;
+  let side = 0;
+  for (let j = 0; j < headN; j++) {
+    const h = _ha[j];
+    for (let s = 0; s < 2; s++) {
+      for (const [a, b, r0, r1] of [[J.shoulder[s], J.elbow[s], 0.05, 0.041], [J.elbow[s], J.wrist[s], 0.04, 0.03]] as const) {
+        const [d, , t] = segDist(h.a, h.b, a, b);
+        const p = h.r + r0 + (r1 - r0) * t - d;
+        if (p > pen) {
+          pen = p;
+          side = s;
+        }
+      }
+    }
+  }
+  return { pen, side };
 }
 
 function techTags(st: ClimberState): string[] {
@@ -184,6 +228,18 @@ function run(b: BoulderDef, T: Tally, opts: { secs: number; fallAt?: number; tag
       }
       if (w.v > T.wall.v) T.wall = { v: w.v, what: w.what, tag: `${where} P=${st.pelvis.x.toFixed(2)},${st.pelvis.y.toFixed(2)} d=${st.pelvisDepth.toFixed(2)}` };
     }
+    {
+      // hands reaching overhead vs the head (skull, snout, horns)
+      const J = model.rig.joints;
+      const over = J.wrist[0].y > J.head.y || J.wrist[1].y > J.head.y;
+      const ha = headArm(model);
+      if (over) T.overheadFrames++;
+      if (ha.pen > PEN_BAD) {
+        T.headArmFrames++;
+        if (over) T.headArmOverhead++;
+      }
+      if (over && ha.pen > T.headArmWorst) T.headArmWorst = ha.pen;
+    }
     const ph = (T.phases[st.phase] ??= { frames: 0, pen: 0 });
     ph.frames++;
     if (m.pen > PEN_BAD) {
@@ -196,20 +252,30 @@ function run(b: BoulderDef, T: Tally, opts: { secs: number; fallAt?: number; tag
         let k = 0;
         let best = { pen: 0, j: -1, loc: new THREE.Vector3(), r: 0 };
         const headN = model.rig.headProxyCount;
-        const heads: { p: THREE.Vector3; r: number }[] = [];
-        model.rig.forEachProxy((a, _b, ra) => {
-          if (k >= 4 && k < 4 + headN) heads.push({ p: a.clone(), r: ra });
+        const heads: { p: THREE.Vector3; q: THREE.Vector3; r: number }[] = [];
+        model.rig.forEachProxy((a, b2, ra) => {
+          if (k >= 4 && k < 4 + headN) heads.push({ p: a.clone(), q: b2.clone(), r: ra });
           k++;
         });
         const side = /L$/.test(m.what) ? 0 : 1;
         const J = model.rig.joints;
         for (let j = 0; j < heads.length; j++) {
           for (const [a, b, ra] of [[J.shoulder[side], J.elbow[side], 0.05], [J.elbow[side], J.wrist[side], 0.04]] as const) {
+            // capsule ↔ segment: sample the head proxy's axis
+            let d = Infinity;
+            let at = heads[j].p;
             const ab = b.clone().sub(a);
-            const t = Math.max(0, Math.min(1, heads[j].p.clone().sub(a).dot(ab) / ab.lengthSq()));
-            const d = heads[j].p.distanceTo(a.clone().addScaledVector(ab, t));
+            for (let u = 0; u <= 1.0001; u += 0.125) {
+              const hp = heads[j].p.clone().lerp(heads[j].q, u);
+              const t = Math.max(0, Math.min(1, hp.clone().sub(a).dot(ab) / ab.lengthSq()));
+              const dd = hp.distanceTo(a.clone().addScaledVector(ab, t));
+              if (dd < d) {
+                d = dd;
+                at = hp;
+              }
+            }
             const pen = heads[j].r + ra - d;
-            if (pen > best.pen) best = { pen, j, loc: heads[j].p.clone().sub(nb.position).applyQuaternion(qi), r: heads[j].r };
+            if (pen > best.pen) best = { pen, j, loc: at.clone().sub(nb.position).applyQuaternion(qi), r: heads[j].r };
           }
         }
         const sh = J.shoulder[side];
@@ -319,6 +385,7 @@ function report(name: string, T: Tally): void {
   process.stderr.write(
     `\n== ${name} ==\nframes ${T.frames}  pen>${PEN_BAD * 100}cm ${pct(T.penFrames, T.frames)}  pen>5cm ${pct(T.pen5Frames, T.frames)}  floor ${pct(T.floorFrames, T.frames)}  wall>${WALL_BAD * 100}cm ${pct(T.wallFrames, T.frames)}  pops ${pct(T.jumpFrames, T.frames)}  ik-fallback ${pct(T.fbFrames, T.frames)}\n` +
       `pose ${(T.poseMs / Math.max(1, T.frames)).toFixed(3)} ms/frame (node)\n` +
+      `head↔arm>${PEN_BAD * 100}cm ${pct(T.headArmFrames, T.frames)} of frames; overhead reaches ${pct(T.overheadFrames, T.frames)} of frames, head↔arm in ${pct(T.headArmOverhead, T.overheadFrames)} of them (worst ${(T.headArmWorst * 100).toFixed(1)} cm)\n` +
       `worst wall ${(T.wall.v * 100).toFixed(1)} cm ${T.wall.what} @ ${T.wall.tag}\nwall by part: ${JSON.stringify(T.wallBy)}\n` +
       (T.wallLog.length ? `walls:\n  ${T.wallLog.join('\n  ')}\n` : '') +
       `worst pen ${(T.worst.v * 100).toFixed(1)} cm ${T.worst.what} @ ${T.worst.tag}\n` +

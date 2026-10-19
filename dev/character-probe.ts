@@ -49,7 +49,8 @@ const d1 = new THREE.Vector3();
 const d2 = new THREE.Vector3();
 const r = new THREE.Vector3();
 
-function segDist(p1: THREE.Vector3, q1: THREE.Vector3, p2: THREE.Vector3, q2: THREE.Vector3): [number, number, number] {
+/** Closest distance between segments p1–q1 and p2–q2, and the parameters (s on the first, t on the second). */
+export function segDist(p1: THREE.Vector3, q1: THREE.Vector3, p2: THREE.Vector3, q2: THREE.Vector3): [number, number, number] {
   d1.subVectors(q1, p1);
   d2.subVectors(q2, p2);
   r.subVectors(p1, p2);
