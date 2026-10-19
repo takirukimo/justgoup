@@ -144,8 +144,9 @@ async function main(): Promise<void> {
     const f = r.wallFrame;
     const at = (x: number, y: number, d: number) => f.toWorld({ x, y }, d);
     if (cam === 'hands') {
-      const c = at((st.limbs.LH.pos.x + st.limbs.RH.pos.x) / 2, (st.limbs.LH.pos.y + st.limbs.RH.pos.y) / 2 - 0.05, 0.1);
-      r.setDebugView(c.clone().add(new THREE.Vector3(0.15, -0.2, 1.25)), c, 40);
+      // the right hand and forearm, from out to the right (the head stays out of the way)
+      const c = at(st.limbs.RH.pos.x - 0.08, st.limbs.RH.pos.y - 0.12, 0.12);
+      r.setDebugView(c.clone().add(new THREE.Vector3(0.55, 0.12, 0.62)), c, 38);
     } else if (cam === 'feet') {
       const c = at(st.pelvis.x, st.limbs.LF.pos.y + 0.15, 0.1);
       r.setDebugView(c.clone().add(new THREE.Vector3(0.3, 0.1, 1.5)), c, 40);

@@ -713,7 +713,10 @@ export function createBodyMaterial(atlas: THREE.Texture): BodyMaterial {
         bcol = mix(bcol, bcol * vec3(1.16, 0.8, 0.78), flush);
         // chalk on the fingers fades as the hand sweats (fresh chalk reads white, a greasy hand bare)
         float handMask = vArm.x + vArm.y;
-        float chalkAmt = vBodyAux.x * mix(1.0, dot(vArm.xy, uHandChalk), handMask);
+        float handChalk = dot(vArm.xy, uHandChalk);
+        float chalkAmt = vBodyAux.x * mix(1.0, handChalk, handMask);
+        // fresh chalk dusts the whole hand (knuckles and backs of the fingers too: it reads from behind)
+        chalkAmt = max(chalkAmt, handMask * 0.24 * clamp((handChalk - 0.1) / 0.9, 0.0, 1.0));
         float sweat = dot(vArm.xy, uHandSweat);
         bcol = mix(bcol, uChalk, chalkAmt);
         bcol *= vBodyAux.y;
