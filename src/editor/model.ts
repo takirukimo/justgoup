@@ -2,7 +2,8 @@
 // validation, content hashing (test → publish gating), undo history and draft persistence.
 // No DOM, no three.js — unit-tested in model.test.ts and shared with the solver worker.
 
-import type { BoulderDef, HoldDef, HoldRole, HoldType, Vec2 } from '../core/types';
+import type { BoulderDef, HoldDef, HoldRole, HoldShape, HoldType, RouteStyle, Vec2, WallPanel } from '../core/types';
+import { makeProfile, steepestAngle } from '../game/wall-profile';
 import { GAME } from '../config/tuning';
 import { ROUTE_COLORS } from '../config/brand';
 import { hashString, Rng, uid } from '../core/rng';
@@ -147,7 +148,7 @@ export function normalizeDraft(input: BoulderDef): BoulderDef {
     seen.add(id);
     const range = SIZE_RANGE[raw.type];
     const role: EditRole = raw.type === 'foot' && raw.role !== 'foot' ? 'foot' : raw.role;
-    holds.push({
+    const h: HoldDef = {
       id,
       x: r3(x),
       y: r3(y),
@@ -157,7 +158,9 @@ export function normalizeDraft(input: BoulderDef): BoulderDef {
       role,
       color,
       seed: Math.floor(Math.abs(finite(raw.seed, randomSeed()))) || 1,
-    });
+    };
+    keepVariety(raw, h);
+    holds.push(h);
     if (holds.length >= EDITOR.maxHolds) break;
   }
   const out: BoulderDef = {
@@ -173,9 +176,45 @@ export function normalizeDraft(input: BoulderDef): BoulderDef {
     seed: Math.floor(Math.abs(finite(input.seed, base.seed))) || 1,
   };
   if (typeof input.author === 'string' && input.author) out.author = input.author.slice(0, 40);
+  // a multi-angle wall (generated samples, community problems) keeps its panels; wallAngle is then
+  // the steepest panel's angle, as everywhere else (panel editing itself is a later phase)
+  const prof = cleanProfile(input.profile, H);
+  if (prof) {
+    out.profile = prof;
+    out.wallAngle = Math.round(steepestAngle(prof));
+  }
+  if (typeof input.style === 'string' && ROUTE_STYLES.includes(input.style)) out.style = input.style;
   const sf = pruneStartFeet(input.startFeet, holds);
   if (sf) out.startFeet = sf;
   return out;
+}
+
+const ROUTE_STYLES: readonly RouteStyle[] = ['vertical', 'slab', 'overhang', 'cave', 'traverse', 'dyno', 'compression', 'mixed', 'zigzag', 'diagonal'];
+const HOLD_SHAPES: readonly HoldShape[] = ['bucket', 'horn', 'rail', 'micro', 'chip', 'macro', 'dual-tex', 'wood'];
+const MAX_PANELS = 8;
+
+/**
+ * Copy the optional hold-variety fields (Phase B) from untrusted input, sanitised. Holds bolted onto
+ * volumes (onVolume) are not editable yet: they come in as ordinary wall holds.
+ */
+function keepVariety(raw: HoldDef, h: HoldDef): void {
+  if (Number.isFinite(raw.edgeDepthMm)) h.edgeDepthMm = r3(clamp(raw.edgeDepthMm as number, 2, 80));
+  if (Number.isFinite(raw.lipAngle)) h.lipAngle = r3(clamp(raw.lipAngle as number, -60, 60));
+  if (raw.fingers === 1 || raw.fingers === 2 || raw.fingers === 3 || raw.fingers === 4) h.fingers = raw.fingers;
+  if (typeof raw.shape === 'string' && HOLD_SHAPES.includes(raw.shape)) h.shape = raw.shape;
+}
+
+/** A sanitised multi-angle profile (2…8 panels inside the wall), or undefined for a flat wall. */
+function cleanProfile(panels: unknown, height: number): WallPanel[] | undefined {
+  if (!Array.isArray(panels) || panels.length < 2) return undefined;
+  const raw: WallPanel[] = [];
+  for (const p of panels.slice(0, MAX_PANELS * 2)) {
+    const q = p as Partial<WallPanel> | null;
+    if (q && Number.isFinite(q.y0) && Number.isFinite(q.angle)) raw.push({ y0: q.y0 as number, angle: q.angle as number });
+  }
+  const prof = makeProfile(raw, 0, height);
+  if (prof.flat || prof.panels.length < 2 || prof.panels.length > MAX_PANELS) return undefined;
+  return prof.panels.map((p) => ({ y0: r3(p.y0), angle: r3(p.angle) }));
 }
 
 /** Keep authored start feet only while they still point at footholds that exist. */
@@ -201,6 +240,7 @@ export function draftFromSample(b: BoulderDef): BoulderDef {
 
 export function cloneDraft(b: BoulderDef): BoulderDef {
   const c: BoulderDef = { ...b, holds: b.holds.map((h) => ({ ...h })) };
+  if (b.profile) c.profile = b.profile.map((p) => ({ ...p }));
   if (b.startFeet) c.startFeet = { ...b.startFeet };
   if (b.quickdraws) c.quickdraws = b.quickdraws.map((q) => ({ ...q }));
   return c;
@@ -226,6 +266,7 @@ export function makeHold(type: HoldType, role: EditRole, p: Vec2, color: string,
 export function draftHash(b: BoulderDef): string {
   const hs = [...b.holds].sort((a, c) => (a.id < c.id ? -1 : a.id > c.id ? 1 : 0));
   let s = `${b.wallAngle}|${b.color}|${b.startFeet?.LF ?? ''},${b.startFeet?.RF ?? ''}`;
+  if (b.profile) s += `|p${b.profile.map((p) => `${r3(p.y0)}:${r3(p.angle)}`).join(',')}`;
   for (const h of hs) s += `|${h.id}:${r3(h.x)},${r3(h.y)},${h.type},${r3(h.size)},${r3(h.angle)},${h.role},${h.seed}`;
   return hashString(s).toString(36) + hs.length.toString(36);
 }
@@ -481,11 +522,14 @@ export interface Snapshot {
   wallAngle: number;
   color: string;
   startFeet?: BoulderDef['startFeet'];
+  /** Multi-angle panels (flattening a sample's wall with the angle slider is undoable). */
+  profile?: WallPanel[];
 }
 
 export function snapshotOf(b: BoulderDef): Snapshot {
   const s: Snapshot = { holds: b.holds.map((h) => ({ ...h })), wallAngle: b.wallAngle, color: b.color };
   if (b.startFeet) s.startFeet = { ...b.startFeet };
+  if (b.profile) s.profile = b.profile.map((p) => ({ ...p }));
   return s;
 }
 
@@ -495,6 +539,8 @@ export function applySnapshot(b: BoulderDef, s: Snapshot): void {
   b.color = s.color;
   if (s.startFeet) b.startFeet = { ...s.startFeet };
   else delete b.startFeet;
+  if (s.profile) b.profile = s.profile.map((p) => ({ ...p }));
+  else delete b.profile;
 }
 
 /** Snapshot undo/redo stack. Call checkpoint(draft) right BEFORE a mutation. */

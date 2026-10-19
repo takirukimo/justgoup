@@ -2,6 +2,15 @@
 // `center` and showing `meters` of wall height over the full canvas height. This class owns that
 // state, fits the wall into the free area between the top bar and the tray, and implements
 // zoom-about-a-point and panning in wall meters with sensible limits.
+//
+// Folded walls: center / meters are wall-SURFACE coordinates, but on a multi-angle wall the screen
+// is no longer a linear image of the surface (panels at other angles are foreshortened, the camera
+// squares up to the panel under the centre). Points are therefore picked through the renderer's
+// ray cast (setPicker → RendererAPI.screenToWall, which crosses every panel); the linear model is
+// only the fallback off the wall. A zoom keeps the TRUE wall point under the fingers: the gap
+// between the picked point and the linear model at the gesture's start is carried along and
+// shrinks with the zoom, so nothing jumps when the pinch begins and the point converges under the
+// fingers as you zoom in.
 
 import type { Vec2 } from '../core/types';
 import { clamp } from '../core/math';
@@ -22,6 +31,19 @@ export interface WallSize {
 
 const MIN_METERS = 1.3;
 
+/** Picks the wall point under a canvas pixel (the renderer's ray cast), or null off the wall. */
+export type WallPicker = (sx: number, sy: number) => Vec2 | null;
+
+/** A zoom gesture's anchor: the wall point under the fingers when it began. */
+export interface ZoomAnchor {
+  /** The real wall point under the fingers (picked; the linear model off the wall). */
+  wall: Vec2;
+  /** Picked − linear model at the start (0 on a flat wall seen straight on), at scale k0. */
+  bias: Vec2;
+  /** Meters per pixel when the gesture began. */
+  k0: number;
+}
+
 export class EditorView {
   center: Vec2 = { x: 0, y: 2.25 };
   meters = 10;
@@ -29,6 +51,12 @@ export class EditorView {
   private fitMeters = 10;
   private rect: ViewRect = { w: 390, h: 844, top: 0, bottom: 844 };
   private wall: WallSize = { width: 4.6, height: 4.5 };
+  private pick: WallPicker | null = null;
+
+  /** Use the renderer's ray cast for screen → wall (handles folded, multi-angle walls). */
+  setPicker(pick: WallPicker | null): void {
+    this.pick = pick;
+  }
 
   /** Meters of wall per CSS pixel at the wall plane. */
   get k(): number {
@@ -68,17 +96,39 @@ export class EditorView {
     this.meters = this.fitMeters;
   }
 
-  /** Approximate wall point under a canvas pixel (straight-on camera). */
+  /** Wall point under a canvas pixel: the renderer's pick (any wall profile), else the straight-on model. */
   screenToWall(sx: number, sy: number): Vec2 {
+    const p = this.pick ? this.pick(sx, sy) : null;
+    return p ? { x: p.x, y: p.y } : this.linearToWall(sx, sy);
+  }
+
+  /** The straight-on linear model of the editor camera (exact for a flat wall). */
+  linearToWall(sx: number, sy: number): Vec2 {
     const k = this.k;
     return { x: this.center.x + (sx - this.rect.w / 2) * k, y: this.center.y - (sy - this.rect.h / 2) * k };
   }
 
-  /** Keep the wall point under `anchor` (canvas px, at the start of the gesture) under `now` after zooming to `meters`. */
-  zoomAbout(anchorWall: Vec2, now: { x: number; y: number }, meters: number): void {
+  /** Anchor a zoom at canvas pixel (sx, sy): the real wall point there, and how far the linear model is off. */
+  zoomAnchor(sx: number, sy: number): ZoomAnchor {
+    const wall = this.screenToWall(sx, sy);
+    const lin = this.linearToWall(sx, sy);
+    return { wall, bias: { x: wall.x - lin.x, y: wall.y - lin.y }, k0: this.k };
+  }
+
+  /**
+   * Zoom to `meters` keeping the anchor's wall point under `now` (canvas px). The start-of-gesture
+   * gap between the picked point and the linear model scales with the zoom, so the first frame
+   * doesn't jump and the real point settles under the fingers as the view closes in.
+   */
+  zoomAbout(anchor: ZoomAnchor | Vec2, now: { x: number; y: number }, meters: number): void {
+    const a: ZoomAnchor = 'wall' in anchor ? anchor : { wall: anchor, bias: { x: 0, y: 0 }, k0: this.k };
     this.meters = clamp(meters, MIN_METERS, this.fitMeters * 1.3);
     const k = this.k;
-    this.center = { x: anchorWall.x - (now.x - this.rect.w / 2) * k, y: anchorWall.y + (now.y - this.rect.h / 2) * k };
+    const f = a.k0 > 0 ? k / a.k0 : 1;
+    this.center = {
+      x: a.wall.x - a.bias.x * f - (now.x - this.rect.w / 2) * k,
+      y: a.wall.y - a.bias.y * f + (now.y - this.rect.h / 2) * k,
+    };
     this.clampState();
   }
 

@@ -5,7 +5,7 @@ import type { BetaMove } from '../core/contracts';
 import type { BoulderDef } from '../core/types';
 import { estimateGrade, planBeta } from '../game/solver';
 import { generateBoulder } from '../game/generator';
-import { draftFromSample } from './model';
+import { draftFromSample, validateDraft } from './model';
 
 export type AnalysisRequest =
   | { kind: 'solve'; id: number; boulder: BoulderDef; maxMs: number }
@@ -26,12 +26,25 @@ export function solveDraft(boulder: BoulderDef, maxMs: number): { moves: BetaMov
   return { moves, grade, ms: now() - t0 };
 }
 
-/** A generated problem at `grade`, stripped to a remixable draft. */
+/**
+ * A generated problem at `grade`, stripped to a remixable draft. It keeps the generator's wall
+ * profile (GEN.profiles) and hold variety; holds stay on the wall itself (no holds bolted onto
+ * volumes: the editor can't edit those yet).
+ */
 export function generateSample(seed: number, grade: number): { boulder: BoulderDef; ms: number } {
   const t0 = now();
-  const b = generateBoulder({ seed, grade, mode: 'boulder' });
-  return { boulder: draftFromSample(b), ms: now() - t0 };
+  // the editor's rules are stricter than the generator's (hold spacing, one TOP, inside the panel):
+  // take the first of a few seeds whose draft passes them, so a sample is always publishable
+  let draft: BoulderDef | null = null;
+  for (let i = 0; i < SAMPLE_TRIES; i++) {
+    const s = i === 0 ? seed : (Math.imul(seed ^ 0x5bd1e995, i + 1) >>> 1) || 1;
+    draft = draftFromSample(generateBoulder({ seed: s, grade, mode: 'boulder', holdsOnVolumes: false }));
+    if (validateDraft(draft).ok) break;
+  }
+  return { boulder: draft!, ms: now() - t0 };
 }
+
+const SAMPLE_TRIES = 8;
 
 export function handleRequest(req: AnalysisRequest): AnalysisResponse {
   try {

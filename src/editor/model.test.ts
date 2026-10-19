@@ -1,10 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { BoulderDef, HoldDef } from '../core/types';
-import { generateBoulder } from '../game/generator';
+import { generateSample } from './analysis';
 import {
   cloneDraft,
   createDraft,
-  draftFromSample,
   draftHash,
   EDITOR,
   findSpot,
@@ -145,8 +144,7 @@ describe('validation', () => {
   it('generated samples become valid, deco-free drafts', () => {
     for (const grade of [0, 2, 4, 6]) {
       for (const seed of [11, 202, 3003]) {
-        const b = generateBoulder({ seed: seed + grade, grade });
-        const d = draftFromSample(b);
+        const d = generateSample(seed + grade, grade).boulder; // the editor's LOAD SAMPLE path
         expect(d.holds.some((h) => h.role === 'deco')).toBe(false);
         expect(d.mode).toBe('boulder');
         expect(d.wallAngle).toBeGreaterThanOrEqual(EDITOR.angleMin);
@@ -158,6 +156,49 @@ describe('validation', () => {
 });
 
 describe('drafts', () => {
+  it('keeps a sample\'s folded wall and hold variety, sanitised; undo restores a flattened wall', () => {
+    const base = createDraft();
+    const raw = {
+      ...base,
+      wallAngle: 60,
+      style: 'cave',
+      profile: [
+        { y0: 0, angle: 10 },
+        { y0: 1.6, angle: 35 },
+        { y0: 3.1, angle: 60 },
+      ],
+      holds: [
+        { id: 'a', x: 0, y: 1, type: 'edge', size: 0.06, angle: -1.57, role: 'start', color: '#000000', seed: 3, edgeDepthMm: 14, lipAngle: 12, shape: 'rail' },
+        { id: 'b', x: 0.4, y: 2, type: 'pocket', size: 0.05, angle: -1.57, role: 'hand', color: '#000000', seed: 4, fingers: 2, shape: 'bogus', onVolume: 'v' },
+      ],
+    } as unknown as BoulderDef;
+    const d = normalizeDraft(raw);
+    expect(d.profile).toEqual([
+      { y0: 0, angle: 10 },
+      { y0: 1.6, angle: 35 },
+      { y0: 3.1, angle: 60 },
+    ]);
+    expect(d.wallAngle).toBe(60); // the steepest panel, as everywhere else
+    expect(d.style).toBe('cave');
+    expect(d.holds[0]).toMatchObject({ edgeDepthMm: 14, lipAngle: 12, shape: 'rail' });
+    expect(d.holds[1].fingers).toBe(2);
+    expect(d.holds[1].shape).toBeUndefined();
+    expect(d.holds[1].onVolume).toBeUndefined(); // mounts are not editable yet
+    // junk profiles fall back to a flat wall
+    expect(normalizeDraft({ ...raw, profile: [{ y0: 0, angle: 5 }] } as BoulderDef).profile).toBeUndefined();
+    expect(normalizeDraft({ ...raw, profile: 'x' } as unknown as BoulderDef).profile).toBeUndefined();
+    // the content hash sees the panels
+    expect(draftHash(d)).not.toBe(draftHash({ ...d, profile: undefined }));
+    // flattening (the angle slider) is undoable
+    const h = new History();
+    h.checkpoint(d);
+    delete d.profile;
+    d.wallAngle = 20;
+    expect(h.undo(d)).toBe(true);
+    expect(d.profile?.length).toBe(3);
+    expect(d.wallAngle).toBe(60);
+  });
+
   it('normalizeDraft sanitises untrusted input', () => {
     const raw = {
       ...createDraft(),

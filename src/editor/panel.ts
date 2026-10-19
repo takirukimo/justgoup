@@ -4,7 +4,9 @@
 // Pure view: it renders EditorPanelState and reports intents through PanelActions.
 // Built from the UI design system (src/ui/dom.ts helpers, .btn / .seg / .range / .grade / .t-label).
 
-import type { HoldDef, HoldType } from '../core/types';
+import type { HoldDef, HoldType, WallPanel } from '../core/types';
+import { clamp } from '../core/math';
+import { GAME } from '../config/tuning';
 import { ROUTE_COLORS } from '../config/brand';
 import { fontGrade, gradeColor, gradeLabel } from '../game/grades';
 import { button, el, label, setText, toggle } from '../ui/dom';
@@ -34,6 +36,8 @@ export interface EditorPanelState {
   role: EditRole;
   color: string;
   angle: number;
+  /** Multi-angle panels of the draft's wall (a generated sample), if any. */
+  profile?: WallPanel[];
   snap: boolean;
   drawer: Drawer | null;
   sampleGrade: number;
@@ -136,7 +140,7 @@ export class EditorPanel {
   private angleIn: HTMLInputElement;
   private angleVal: HTMLElement;
   private angleWord: HTMLElement;
-  private profile!: { wall: SVGLineElement; arc: SVGPathElement; dots: SVGCircleElement[] };
+  private profile!: { wall: SVGPolylineElement; arc: SVGPathElement; dots: SVGCircleElement[] };
   private sampleVal: HTMLElement;
   private sampleBtn: HTMLButtonElement;
 
@@ -386,7 +390,7 @@ export class EditorPanel {
       return e;
     };
     const svgEl = mk('svg', 'ed-profile', { viewBox: '0 0 64 56', 'aria-hidden': 'true' });
-    const wall = mk('line', 'pf-wall', { x1: 18, y1: 50, x2: 18, y2: 6 });
+    const wall = mk('polyline', 'pf-wall', { points: '18,50 18,6' });
     const arc = mk('path', 'pf-arc');
     const dots = [0.35, 0.6, 0.85].map(() => mk('circle', 'pf-hold', { r: 2.1 }));
     svgEl.append(
@@ -402,22 +406,45 @@ export class EditorPanel {
     return svgEl;
   }
 
-  private renderProfile(angle: number): void {
+  /** Side view: one line at `angle`, or the folded panels of a multi-angle wall (arc = steepest). */
+  private renderProfile(angle: number, panels?: readonly WallPanel[]): void {
     const p = this.profile;
     const t = (angle * Math.PI) / 180;
     const L = 44;
-    const ex = 18 + Math.sin(t) * L;
-    const ey = 50 - Math.cos(t) * L;
-    p.wall.setAttribute('x2', ex.toFixed(2));
-    p.wall.setAttribute('y2', ey.toFixed(2));
+    // the wall as a polyline from its foot (18, 50): one segment, or every panel at its own angle
+    const pts: { x: number; y: number; a: number }[] = [{ x: 18, y: 50, a: t }];
+    if (panels && panels.length >= 2) {
+      const total = Math.max(GAME.boulderWall.height, panels[panels.length - 1].y0 + 0.3);
+      for (let i = 0; i < panels.length; i++) {
+        const len = ((i + 1 < panels.length ? panels[i + 1].y0 : total) - panels[i].y0) * (L / total);
+        const a = (clamp(panels[i].angle, -30, 95) * Math.PI) / 180;
+        const q = pts[pts.length - 1];
+        pts.push({ x: q.x + Math.sin(a) * len, y: q.y - Math.cos(a) * len, a });
+      }
+    } else pts.push({ x: 18 + Math.sin(t) * L, y: 50 - Math.cos(t) * L, a: t });
+    p.wall.setAttribute('points', pts.map((q) => `${q.x.toFixed(2)},${q.y.toFixed(2)}`).join(' '));
     const R = 15;
     const ax = 18 + Math.sin(t) * R;
     const ay = 50 - Math.cos(t) * R;
     p.arc.setAttribute('d', `M18 ${50 - R}A${R} ${R} 0 0 ${angle >= 0 ? 1 : 0} ${ax.toFixed(2)} ${ay.toFixed(2)}`);
+    // holds sit on the climbing side of the wall, along its length
+    let total = 0;
+    for (let i = 1; i < pts.length; i++) total += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
     [0.35, 0.6, 0.85].forEach((k, i) => {
+      let left = k * total;
+      let j = 1;
+      for (; j < pts.length - 1; j++) {
+        const seg = Math.hypot(pts[j].x - pts[j - 1].x, pts[j].y - pts[j - 1].y);
+        if (left <= seg) break;
+        left -= seg;
+      }
+      const a = pts[j - 1];
+      const b = pts[j];
+      const seg = Math.max(1e-6, Math.hypot(b.x - a.x, b.y - a.y));
+      const f = Math.min(1, left / seg);
       const d = p.dots[i];
-      d.setAttribute('cx', (18 + Math.sin(t) * L * k + Math.cos(t) * 2.6).toFixed(2));
-      d.setAttribute('cy', (50 - Math.cos(t) * L * k + Math.sin(t) * 2.6).toFixed(2));
+      d.setAttribute('cx', (a.x + (b.x - a.x) * f + Math.cos(b.a) * 2.6).toFixed(2));
+      d.setAttribute('cy', (a.y + (b.y - a.y) * f + Math.sin(b.a) * 2.6).toFixed(2));
     });
   }
 
@@ -492,14 +519,17 @@ export class EditorPanel {
     }
     toggle(this.insp, 'open', floatKey === 'insp');
     for (const b of this.swatches) toggle(b, 'on', (b.dataset.hex ?? '').toLowerCase() === s.color.toLowerCase());
-    if (document.activeElement !== this.angleIn && this.angleIn.value !== String(s.angle)) this.angleIn.value = String(s.angle);
-    setVar(this.angleIn, '--v', `${((s.angle - EDITOR.angleMin) / (EDITOR.angleMax - EDITOR.angleMin)) * 100}%`);
-    if (this.changed('angle', String(s.angle))) {
+    // a folded wall shows its steepest panel on the slider (moving it makes one flat panel)
+    const sa = clamp(s.angle, EDITOR.angleMin, EDITOR.angleMax);
+    if (document.activeElement !== this.angleIn && this.angleIn.value !== String(sa)) this.angleIn.value = String(sa);
+    setVar(this.angleIn, '--v', `${((sa - EDITOR.angleMin) / (EDITOR.angleMax - EDITOR.angleMin)) * 100}%`);
+    const pkey = s.profile ? s.profile.map((p) => `${p.y0}:${p.angle}`).join(',') : '';
+    if (this.changed('angle', `${s.angle}|${pkey}`)) {
       setText(this.angleVal, `${s.angle > 0 ? '+' : ''}${s.angle}°`);
-      this.renderProfile(s.angle);
+      this.renderProfile(s.angle, s.profile);
     }
     // the same honest wall words as the route preview and the problem cards (±6° reads VERTICAL)
-    const wl = wallLabel({ wallAngle: s.angle });
+    const wl = wallLabel({ wallAngle: s.angle, profile: s.profile });
     setText(this.angleWord, wl.kind === 'WALL' ? wl.value : wl.kind);
     setText(this.sampleVal, gradeLabel(s.sampleGrade));
     this.sampleBtn.disabled = s.generating;

@@ -17,7 +17,7 @@ import { gradeLabel } from '../game/grades';
 import { Analyzer, type SolveResult } from './analyzer';
 import { EditorOverlay, type OverlayGhost, type OverlayState, type Projector } from './overlay';
 import { EditorPanel, type Drawer, type EditorPanelState, type PanelActions, type StatusKind } from './panel';
-import { EditorView } from './view';
+import { EditorView, type ZoomAnchor } from './view';
 import {
   clampToBounds,
   cleanName,
@@ -62,7 +62,7 @@ type Gesture =
   | { kind: 'drag'; id: number; holdId: string; offset: Vec2; changed: boolean }
   | { kind: 'pan'; id: number; lastX: number; lastY: number }
   | { kind: 'knob'; id: number; holdId: string; changed: boolean }
-  | { kind: 'pinch'; a: number; b: number; d0: number; m0: number; anchor: Vec2 }
+  | { kind: 'pinch'; a: number; b: number; d0: number; m0: number; anchor: ZoomAnchor }
   | { kind: 'twist'; a: number; b: number; holdId: string; d0: number; a0: number; size0: number; angle0: number; changed: boolean }
   | { kind: 'settle' };
 
@@ -94,6 +94,11 @@ const snapAngle = (a: number): number => {
   return wrapAngle(-Math.PI / 2 + Math.round((a + Math.PI / 2) / step) * step);
 };
 const r3 = (v: number): number => Math.round(v * 1000) / 1000;
+
+/** Identity of a draft's wall panels (undo / redo rebuild the wall when it changes). */
+function profileKey(b: BoulderDef): string {
+  return b.profile ? b.profile.map((p) => `${p.y0}:${p.angle}`).join(',') : '';
+}
 
 function readPrefs(): { snap: boolean; sampleGrade: number } {
   try {
@@ -200,6 +205,8 @@ export class BoulderEditor implements EditorAPI {
     const prefs = readPrefs();
     this.snap = prefs.snap;
     this.sampleGrade = prefs.sampleGrade;
+    // zoom anchors are picked through the renderer's ray cast (works across a folded wall's panels)
+    this.view.setPicker((x, y) => this.renderer.screenToWall(x, y));
   }
 
   get isOpen(): boolean {
@@ -450,6 +457,7 @@ export class BoulderEditor implements EditorAPI {
       role: this.tool.role,
       color: this.draft.color,
       angle: this.draft.wallAngle,
+      profile: this.draft.profile,
       snap: this.snap,
       drawer: this.drawer,
       sampleGrade: this.sampleGrade,
@@ -680,21 +688,21 @@ export class BoulderEditor implements EditorAPI {
   }
 
   private undo(): void {
-    const before = { a: this.draft.wallAngle, c: this.draft.color };
+    const before = { a: this.draft.wallAngle, c: this.draft.color, p: profileKey(this.draft) };
     if (!this.history.undo(this.draft)) return;
     this.afterHistory(before);
     this.toast('Undo');
   }
 
   private redo(): void {
-    const before = { a: this.draft.wallAngle, c: this.draft.color };
+    const before = { a: this.draft.wallAngle, c: this.draft.color, p: profileKey(this.draft) };
     if (!this.history.redo(this.draft)) return;
     this.afterHistory(before);
     this.toast('Redo');
   }
 
-  private afterHistory(before: { a: number; c: string }): void {
-    const wall = before.a !== this.draft.wallAngle || before.c !== this.draft.color;
+  private afterHistory(before: { a: number; c: string; p: string }): void {
+    const wall = before.a !== this.draft.wallAngle || before.c !== this.draft.color || before.p !== profileKey(this.draft);
     this.commit({ wall });
   }
 
@@ -761,7 +769,14 @@ export class BoulderEditor implements EditorAPI {
       angleInput: (deg) => {
         const a = clamp(Math.round(deg), EDITOR.angleMin, EDITOR.angleMax);
         if (this.continuous !== 'angle') this.beginContinuous('angle');
-        if (a === this.draft.wallAngle) return;
+        if (a === this.draft.wallAngle && !this.draft.profile) return;
+        // a multi-angle wall (a generated sample) becomes one flat panel at the slider's angle;
+        // editing the panels themselves comes later. Undo brings the folded wall back.
+        if (this.draft.profile) {
+          delete this.draft.profile;
+          delete this.draft.style;
+          this.toast('One flat panel now · undo restores the folded wall');
+        }
         this.draft.wallAngle = a;
         // the profile diagram follows live; the 3D wall rebuilds once the slider rests
         this.wallDirty = true;
@@ -770,6 +785,10 @@ export class BoulderEditor implements EditorAPI {
       },
       angleCommit: (deg) => {
         if (this.continuous !== 'angle') this.beginContinuous('angle');
+        if (this.draft.profile) {
+          delete this.draft.profile;
+          delete this.draft.style;
+        }
         this.draft.wallAngle = clamp(Math.round(deg), EDITOR.angleMin, EDITOR.angleMax);
         this.endContinuous(true);
       },
@@ -1143,7 +1162,7 @@ export class BoulderEditor implements EditorAPI {
       return;
     }
     const mid = { x: (pa.x + pb.x) / 2, y: (pa.y + pb.y) / 2 };
-    this.gesture = { kind: 'pinch', a: pa.id, b: pb.id, d0, m0: this.view.meters, anchor: this.view.screenToWall(mid.x, mid.y) };
+    this.gesture = { kind: 'pinch', a: pa.id, b: pb.id, d0, m0: this.view.meters, anchor: this.view.zoomAnchor(mid.x, mid.y) };
   }
 
   private readonly onMove = (e: PointerEvent): void => {
@@ -1210,9 +1229,12 @@ export class BoulderEditor implements EditorAPI {
         if (g.id !== e.pointerId) return;
         const h = this.draft.holds.find((x) => x.id === g.holdId);
         if (!h) return;
+        // the knob marks the side the hold faces; `angle` points the other way (toward the body).
+        // Measured in the wall plane (through the renderer's pick), so a panel seen at an angle
+        // on a folded wall turns the hold the way the finger goes; on screen when off the wall.
+        const w = this.renderer.screenToWall(p.x, p.y);
         const c = this.renderer.wallToScreen(h);
-        // the knob marks the side the hold faces; `angle` points the other way (toward the body)
-        const raw = Math.atan2(-(p.y - c.y), p.x - c.x) + Math.PI;
+        const raw = w && Math.hypot(w.x - h.x, w.y - h.y) > 0.01 ? Math.atan2(w.y - h.y, w.x - h.x) + Math.PI : Math.atan2(-(p.y - c.y), p.x - c.x) + Math.PI;
         const a = this.snap ? snapAngle(raw) : wrapAngle(raw);
         if (a !== h.angle) {
           h.angle = a;
@@ -1393,7 +1415,7 @@ export class BoulderEditor implements EditorAPI {
     if (!this.opened) return;
     e.preventDefault();
     const p = this.local(e);
-    const anchor = this.view.screenToWall(p.x, p.y);
+    const anchor = this.view.zoomAnchor(p.x, p.y);
     const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
     this.view.zoomAbout(anchor, p, this.view.meters * Math.exp(clamp(dy, -200, 200) * 0.0016));
     this.pushView();
