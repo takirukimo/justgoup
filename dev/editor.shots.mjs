@@ -4,6 +4,7 @@ const [url, out, stepsJson] = process.argv.slice(2);
 const steps = stepsJson ? JSON.parse(stepsJson) : [];
 const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium', args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
 const page = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true });
+page.setDefaultTimeout(120000);
 const logs = [];
 page.on('console', (m) => logs.push(`[${m.type()}] ${m.text()}`));
 page.on('pageerror', (e) => logs.push(`[pageerror] ${e.message}`));
@@ -23,7 +24,7 @@ for (const s of steps) {
   if (s.tap) { const b = await page.locator(s.tap).first().boundingBox(); if (b) await page.touchscreen.tap(b.x + b.width / 2, b.y + b.height / 2); else console.log('no', s.tap); }
   if (s.tapxy) await page.touchscreen.tap(s.tapxy[0], s.tapxy[1]);
   await page.waitForTimeout(s.wait ?? 1500);
-  if (s.shot) { await page.screenshot({ path: `${out}-${s.shot}.png` }); console.log('shot', `${out}-${s.shot}.png`); }
+  if (s.shot) { await page.screenshot({ path: `${out}-${s.shot}.png`, timeout: 120000 }); console.log('shot', `${out}-${s.shot}.png`); }
 }
 if (!steps.length) await page.screenshot({ path: `${out}.png` });
 const errs = logs.filter((l) => /error/i.test(l));

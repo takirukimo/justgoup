@@ -38,6 +38,8 @@ export const WALL = {
   /** Highest a boulder wall may stand (m above the floor; the flat wall is GAME.boulderWall.height). */
   ceiling: GAME.boulderWall.height + 0.05,
   defaultLength: GAME.boulderWall.height,
+  /** Lowest a wall may stand (m): room to hang under a roof and fall onto the pads. */
+  minHeight: 2,
   /** Angle a new fold gives the panel above it (relative), so the fold reads at once. */
   splitStep: 15,
 } as const;
@@ -64,7 +66,7 @@ export const WALL_PRESETS: readonly WallPreset[] = [
   { id: 'steep-45', type: 'steep', label: '45°', spec: PROFILE_PRESETS.STEEP_45 },
   { id: 'kick', type: 'steep', label: '30 / 60', spec: PROFILE_PRESETS.KICK_30_60 },
   { id: 'cave', type: 'cave', label: 'CAVE 85°', spec: PROFILE_PRESETS.CAVE },
-  { id: 'roof', type: 'cave', label: 'ROOF 90°', spec: [[0.3, 0], [1.3, 35], [1.6, 90], [0.9, 25]] },
+  { id: 'roof', type: 'cave', label: 'ROOF 90°', spec: [[0.3, 0], [1.6, 30], [1.6, 90], [0.9, 25]] },
   { id: 'bulge', type: 'mixed', label: 'BULGE', spec: PROFILE_PRESETS.BULGE },
   { id: 'step', type: 'mixed', label: 'STEP', spec: [[2.0, -8], [2.5, 18]] },
 ];
@@ -107,6 +109,11 @@ export function angleLimits(n: number): { min: number; max: number } {
 export function panelRange(w: WallState, i: number): [number, number] {
   const p = w.panels;
   return [p[i].y0, i + 1 < p.length ? p[i + 1].y0 : w.length];
+}
+
+/** Does the wall stand too low to climb (WALL.minHeight)? */
+export function tooLow(w: WallState): boolean {
+  return wallHeightOf(cleanWall(w)) < WALL.minHeight - 1e-6;
 }
 
 /** World height (m) of the top of the wall. */

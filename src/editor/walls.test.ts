@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createDraft } from './model';
-import { cleanWall, fitLength, matchPreset, mergePanel, moveFold, presetWall, setWall, splitPanel, wallHeightOf, wallOf, wallStyleOf, wallTypeOf, WALL, WALL_PRESETS } from './walls';
+import { cleanWall, fitLength, tooLow, matchPreset, mergePanel, moveFold, presetWall, setWall, splitPanel, wallHeightOf, wallOf, wallStyleOf, wallTypeOf, WALL, WALL_PRESETS } from './walls';
 
 describe('wall presets', () => {
   it('every preset stands under the ceiling, reads as its type and matches itself', () => {
@@ -61,6 +61,11 @@ describe('panel editing', () => {
     expect(wallHeightOf(flat)).toBeLessThanOrEqual(WALL.ceiling + 1e-6);
     expect(flat.length).toBeLessThan(4.6);
     expect(fitLength([{ y0: 0, angle: 0 }], 6)).toBeLessThanOrEqual(WALL.ceiling + 1e-6);
+  });
+
+  it('knows a wall too low to climb under', () => {
+    expect(tooLow({ panels: [{ y0: 0, angle: 0 }, { y0: 0.3, angle: 90 }], length: 5.9 })).toBe(true);
+    for (const p of WALL_PRESETS) expect(tooLow(presetWall(p)), p.id).toBe(false);
   });
 
   it('reads the wall style off the panels (a short kicker does not make it mixed)', () => {

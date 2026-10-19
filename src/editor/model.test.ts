@@ -155,6 +155,30 @@ describe('validation', () => {
   });
 });
 
+describe('styled samples (pick the kind of bouldering)', () => {
+  it('a styled sample is set as that archetype on its own wall, valid for the editor', () => {
+    const cave = generateSample(77, 4, 'cave').boulder;
+    expect(cave.style).toBe('cave');
+    expect(cave.profile && Math.max(...cave.profile.map((p) => p.angle))).toBeGreaterThanOrEqual(60);
+    expect(validateDraft(cave).ok).toBe(true);
+    const slab = generateSample(78, 2, 'slab').boulder;
+    expect(slab.style).toBe('slab');
+    expect(slab.wallAngle).toBeLessThan(0);
+    const comp = generateSample(79, 4, 'compression').boulder;
+    expect(comp.style).toBe('compression');
+    expect(comp.holds.some((h) => h.type === 'volume')).toBe(true);
+    expect(validateDraft(comp).ok).toBe(true);
+  });
+
+  it('a folded sample keeps its own surface length (a cave keeps its lip)', () => {
+    const d = normalizeDraft({ ...createDraft(), height: 4.7, profile: [{ y0: 0, angle: 0 }, { y0: 0.3, angle: 30 }, { y0: 1.9, angle: 85 }, { y0: 4.1, angle: 20 }] });
+    expect(d.height).toBeCloseTo(4.7, 6);
+    expect(d.profile?.length).toBe(4);
+    // a flat wall that would poke through the ceiling is shortened
+    expect(normalizeDraft({ ...createDraft(), height: 5.9, wallAngle: 0 }).height).toBeLessThan(4.6);
+  });
+});
+
 describe('drafts', () => {
   it('keeps a sample\'s folded wall and hold variety, sanitised; undo restores a flattened wall', () => {
     const base = createDraft();

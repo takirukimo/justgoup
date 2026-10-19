@@ -46,6 +46,7 @@ import {
   setPanelAngle,
   setWall,
   splitPanel,
+  tooLow,
   wallHeightOf,
   wallOf,
   wallTypeOf,
@@ -1044,6 +1045,10 @@ export class BoulderEditor implements EditorAPI {
           this.toast('This panel is too short to fold', 'bad');
           return;
         }
+        if (tooLow(r.wall)) {
+          this.toast('Too low to climb · a wall stands at least 2 m tall', 'bad');
+          return;
+        }
         this.history.checkpoint(this.draft);
         this.wallSel = r.index;
         this.editWall(r.wall, true);
@@ -1141,6 +1146,13 @@ export class BoulderEditor implements EditorAPI {
    * 3D wall after a short rest; otherwise only the side view follows until the gesture ends.
    */
   private editWall(w: WallState, commitNow: boolean, before?: string): void {
+    if (tooLow(w) && !tooLow(wallOf(this.draft))) {
+      // a roof 30 cm off the floor is no wall: the edit stops where the wall would stand under 2 m
+      this.toastOnce('low', 'Too low to climb · a wall stands at least 2 m tall');
+      if (before !== undefined) this.history.discard();
+      this.render();
+      return;
+    }
     setWall(this.draft, w);
     this.wallSel = clamp(this.wallSel, 0, wallOf(this.draft).panels.length - 1);
     if (!commitNow) {
@@ -1505,11 +1517,15 @@ export class BoulderEditor implements EditorAPI {
     const slop = mouse ? 4 : 10;
     let best: HoldDef | null = null;
     let bs = Infinity;
+    // on a volume's face, small holds don't get the generous finger margin: the volume is grabbable
+    // right next to the holds bolted onto it
+    const f = this.pickFace(x, y);
+    const onFace = !!f?.vol;
     // holds first (one bolted onto a volume is drawn on its face), then the volume under the finger
     for (const h of this.draft.holds) {
       if (h.type === 'volume') continue;
       const sp = this.renderer.wallToScreen(h, this.liftOf(h));
-      const r = Math.max(footprint(h) * ppm, mouse ? 10 : 18) + slop;
+      const r = onFace ? Math.max(footprint(h) * ppm, mouse ? 8 : 12) + slop * 0.5 : Math.max(footprint(h) * ppm, mouse ? 10 : 18) + slop;
       const d = Math.hypot(sp.x - x, sp.y - y);
       if (d > r) continue;
       const score = d / r - (h.id === this.selectedId ? 0.35 : 0);
@@ -1519,7 +1535,6 @@ export class BoulderEditor implements EditorAPI {
       }
     }
     if (best) return best;
-    const f = this.pickFace(x, y);
     if (f?.vol) return f.vol;
     // the rim of a volume (a finger's width past its outline)
     const w = f?.p ?? null;

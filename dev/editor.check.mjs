@@ -1,5 +1,7 @@
 // EDITOR QA: drives dev/editor.html in headless Chromium (touch), places holds by tapping the wall,
-// checks the draft + status, walks TEST → (auto) SENT → PUBLISH, and saves screenshots per state.
+// checks the draft + status, walks TEST → (auto) SENT → PUBLISH, wall types + panel editing, the
+// palette (holds + volumes), holds bolted onto volumes, hold details, styled samples and the photo
+// import entry (a stand-in importer), and saves screenshots per state.
 // usage: node dev/editor.check.mjs [baseUrl] [outDir]
 import { chromium } from 'playwright-core';
 import { mkdirSync } from 'node:fs';
@@ -13,6 +15,8 @@ const browser = await chromium.launch({
   args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'],
 });
 const page = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true });
+// a busy shared machine renders SwiftShader frames slowly: generous timeouts
+page.setDefaultTimeout(120000);
 const logs = [];
 page.on('console', (m) => logs.push(`[${m.type()}] ${m.text()}`));
 page.on('pageerror', (e) => logs.push(`[pageerror] ${e.message}`));
@@ -25,10 +29,11 @@ const check = (ok, msg) => {
 const wait = (ms) => page.waitForTimeout(ms);
 const shot = async (name, settle = 2600) => {
   await wait(settle);
-  await page.screenshot({ path: `${out}/${name}.png` });
+  await page.screenshot({ path: `${out}/${name}.png`, timeout: 120000 });
   console.log('shot', name);
 };
 const draft = () => page.evaluate(() => window.__ed.editor.getDraft());
+const validated = (d) => !!d && Array.isArray(d.holds) && d.holds.some((h) => h.role === 'start') && d.holds.some((h) => h.role === 'top');
 const chip = () => page.evaluate(() => document.querySelector('.ed-chip')?.textContent ?? '');
 /** Screen point of a wall-local position. */
 const screenOf = (x, y) => page.evaluate(([x, y]) => window.__ed.renderer.wallToScreen({ x, y }), [x, y]);
@@ -43,7 +48,7 @@ const tapSel = async (sel) => {
   await wait(250);
 };
 
-await page.goto(`${base}?fresh=1&q=low&auto=sent`, { waitUntil: 'load' });
+await page.goto(`${base}?fresh=1&q=low&auto=sent&photo=stub`, { waitUntil: 'load' });
 await page.waitForFunction(() => !!window.__ed && !!document.querySelector('.ed'), null, { timeout: 30000 });
 await page.evaluate(() => window.__ed.renderer.setCameraMode('editor', { instant: true }));
 await shot('s1-empty', 3000);
@@ -66,7 +71,9 @@ await shot('s2-invalid');
 await tapSel('.ed-role-top');
 await tapWall(0, 4.05);
 // feet: pick the foot chip type, tap low on the wall
-await tapSel('.ed-tile[aria-label="Foot chip"]');
+// (the palette scrolls: pick the tile the way a finger would after scrolling to it)
+await page.evaluate(() => document.querySelector('.ed-tile[aria-label="Foot chip"]').click());
+await wait(250);
 await tapWall(-0.3, 0.7);
 await tapWall(0.35, 0.9);
 d = await draft();
@@ -216,6 +223,122 @@ await shot('s10-live', 1500);
 const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('jgu.editor.draft') ?? 'null'));
 check(saved && saved.draft.holds.length === 9 && saved.published, 'draft persisted to localStorage');
 
+// ── palette, volumes, holds bolted onto them, hold details ──
+const pick = (id) => page.evaluate((id) => document.querySelector(`.ed-tile-${id}`).click(), id);
+const tapAt = (x, y) =>
+  page.evaluate(([x, y]) => {
+    const s = document.querySelector('.ed-surface');
+    for (const t of ['pointerdown', 'pointerup']) s.dispatchEvent(new PointerEvent(t, { pointerId: 11, pointerType: 'touch', clientX: x, clientY: y, bubbles: true, isPrimary: true }));
+  }, [x, y]);
+await page.evaluate(() => window.__ed.editor['select'](null));
+await tapSel('.ed-tool-wall');
+await tapSel('.ed-wt-vertical');
+await wait(1500);
+await tapSel('.ed-tool-wall');
+await wait(1200);
+await page.evaluate(() => {
+  // a clear stretch of wall for the volume
+  const e = window.__ed.editor;
+  const d = e.getDraft();
+  d.holds = d.holds.filter((h) => Math.hypot(h.x + 0.9, h.y - 2.5) > 0.75);
+  e.open(d);
+  window.__ed.renderer.setCameraMode('editor', { instant: true });
+});
+await wait(2000);
+await tapSel('.ed-pal-tab-volumes');
+await pick('v-wedge');
+await wait(400);
+const nV0 = (await draft()).holds.length;
+let sp = await screenOf(-0.9, 2.5);
+await tapAt(sp.x, sp.y);
+await wait(1200);
+d = await draft();
+const vol = d.holds.find((h) => h.type === 'volume' && Math.hypot(h.x + 0.9, h.y - 2.5) < 0.2);
+check(d.holds.length === nV0 + 1 && !!vol && vol.role !== 'start' && vol.role !== 'top' && Math.abs(vol.seed) % 6 === 2, `a WEDGE from the volume library is set on the wall (${vol ? vol.type + ' ' + vol.role : 'none'})`);
+await page.evaluate(() => window.__ed.editor['select'](null));
+await pick('crimp');
+await wait(300);
+// tap the wedge's face a little right of its centre: the crimp is bolted onto it, under the finger
+const faceAt = await page.evaluate((v) => {
+  const e = window.__ed.editor;
+  const w = { x: v.x + 0.08, y: v.y + 0.02 };
+  const lift = e['draft'].holds.find((h) => h.id === v.id) ? 0.06 : 0;
+  return { w, s: window.__ed.renderer.wallToScreen(w, lift) };
+}, vol);
+await tapAt(faceAt.s.x, faceAt.s.y);
+await wait(1200);
+d = await draft();
+const mount = d.holds.find((h) => h.onVolume === vol.id);
+check(!!mount && mount.type === 'crimp', `tapping the volume's face with a hold bolts it on (${mount ? `${mount.type} on ${mount.onVolume}` : 'none'})`);
+if (mount) check(Math.hypot(mount.x - faceAt.w.x, mount.y - faceAt.w.y) < 0.08, `the bolted-on hold lands under the finger (${(Math.hypot(mount.x - faceAt.w.x, mount.y - faceAt.w.y) * 100).toFixed(1)} cm)`);
+await shot('s17-volume-mount', 2200);
+// drag the volume: its hold moves with it
+const vs = await screenOf(vol.x - 0.17, vol.y - 0.06);
+await page.evaluate(([x, y]) => {
+  const s = document.querySelector('.ed-surface');
+  const ev = (type, x, y) => s.dispatchEvent(new PointerEvent(type, { pointerId: 12, pointerType: 'touch', clientX: x, clientY: y, bubbles: true, isPrimary: true }));
+  ev('pointerdown', x, y);
+  for (let i = 1; i <= 8; i++) ev('pointermove', x + i * 4, y - i * 3);
+  ev('pointerup', x + 32, y - 24);
+}, [vs.x, vs.y]);
+await wait(800);
+d = await draft();
+const vol2 = d.holds.find((h) => h.id === vol.id);
+const m2 = d.holds.find((h) => h.id === mount?.id);
+check(!!vol2 && (vol2.x !== vol.x || vol2.y !== vol.y) && !!m2 && Math.abs(m2.x - vol2.x - (mount.x - vol.x)) < 0.002 && Math.abs(m2.y - vol2.y - (mount.y - vol.y)) < 0.002 && m2.onVolume === vol.id, `dragging the volume moves its hold along (${vol.x},${vol.y} → ${vol2?.x},${vol2?.y})`);
+// turn it with the inspector: the hold turns around the volume
+await page.evaluate((id) => window.__ed.editor['select'](id), vol.id);
+await wait(900);
+await tapSel('.ed-insp .ed-ibtn[aria-label="Rotate left 15°"]');
+await wait(500);
+d = await draft();
+const vol3 = d.holds.find((h) => h.id === vol.id);
+const m3 = d.holds.find((h) => h.id === mount?.id);
+const r0 = Math.hypot(m2.x - vol2.x, m2.y - vol2.y);
+const r1 = Math.hypot(m3.x - vol3.x, m3.y - vol3.y);
+check(Math.abs(vol3.angle - vol2.angle) > 0.2 && Math.abs(r1 - r0) < 0.003 && Math.abs(m3.angle - m2.angle) > 0.2, 'turning the volume turns its hold with it');
+await shot('s18-volume-selected', 1500);
+// delete the volume: its hold goes too; undo brings both back
+await tapSel('.ed-insp .ed-del');
+await wait(500);
+d = await draft();
+check(!d.holds.some((h) => h.id === vol.id || h.id === mount?.id), 'deleting the volume removes the hold bolted onto it');
+await tapSel('.ed-hist .ed-hbtn');
+await wait(500);
+d = await draft();
+check(d.holds.some((h) => h.id === vol.id) && d.holds.find((h) => h.id === mount?.id)?.onVolume === vol.id, 'undo restores the volume and its hold');
+// hold details: an edge's depth, lip and finish
+await page.evaluate(() => window.__ed.editor['select'](null));
+await pick('edge');
+await wait(300);
+sp = await screenOf(1.3, 1.3);
+await tapAt(sp.x, sp.y);
+await wait(800);
+d = await draft();
+const edge = d.holds.find((h) => h.type === 'edge' && Math.hypot(h.x - 1.3, h.y - 1.3) < 0.2);
+check(!!edge, 'an EDGE is set from the palette');
+if (edge) {
+  await page.evaluate((id) => window.__ed.editor['select'](id), edge.id);
+  await wait(900);
+  await tapSel('.ed-det-depth .ed-det-btn[aria-label="Edge depth up"]');
+  await tapSel('.ed-det-lip .ed-det-btn[aria-label="Lip angle up"]');
+  await tapSel('.ed-det-fin.fin-wood');
+  await wait(500);
+  const e2 = (await draft()).holds.find((h) => h.id === edge.id);
+  check(Number.isFinite(e2.edgeDepthMm) && Number.isFinite(e2.lipAngle) && e2.shape === 'wood', `the inspector sets edge depth ${e2.edgeDepthMm} mm, lip ${e2.lipAngle}°, finish ${e2.shape}`);
+  await shot('s19-edge-details', 1500);
+  for (let k = 0; k < 3; k++) await tapSel('.ed-hist .ed-hbtn');
+  const e3 = (await draft()).holds.find((h) => h.id === edge.id);
+  check(e3.edgeDepthMm === undefined && e3.lipAngle === undefined && e3.shape === undefined, 'undo takes the details back');
+  await page.evaluate(() => window.__ed.editor['select'](null));
+}
+// palette tab views for the report
+await tapSel('.ed-pal-tab-holds');
+await shot('s20-palette-holds', 1500);
+await tapSel('.ed-pal-tab-volumes');
+await shot('s21-palette-volumes', 1500);
+await tapSel('.ed-pal-tab-holds');
+
 // sample
 await tapSel('.ed-tool-more');
 await shot('s11-menu', 1200);
@@ -226,6 +349,29 @@ await page.waitForFunction(() => window.__ed.editor.getDraft().holds.length > 9 
 d = await draft();
 check(d.holds.length > 8 && d.holds.every((h) => h.role !== 'deco'), `sample loaded (${d.holds.length} holds, no deco)`);
 await shot('s12-sample', 3500);
+
+// a styled sample: CAVE
+await tapSel('.ed-tool-more');
+await page.evaluate(() => [...document.querySelectorAll('.ed-style')].find((b) => b.textContent === 'CAVE').click());
+await wait(300);
+await tapSel('.ed-sample-go');
+await page.waitForSelector('.modal-ok', { timeout: 5000 });
+await tapSel('.modal-ok');
+await page.waitForFunction(() => window.__ed.editor.getDraft().style === 'cave' && !document.querySelector('.ed-sample-go.is-busy'), null, { timeout: 60000 }).catch(() => {});
+d = await draft();
+check(d.style === 'cave' && (d.profile?.length ?? 0) >= 3 && validated(d), `a CAVE sample (${d.name}: ${d.profile?.map((p) => p.angle).join('/')}°)`);
+await shot('s22-cave-sample', 3000);
+await page.evaluate(() => [...document.querySelectorAll('.ed-style')].find((b) => b.textContent === 'ANY')?.click());
+// import from photo (a stand-in importer with src/photo's signature)
+await tapSel('.ed-tool-more');
+await page.evaluate(() => document.querySelector('.ed-photo-go').click());
+await page.waitForSelector('.modal-ok', { timeout: 5000 });
+await tapSel('.modal-ok');
+await page.waitForFunction(() => window.__ed.editor.getDraft().name === 'From The Photo', null, { timeout: 20000 }).catch(() => {});
+d = await draft();
+check(d.name === 'From The Photo' && d.holds.length > 8 && (await page.evaluate(() => window.__ed.events.includes('photo'))), `IMPORT FROM PHOTO runs the importer and loads its problem (${d.name}, ${d.holds.length} holds)`);
+check(await page.evaluate(() => !document.querySelector('.ed.ed-away')), 'the editor comes back after the import');
+await shot('s23-photo-import', 2500);
 
 // folded wall (a multi-angle sample): taps, drags and pinch zoom pick through the renderer's ray
 // cast, so they land where the finger is on every panel
@@ -241,7 +387,8 @@ await page.evaluate(() => {
   window.__ed.editor.open(d);
   window.__ed.renderer.setCameraMode('editor', { instant: true });
 });
-await wait(2500);
+await page.waitForFunction(() => (window.__ed.renderer.getBoulder()?.profile?.length ?? 0) === 3, null, { timeout: 30000 }).catch(() => {});
+await wait(1000);
 check(await page.evaluate(() => (window.__ed.renderer.getBoulder()?.profile?.length ?? 0) === 3), 'the editor shows the folded wall');
 await shot('s13-folded', 1500);
 await page.evaluate(() => window.__ed.editor['select'](null));
@@ -299,13 +446,23 @@ await wait(400);
 d = await draft();
 check(d.profile?.length === 3 && d.profile[2].angle === 60, 'undo restores the panel angle');
 const presets = { slab: 'slab', vertical: 'vertical', overhang: 'overhang', steep: 'overhang', cave: 'cave', mixed: 'mixed' };
+const routeStyle = (await draft()).style;
 for (const [type, style] of Object.entries(presets)) {
   await tapSel(`.ed-wt-${type}`);
-  await wait(2600);
+  // the 3D wall rebuilds once the change rests (slow SwiftShader frames on a busy machine)
+  await page
+    .waitForFunction(() => {
+      const d = window.__ed.editor.getDraft();
+      const rb = window.__ed.renderer.getBoulder();
+      return JSON.stringify(rb?.profile ?? null) === JSON.stringify(d.profile ?? null) && rb?.height === d.height;
+    }, null, { timeout: 30000 })
+    .catch(() => {});
   d = await draft();
   const rb = await page.evaluate(() => window.__ed.renderer.getBoulder());
   const same = JSON.stringify(rb?.profile ?? null) === JSON.stringify(d.profile ?? null) && rb?.height === d.height;
-  check(d.style === style && same, `${type.toUpperCase()} preset: style ${d.style}, ${d.profile ? d.profile.length + ' panels' : d.wallAngle + '°'}, ${d.height} m (3D wall rebuilt: ${same})`);
+  // a route style (dyno, compression…) survives a wall change; a wall style follows the wall
+  const want = routeStyle && !Object.values(presets).includes(routeStyle) ? routeStyle : style;
+  check(d.style === want && same, `${type.toUpperCase()} preset: style ${d.style}, ${d.profile ? d.profile.length + ' panels' : d.wallAngle + '°'}, ${d.height} m (3D wall rebuilt: ${same})`);
   await shot(`s16-wall-${type}`, 400);
 }
 // variants of a type: CAVE → ROOF 90°
