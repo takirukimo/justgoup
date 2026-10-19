@@ -233,6 +233,7 @@ export class CameraRig {
   private q = new THREE.Quaternion();
   private shakeOff = new THREE.Vector3();
   private readonly WORLD_UP = new THREE.Vector3(0, 1, 0);
+  private readonly tmpV = new THREE.Vector3();
   private bbox = { minX: 0, maxX: 0, minY: 0, maxY: 0 };
   private fwd = new THREE.Vector3();
   private camUp = new THREE.Vector3();
@@ -433,6 +434,11 @@ export class CameraRig {
     b.maxX = Math.max(s.pelvis.x, s.chest.x);
     b.minY = Math.min(s.pelvis.y, s.chest.y);
     b.maxY = Math.max(s.pelvis.y, s.chest.y) + 0.32; // head
+    if (s.chest.y < s.pelvis.y - 0.05 && s.special === 'bat') {
+      // hanging upside down (bat hang): the head is below the chest
+      b.minY = s.chest.y - 0.32;
+      b.maxY = s.pelvis.y;
+    }
     for (const id of ['LH', 'RH', 'LF', 'RF'] as const) {
       const p = s.limbs[id].pos;
       if (p.x < b.minX) b.minX = p.x;
@@ -770,10 +776,21 @@ export class CameraRig {
   private bodyPoints(frame: WallFrame, s: ClimberState, n: number): number {
     const pts = this.pts;
     const d = s.pelvisDepth;
-    frame.toWorldXYZ(s.chest.x, s.chest.y, d, pts[n]);
-    // the head: above the chest in the body's own up (roughly world up when hanging)
-    pts[n++].addScaledVector(this.WORLD_UP, 0.34);
-    frame.toWorldXYZ(s.pelvis.x, s.pelvis.y, d, pts[n++]);
+    if (s.special === 'bat' && s.chestDepth !== undefined && Number.isFinite(s.chestDepth)) {
+      // a bat hang: the chest hangs far out of the wall below the hips and the head below it, along the
+      // spine (the whole inverted body stays in the frame)
+      const P = frame.toWorldXYZ(s.pelvis.x, s.pelvis.y, d, pts[n + 1]);
+      const C = frame.toWorldXYZ(s.chest.x, s.chest.y, s.chestDepth, pts[n]);
+      this.tmpV.subVectors(C, P);
+      const l = this.tmpV.length();
+      if (l > 1e-4) C.addScaledVector(this.tmpV, 0.34 / l);
+      n += 2;
+    } else {
+      frame.toWorldXYZ(s.chest.x, s.chest.y, d, pts[n]);
+      // the head: above the chest in the body's own up (roughly world up when hanging)
+      pts[n++].addScaledVector(this.WORLD_UP, 0.34);
+      frame.toWorldXYZ(s.pelvis.x, s.pelvis.y, d, pts[n++]);
+    }
     for (const id of ['LH', 'RH', 'LF', 'RF'] as const) {
       const L = s.limbs[id];
       frame.toWorldXYZ(L.pos.x, L.pos.y, Math.max(0.05, L.depth), pts[n++]);

@@ -163,6 +163,8 @@ export interface LimbGoal {
   highStep: number;
   /** Feet: allow pointing the foot (raising the heel) when the leg is too short. */
   autoPoint: boolean;
+  /** Feet: 0..1 a figure 4 — the thigh lifted across the body over the opposite arm (JOINT_LIMITS.hipConeFig4). */
+  overArm: number;
   /** Shoulder elevation (m) for this arm. */
   lift: number;
   /** Shoulder moved out to the side (m): the shoulder blade rotating up under an overhead reach. */
@@ -205,6 +207,11 @@ export interface BodyGoal {
   wallP: THREE.Vector3;
   /** Preferred escape direction for self-collision (toward the camera / away from the wall); zero = none. */
   away: THREE.Vector3;
+  /**
+   * Figure 4: the leg (0 left, 1 right) hooked over the opposite arm, or −1. That thigh may rest on that
+   * forearm (their contact is allowed; the pose puts the back of the knee on it).
+   */
+  legOverArm: number;
 }
 
 function limbGoal(): LimbGoal {
@@ -223,6 +230,7 @@ function limbGoal(): LimbGoal {
     contact: new THREE.Vector3(),
     highStep: 0,
     autoPoint: true,
+    overArm: 0,
     lift: 0,
     spread: 0,
     jointTarget: false,
@@ -251,6 +259,7 @@ export function createBodyGoal(): BodyGoal {
     wallN: new THREE.Vector3(0, 0, 1),
     wallP: new THREE.Vector3(),
     away: new THREE.Vector3(),
+    legOverArm: -1,
   };
 }
 
@@ -380,6 +389,14 @@ export const JOINT_LIMITS = {
    */
   hipConeHigh: [
     [0, 122], [30, 132], [55, 138], [90, 132], [120, 110], [150, 80], [180, 32], [210, 24], [270, 24], [315, 62], [340, 100], [360, 122],
+  ] as PolarTable,
+  /**
+   * A figure 4 (advanced moves): the leg lifted across the body over the opposite arm — deep flexion with
+   * adduction (the knee toward the opposite shoulder, as flexible climbers do), blended in for that leg only
+   * (LimbGoal.overArm).
+   */
+  hipConeFig4: [
+    [0, 122], [30, 132], [55, 138], [90, 136], [120, 132], [150, 122], [180, 70], [210, 30], [270, 24], [315, 62], [340, 100], [360, 122],
   ] as PolarTable,
   /** Flexion beyond this needs a bent knee (straight-leg raise is limited by the hamstrings). */
   hipFlexStraight: 92,
@@ -1044,6 +1061,8 @@ export class BodyRig {
   readonly reachMiss = [0, 0, 0, 0];
   /** Per limb: the high-step / hook range blend for this solve (LimbGoal.highStep; legs only). */
   private highK = [0, 0, 0, 0];
+  /** Per limb: the figure-4 range blend (LimbGoal.overArm; legs only). */
+  private overK = [0, 0, 0, 0];
   private reqEnd = [0, 1, 2, 3].map(() => new THREE.Vector3());
   private stretchK = [1, 1, 1, 1];
   /** Last frame's elbow / knee apex direction per limb (swivel rate limit) and the solve's dt. */
@@ -2861,6 +2880,7 @@ export class BodyRig {
     const up = this.tmpGoalUp.copy(goal.up);
     const tgt = this.tgtW[li];
     this.highK[li] = clampN(goal.highStep, 0, 1);
+    this.overK[li] = clampN(goal.overArm, 0, 1);
     if (goal.useContact) this.cToe.copy(goal.contact);
     else toeLocal(sg, this.outfit.shoe, this.cToe);
     const maxLeg = (THIGH + SHIN) * 0.992;
@@ -3030,8 +3050,9 @@ export class BodyRig {
       if (Number.isNaN(th)) th = 0;
     }
     const ap = this.apex[li].copy(this.cE1).multiplyScalar(Math.cos(th)).addScaledVector(this.cE2, Math.sin(th));
-    if (this.dtSolve > 0 && this.apexPrevOk[li]) {
+    if (this.dtSolve > 0 && this.apexPrevOk[li] && this.overK[li] < 0.5) {
       // continuity: the apex turns about the limb axis at most SW_RATE·dt from last frame's
+      // (not for a figure-4 leg: its pose already eases the knee over the arm)
       const pp = this.cA.copy(this.apexPrev[li]).addScaledVector(this.cD, -this.apexPrev[li].dot(this.cD));
       if (pp.lengthSq() > 1e-6) {
         pp.normalize();
@@ -3241,6 +3262,9 @@ export class BodyRig {
     const thP = Math.atan2(e2x, e1x);
     const far = Math.abs(Math.atan2(Math.sin(th - thP), Math.cos(th - thP)));
     if (far < 1.75) return th;
+    // (a pose that asks for the knee / elbow somewhere else — the pole itself far from last frame's apex,
+    // e.g. a leg lifted over an arm — turns it there: only a flip the pole didn't ask for is held)
+    if (Math.abs(thP) > 1.2) return th;
     let lo = thP - 0.7;
     let hi = thP + 0.7;
     for (let i = 0; i < 7; i++) {
@@ -3311,6 +3335,8 @@ export class BodyRig {
       const omega = Math.atan2(oz, ox) / DEG;
       let max = polarMax(L.hipCone, omega);
       if (kh > 0) max += (polarMax(L.hipConeHigh, omega) - max) * kh;
+      const ko = this.overK[li];
+      if (ko > 0) max += (Math.max(max, polarMax(L.hipConeFig4, omega)) - max) * ko;
       if (oz > 0) {
         // straight-leg raise: deep flexion needs a bent knee
         const straight = L.hipFlexStraight * DEG;
@@ -3553,8 +3579,9 @@ export class BodyRig {
       hits += this.hitLimbs(g, 2, 0, 3, 1, 0.4);
       hits += this.hitLimbs(g, 2, 1, 3, 0, 0.4);
       for (let a = 0; a < 2; a++) {
-        hits += this.hitLimbs(g, a, 1, 2, 0, 0.3);
-        hits += this.hitLimbs(g, a, 1, 3, 0, 0.3);
+        // (a figure 4's thigh rests on the opposite forearm by design)
+        if (g.legOverArm !== 0 || a !== 1) hits += this.hitLimbs(g, a, 1, 2, 0, 0.3);
+        if (g.legOverArm !== 1 || a !== 0) hits += this.hitLimbs(g, a, 1, 3, 0, 0.3);
       }
       if (!hits) break;
       this.contacts += hits;
@@ -3818,7 +3845,7 @@ export class ClimberModel extends THREE.Group {
   private holdLookup: ((id: string, out: HoldInfo) => boolean) | null = null;
   private ropeAnchor = new THREE.Vector3();
   private hasRopeAnchor = false;
-  private holdInfo: HoldInfo[] = [0, 1, 2, 3].map(() => ({
+  private holdInfo: HoldInfo[] = [0, 1, 2, 3, 4, 5].map(() => ({
     type: 'edge' as HoldType,
     angle: -Math.PI / 2,
     size: 0.06,
@@ -3917,6 +3944,26 @@ export class ClimberModel extends THREE.Group {
   private armPush = 0;
   /** Landed under an overhang: the climber steps back from the wall until the head clears it. */
   private landBack = 0;
+  // ── advanced moves (ClimberState.special, read defensively; shared spec v0.3) ──
+  /** Bat hang: blend into the inverted hang (the sim's bat.blend, smoothed). */
+  private batK = 0;
+  /** Figure 4: blend of the leg over the arm, which hand holds and which leg hooks (0 left, 1 right). */
+  private f4K = 0;
+  private f4Hand = 0;
+  private f4Leg = 1;
+  /** Per foot: heel-toe cam blend. */
+  private camK = [0, 0];
+  /** The body's front (rig space, from the last pose): the face direction, whatever way up the body is. */
+  private face = new THREE.Vector3(0, 0, -1);
+  /** Per foot in a heel-toe cam: the foot's placement (world) — toe target, heel → toe, instep. */
+  private camTgt = [new THREE.Vector3(), new THREE.Vector3()];
+  private camDir = [new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 1, 0)];
+  private camUp = [new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, 1)];
+  private camOk = [false, false];
+  private aK = new THREE.Vector3();
+  private aA = new THREE.Vector3();
+  private aF = new THREE.Vector3();
+  private aN = new THREE.Vector3();
   // ── Phase B techniques (LimbSnapshot.chalking / shakingOut / flying / pump / footMode) ──
   /** Per hand: seconds into the chalk-up (−1 = not chalking) and the blend toward the bag. */
   private chalkT = [-1, -1];
@@ -4131,6 +4178,27 @@ export class ClimberModel extends THREE.Group {
     this.bRx = bRx;
     this.bRy = bRy;
     const onWall = ph === 'climbing' || ph === 'idle' || ph === 'topped';
+    // advanced moves (optional sim fields): a bat hang inverts the body below the hooked / cammed feet, a
+    // figure 4 drapes a leg over the holding arm and presses the body up on it
+    {
+      const sx = state as ClimberState & { special?: unknown; bat?: { blend?: unknown } | null; figure4?: { hand?: unknown; leg?: unknown; blend?: unknown } | null };
+      const sp = onWall ? sx.special : null;
+      const num01 = (v: unknown, dflt: number) => (typeof v === 'number' && Number.isFinite(v) ? clampN(v, 0, 1) : dflt);
+      const batT = sp === 'bat' ? num01(sx.bat?.blend, 1) : 0;
+      const f4 = sp === 'figure4' && sx.figure4 ? sx.figure4 : null;
+      const f4T = f4 ? num01(f4.blend, 1) : 0;
+      if (f4) {
+        this.f4Hand = f4.hand === 'RH' ? 1 : 0;
+        this.f4Leg = f4.leg === 'LF' ? 0 : f4.leg === 'RF' ? 1 : 1 - this.f4Hand;
+      }
+      // (the sim already eases both in and out; this only takes the edge off a missing / jumping value)
+      this.batK += (batT - this.batK) * (snap ? 1 : dampK(14, d));
+      this.f4K += (f4T - this.f4K) * (snap ? 1 : dampK(14, d));
+      if (this.batK < 1e-4) this.batK = 0;
+      if (this.f4K < 1e-4) this.f4K = 0;
+    }
+    const batK = this.batK;
+    const upright = 1 - batK;
 
     // high step: a foot near / above hip height makes the hips sit back from the wall (room for the
     // knee in front of the hip) and hikes that hip, as real climbers do to get a foot up high
@@ -4176,7 +4244,7 @@ export class ClimberModel extends THREE.Group {
           }
         }
       }
-      this.crossK += (cross - this.crossK) * (snap ? 1 : dampK(6, d));
+      this.crossK += (cross * (1 - this.batK) - this.crossK) * (snap ? 1 : dampK(6, d));
       sit = Math.max(sit, 0.12 * this.crossK);
     }
     // a foot on a hold closer to its hip than the fully bent leg can fold (the knee's flexion limit):
@@ -4195,6 +4263,10 @@ export class ClimberModel extends THREE.Group {
       }
       sit = Math.min(sit, 0.3);
     }
+    // inverted (bat hang) none of the upright stance rules apply; in a figure 4 the hips come out from
+    // the wall so the leg over the arm fits between the belly and the wall
+    sit = sit * upright + 0.14 * this.f4K;
+    hike *= upright * (1 - this.f4K);
     this.sSit += (sit - this.sSit) * (snap ? 1 : dampK(5, d));
     this.sHike += (hike - this.sHike) * (snap ? 1 : dampK(5, d));
 
@@ -4228,6 +4300,12 @@ export class ClimberModel extends THREE.Group {
         chestDepth = Math.min(chestDepth, L.depth + gap);
       }
       chestDepth = Math.max(0.15, chestDepth);
+      // a bat hang: the chest hangs far out of the wall below the hips (the sim's chestDepth, unclamped)
+      if (batK > 0 && state.chestDepth !== undefined && Number.isFinite(state.chestDepth)) {
+        chestDepth += (Math.min(1.6, Math.max(0.15, state.chestDepth + this.sSit)) - chestDepth) * batK;
+      }
+      // a figure 4: the chest over the pressed-up hips
+      if (this.f4K > 0) chestDepth = Math.max(chestDepth, (state.pelvisDepth + this.sSit + 0.06) * this.f4K + chestDepth * (1 - this.f4K));
     } else if (ph === 'falling') chestDepth = state.pelvisDepth + 0.04;
     else chestDepth = state.pelvisDepth + 0.06;
     // the head still in the wall after the neck nodded and turned (a long snout pressed to the wall,
@@ -4348,7 +4426,7 @@ export class ClimberModel extends THREE.Group {
           k = sstep(0.03, 0.2, across);
         }
       }
-      this.dropRaw[s] = k;
+      this.dropRaw[s] = k * upright;
     }
     if (this.dropRaw[0] > 0 && this.dropRaw[1] > 0) this.dropRaw[this.dropRaw[0] >= this.dropRaw[1] ? 1 : 0] = 0;
     for (let s = 0; s < 2; s++) {
@@ -4363,6 +4441,11 @@ export class ClimberModel extends THREE.Group {
     this.q.setFromAxisAngle(this.U, -this.sYaw);
     g.chestRight.copy(this.Rb).applyQuaternion(this.q);
     g.pelvisTilt = this.sHike;
+    g.legOverArm = this.f4K > 0.3 ? this.f4Leg : -1;
+    // the body's front (spine × right): toward the wall upright, away from it hanging upside down
+    this.face.crossVectors(this.U, g.pelvisRight);
+    if (this.face.lengthSq() < 1e-8) this.face.copy(Nw).negate();
+    this.face.normalize();
 
     // wall plane + escape direction (toward the camera) for joint limits and self-collision; a folded
     // wall gives the rig every panel (WallFrame.spans() is cached per wall, so this is an identity check)
@@ -4904,6 +4987,7 @@ export class ClimberModel extends THREE.Group {
     } else frame.toWorld(L.pos, depth, this.v0);
     fg.jointTarget = false;
     fg.autoPoint = true;
+    fg.overArm = 0;
     const dir = fg.dir;
     const up = fg.up;
     const pole = fg.pole;
@@ -4968,6 +5052,8 @@ export class ClimberModel extends THREE.Group {
     // a foot at / above hip height or hooking may use the high-step range (frog: thigh out and up)
     const hookish = fm === 'heel' || fm === 'toe' || fm === 'cam';
     fg.highStep = mode === 'hold' ? Math.max(hookish ? 1 : 0, sstep(-0.24, 0.02, hf)) : mode === 'drag' ? sstep(-0.2, 0.05, hf) : 0;
+    // hanging upside down from the feet: the whole hook / frog range (the legs reach up to the holds)
+    if (this.batK > 0 && mode === 'hold') fg.highStep = Math.max(fg.highStep, this.batK);
     if (mode === 'hold' || mode === 'wall') {
       // toe into the wall, turned out (inside edge), heel dropped; Elvis leg = heel bounce
       const turn0 = (0.36 + 0.55 * high) * (1 - 0.55 * overhang) * (mode === 'wall' ? 0.4 : 1);
@@ -5088,6 +5174,26 @@ export class ClimberModel extends THREE.Group {
         else fg.target.addScaledVector(dir, 0.018 * hk).addScaledVector(up, -0.036 * hk);
         fg.autoPoint = false;
       }
+      // heel-toe cam: the foot jammed between two opposing surfaces — the heel on the one nearer the hip,
+      // the toe on the other, the foot's axis along the span (tilted out of the wall when the span is
+      // shorter than the shoe), the instep facing out, the ankle locked
+      const camOn = fm === 'cam' && mode === 'hold' && !!L.camPos && L.holdId !== null && this.placeCam(frame, s, L, info, depth);
+      if (!camOn && fm !== 'cam') this.camOk[s] = false;
+      this.camK[s] += ((camOn ? 1 : 0) - this.camK[s]) * (snap ? 1 : dampK(12, d));
+      const cmk = this.camOk[s] ? this.camK[s] : 0;
+      if (cmk > 1e-3) {
+        fg.target.lerp(this.camTgt[s], cmk);
+        dir.lerp(this.camDir[s], cmk).normalize();
+        up.lerp(this.camUp[s], cmk);
+        up.addScaledVector(dir, -up.dot(dir));
+        if (up.lengthSq() < 1e-8) up.copy(Nw);
+        up.normalize();
+        fg.autoPoint = false;
+        // the shin square to the jammed foot: the knee out from the wall under the foot (a little toward
+        // the toe and out to its side), so the ankle needs no twist that would turn the foot off its holds
+        this.v2.copy(Nw).multiplyScalar(0.8).addScaledVector(this.camDir[s], 0.25).addScaledVector(Rw, side * 0.3).normalize();
+        pole.normalize().lerp(this.v2, cmk);
+      }
       // crossed feet: the front leg's knee comes forward and across, the back leg's knee stays out to
       // its own side and low, so the shins pass one in front of the other
       const xk = this.crossK;
@@ -5149,6 +5255,16 @@ export class ClimberModel extends THREE.Group {
         up.addScaledVector(dir, -up.dot(dir)).normalize();
       }
     }
+    // bat hang: the knees bend the way the inverted body faces (out from the wall, the legs folded up to
+    // the hooked / cammed feet)
+    const bk = this.batK;
+    if (bk > 1e-3 && mode === 'hold') {
+      this.v2.copy(this.face).multiplyScalar(0.85).addScaledVector(Nw, 0.25);
+      pole.normalize().lerp(this.v2.normalize(), bk);
+    }
+    // figure 4: this leg hooked over the opposite holding arm — the back of the knee on the forearm near
+    // the elbow, the shin hanging past the arm's far side, the foot pointed
+    if (this.f4K > 1e-3 && s === this.f4Leg && ph !== 'falling' && ph !== 'landed') this.poseFigure4(fg, Hp, Nw, Uw, Rw, s);
     // a standing foot on a drawn hold: the toe box rests on its real top (the sole tangent to the hold
     // where it presses), the tip just off the wall / volume face it is bolted to
     const standing =
@@ -5167,6 +5283,134 @@ export class ClimberModel extends THREE.Group {
       pole.normalize().addScaledVector(Uw, Math.sin(t * 69 + s * 1.7 + 0.6) * 0.22 * e).addScaledVector(Rw, Math.sin(t * 57 + s) * 0.12 * e);
     }
     pole.normalize();
+  }
+
+  /**
+   * A heel-toe cam's placement (world) for foot s: its two contacts — the hold it is on (contactPos) and
+   * the opposite surface (camPos on camHoldId) — the heel on the one nearer its hip, the toe tip on the
+   * other. → camTgt (toe tip), camDir (heel → toe), camUp (instep, out of the wall). False when it can't.
+   */
+  private placeCam(frame: WallFrame, s: number, L: LimbSnapshot, info: HoldInfo | null, depth: number): boolean {
+    const cp = L.camPos;
+    if (!cp) return false;
+    const c1 = L.contactPos ?? L.pos;
+    const info2 = this.lookupHold(L.camHoldId ?? null, 4 + s);
+    // both contacts a little off the wall: on the holds' facing sides, not their bases
+    this.p2.x = c1.x;
+    this.p2.y = c1.y + (info?.dy ?? 0);
+    const A = frame.toWorld(this.p2, Math.max(0.02, depth * 0.85), this.aA);
+    this.p2.x = cp.x;
+    this.p2.y = cp.y + (info2?.dy ?? 0);
+    const B = frame.toWorld(this.p2, info2 ? Math.max(0.02, info2.depth * 0.5 + 0.008) : 0.03, this.aK);
+    // the heel goes on the contact nearer the hip
+    const an = L.anchor;
+    const heelOnA = Math.hypot(c1.x - an.x, c1.y - an.y) <= Math.hypot(cp.x - an.x, cp.y - an.y);
+    const heel = heelOnA ? A : B;
+    const toe = heelOnA ? B : A;
+    const Nl = frame.folded ? frame.normalAt((c1.y + cp.y) * 0.5, this.aN) : this.aN.copy(frame.normal);
+    // heel back → toe tip of the shoe ≈ 0.24 m: a shorter span tilts the heel up onto its hold (the toe
+    // stays jammed against the other one), a little more the shorter the span
+    const FL = 0.24;
+    const span = heel.distanceTo(toe);
+    const D = this.camDir[s].subVectors(toe, heel);
+    if (span < 1e-4) return false;
+    if (span < FL) D.addScaledVector(Nl, -Math.min(0.045, Math.sqrt(FL * FL - span * span) * 0.35));
+    D.normalize();
+    // the toe tip on its surface; a span longer than the shoe keeps the heel on its hold, the toe short
+    this.camTgt[s].copy(span <= FL ? toe : this.aF.copy(heel).addScaledVector(D, FL));
+    this.camUp[s].copy(Nl).addScaledVector(D, -Nl.dot(D));
+    if (this.camUp[s].lengthSq() < 1e-6) this.camUp[s].copy(frame.up);
+    this.camUp[s].normalize();
+    this.camOk[s] = true;
+    return true;
+  }
+
+  /**
+   * Figure 4 (shared spec): leg s over the opposite holding arm. The back of the knee rests on that
+   * forearm near the elbow (last frame's solved arm), the thigh at its own length from the hip (the spot
+   * slides along the forearm to fit), the shin hangs past the arm's far side and the foot points down.
+   * Blends the foot goal in by f4K (the sim's press-up).
+   */
+  private poseFigure4(fg: LimbGoal, Hp: THREE.Vector3, Nw: THREE.Vector3, Uw: THREE.Vector3, Rw: THREE.Vector3, s: number): void {
+    const k = this.f4K;
+    const h = this.f4Hand;
+    const J = this.rig.joints;
+    const E = J.elbow[h];
+    const W = J.wrist[h];
+    const fd = this.aF.subVectors(W, E);
+    const fl = fd.length();
+    if (fl < 0.05) return;
+    fd.multiplyScalar(1 / fl);
+    // over the arm: up and out of the wall, square to the forearm
+    const n = this.aN.copy(WORLD_UP).multiplyScalar(0.8).addScaledVector(Nw, 0.5);
+    n.addScaledVector(fd, -n.dot(fd));
+    if (n.lengthSq() < 1e-6) n.copy(Nw);
+    n.normalize();
+    const r = R_FORE[0] * 0.6 + R_FORE[1] * 0.4 + R_THIGH[1] + 0.008;
+    // the spot on the forearm the thigh rests on: the thigh (hip → knee) passes over it at the touching
+    // distance, as near its knee end as the arm's distance from the hip allows (≈85% of the thigh), with
+    // the knee clear of the wall
+    let bestT = -1;
+    let bestE = Infinity;
+    for (let i = 0; i <= 10; i++) {
+      const t = 0.04 + (i / 10) * 0.8;
+      this.aK.copy(E).addScaledVector(fd, t * fl).addScaledVector(n, r);
+      const dl = this.aK.distanceTo(Hp);
+      if (dl < 0.12 || dl > THIGH) continue;
+      // the knee this puts out past the spot
+      this.aA.subVectors(this.aK, Hp).multiplyScalar(THIGH / dl).add(Hp);
+      if (this.rig.wallDepth(this.aA) < R_KNEE_WALL + WALL_MARGIN + 0.02) continue;
+      const e = Math.abs(dl - THIGH * 0.85);
+      if (e < bestE) {
+        bestE = e;
+        bestT = t;
+      }
+    }
+    if (bestT < 0) bestT = 0.2;
+    const K = this.aK.copy(E).addScaledVector(fd, bestT * fl).addScaledVector(n, r);
+    // the knee at the thigh's length along hip → spot
+    K.sub(Hp);
+    const kl = K.length();
+    if (kl < 1e-4) return;
+    K.multiplyScalar((THIGH * 0.995) / kl).add(Hp);
+    // the shin hangs past the arm's far side (away from the body), a little out from the wall
+    const far = h === 0 ? -1 : 1;
+    const sd = this.aA.copy(WORLD_UP).multiplyScalar(-0.85).addScaledVector(Rw, far * 0.32).addScaledVector(Nw, 0.1).normalize();
+    // ankle → the toe tip of a pointed foot: toes toward the wall, pitched down along the shin within the
+    // ankle's range (≈35° pointed), so the ankle limit never turns the foot (and the knee) off the arm
+    const fw = this.v2.copy(Nw).negate().addScaledVector(Rw, far * 0.3);
+    fw.addScaledVector(sd, -fw.dot(sd));
+    if (fw.lengthSq() < 1e-6) fw.copy(Uw);
+    fw.normalize();
+    const dirF = fw.multiplyScalar(Math.cos(0.6)).addScaledVector(sd, Math.sin(0.6)).normalize();
+    const upF = this.v3.copy(Nw).addScaledVector(dirF, -Nw.dot(dirF));
+    if (upF.lengthSq() < 1e-6) upF.copy(Uw);
+    upF.normalize();
+    // the leg as an ankle target (the knee spot fixes the whole leg): from the dangling foot's ankle
+    basisQuat(fg.dir, fg.up, this.q);
+    toeLocal(SIGN[s], 'climbing', this.lq).applyQuaternion(this.q);
+    const ankle = sd.multiplyScalar(SHIN * 0.99).add(K);
+    fg.target.sub(this.lq).lerp(ankle, k);
+    fg.jointTarget = true;
+    fg.dir.lerp(dirF, k).normalize();
+    fg.up.lerp(upF, k);
+    fg.up.addScaledVector(fg.dir, -fg.up.dot(fg.dir));
+    if (fg.up.lengthSq() < 1e-8) fg.up.copy(upF);
+    fg.up.normalize();
+    // the knee exactly toward the spot (square to the hip → ankle line)
+    this.v2.subVectors(ankle, Hp);
+    const l2 = this.v2.lengthSq();
+    this.v3.subVectors(K, Hp);
+    if (l2 > 1e-8) this.v3.addScaledVector(this.v2, -this.v3.dot(this.v2) / l2);
+    if (this.v3.lengthSq() > 1e-8) fg.pole.normalize().lerp(this.v3.normalize(), k);
+    fg.highStep = Math.max(fg.highStep, k);
+    fg.overArm = k;
+    fg.autoPoint = false;
+    if (k > 0.5) {
+      fg.pinned = true;
+      // (the shin hangs between the free leg and the wall: the free leg passes in front of it)
+      fg.layer = -1;
+    }
   }
 
   /**
@@ -5384,6 +5628,11 @@ export class ClimberModel extends THREE.Group {
           target.lerp(this.v1, glance * 0.85);
         }
       }
+    }
+    // hanging upside down: the eyes forward / down toward the mats, not up the wall at the hands
+    if (this.batK > 1e-3) {
+      this.v1.copy(g.chest).addScaledVector(this.face, 1.6).addScaledVector(WORLD_UP, -1.1);
+      target.lerp(this.v1, this.batK);
     }
     let nod = 0;
     const weight = 1;

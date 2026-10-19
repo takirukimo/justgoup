@@ -3,6 +3,8 @@
 // GameRenderer, frozen at the telling moment.
 //   tech = heel | toe | flag | backflag | drop | smear | shake | chalk | deadpoint | dyno | pump
 //          | highstep | heelhigh | toehigh (v0.3 high feet)
+//          | cam (heel-toe cams on a roof) | bat / batin (mid-swing) / batup (sitting back up)
+//          | fig4 / fig4in (pressing up) / fig4reach (the free hand up high)   (v0.3 advanced moves)
 //   at=<s> capture time after the action (default per technique)   cam=follow|side|front
 //   head=<id> cw=<colourway>
 // The page title reports the sim's footMode / flags at the capture so a shot can be checked.
@@ -13,10 +15,33 @@ import type { BoulderDef, ClimberState, ColorwayId, HeadId, HoldDef, LimbId, Vec
 import { ClimberSim } from '../src/game/climber-sim';
 import { WallFrame } from '../src/render/wall-frame';
 
-type Tech = 'heel' | 'toe' | 'flag' | 'backflag' | 'drop' | 'smear' | 'shake' | 'chalk' | 'deadpoint' | 'dyno' | 'pump' | 'highstep' | 'heelhigh' | 'toehigh';
+type Tech =
+  | 'heel'
+  | 'toe'
+  | 'flag'
+  | 'backflag'
+  | 'drop'
+  | 'smear'
+  | 'shake'
+  | 'chalk'
+  | 'deadpoint'
+  | 'dyno'
+  | 'pump'
+  | 'highstep'
+  | 'heelhigh'
+  | 'toehigh'
+  | 'cam'
+  | 'bat'
+  | 'batin'
+  | 'batup'
+  | 'fig4'
+  | 'fig4in'
+  | 'fig4reach';
 
 interface Scenario {
   wall: number;
+  /** A whole problem of its own instead of base(wall) + extra (advanced moves: a cave, a jug ladder). */
+  boulder?: () => BoulderDef;
   /** Extra holds relative to the hip / shoulder anchors found on a first reset. */
   extra: (a: Record<LimbId, Vec2>, p: Vec2) => HoldDef[];
   /** Actions, run once at their time (s after the climb starts). */
@@ -70,7 +95,77 @@ const dragTo = (limb: LimbId, to: (s: ClimberState) => Vec2, dur = 0.5) => (sim:
   ctx.drag = { limb, from: { x: L.pos.x, y: L.pos.y }, to: to(st), t0: -1, dur, release: true };
 };
 
+/** A cave (advanced.test.ts): vertical to 1.3 m, then a flat roof; hands on two roof jugs, feet on two roof edges with opposing edges a foot-length further out (heel-toe cams). */
+const H = (id: string, x: number, y: number, type: HoldDef['type'], size: number, role: HoldDef['role'], deg = -90): HoldDef => hold(id, x, y, type, role, (deg * Math.PI) / 180, size);
+const ROOF = +(new URLSearchParams(location.search).get('roof') ?? 2.3);
+function cave(): BoulderDef {
+  // (the test's cave roof is 1.3 m up; a bat hang under it would put the head into the mats: here it is
+  // ROOF m up, ?roof= to change)
+  const o = ROOF - 1.3;
+  return {
+    ...base(90),
+    holds: [
+      H('s1', -0.25, 2.25 + o, 'jug', 0.11, 'start'),
+      H('s2', 0.25, 2.25 + o, 'jug', 0.11, 'start'),
+      H('a1', -0.3, 1.6 + o, 'edge', 0.07, 'foot', -90),
+      H('a2', 0.3, 1.6 + o, 'edge', 0.07, 'foot', -90),
+      H('b1', -0.3, 1.84 + o, 'edge', 0.07, 'foot', 90),
+      H('b2', 0.3, 1.84 + o, 'edge', 0.07, 'foot', 90),
+      H('t', 0, 4.1 + o, 'jug', 0.12, 'top'),
+    ],
+    height: 4.5 + o,
+    profile: [
+      { y0: 0, angle: 0 },
+      { y0: ROOF, angle: 90 },
+    ],
+    startFeet: { LF: 'a1', RF: 'a2' },
+  };
+}
+/** A vertical jug ladder for the figure 4 (advanced.test.ts): LH / RH on two jugs at ≈2 m, a jug far above. */
+function ladder(): BoulderDef {
+  return {
+    ...base(0),
+    holds: [
+      H('s1', -0.2, 2.0, 'jug', 0.11, 'start'),
+      H('s2', 0.25, 2.05, 'jug', 0.11, 'start'),
+      H('f1', -0.25, 0.75, 'jug', 0.08, 'foot'),
+      H('f2', 0.3, 0.8, 'jug', 0.08, 'foot'),
+      H('hi', 0.3, 3.0, 'jug', 0.08, 'hand'),
+      H('t', 0, 4.1, 'jug', 0.12, 'top'),
+    ],
+    startFeet: { LF: 'f1', RF: 'f2' },
+  };
+}
+const bat = (at: number, sitUp = false): Scenario => ({
+  wall: 90,
+  boulder: cave,
+  extra: () => [],
+  script: [
+    { t: 0.8, run: (sim) => void sim.batHang?.() },
+    ...(sitUp ? [{ t: 3.0, run: dragTo('RH', () => ({ x: 0.25, y: 2.25 + ROOF - 1.3 }), 0.4) }] : []),
+  ],
+  at,
+});
+const fig4 = (at: number, reach = false): Scenario => ({
+  wall: 0,
+  boulder: ladder,
+  extra: () => [],
+  script: [
+    { t: 0.8, run: (sim) => void sim.figure4?.('RF') },
+    ...(reach ? [{ t: 1.6, run: dragTo('RH', () => ({ x: 0.3, y: 3.0 }), 0.45) }] : []),
+  ],
+  at,
+});
+
 const SCENARIOS: Record<Tech, Scenario> = {
+  // v0.3 advanced moves (shared spec), done by the real sim
+  cam: { wall: 90, boulder: cave, extra: () => [], script: [], at: 2.0 },
+  bat: bat(2.6),
+  batin: bat(0.45),
+  batup: bat(0.45, true),
+  fig4: fig4(1.4),
+  fig4in: fig4(0.3),
+  fig4reach: fig4(0.9, true),
   heel: {
     wall: 25,
     extra: (a) => [hold('x', a.RF.x + 0.46, a.RF.y - 0.07, 'jug', 'hand', Math.PI, 0.08)],
@@ -164,12 +259,12 @@ export async function runTech(canvas: HTMLCanvasElement, qs: URLSearchParams, hu
   const tech = (qs.get('tech') ?? 'heel') as Tech;
   const sc = SCENARIOS[tech];
   // first reset: where the anchors are on the start holds
-  const b0 = base(sc.wall);
+  const b0 = sc.boulder ? sc.boulder() : base(sc.wall);
   const s0 = new ClimberSim(b0);
   s0.reset();
   const st0 = s0.getState();
   const anchors = { LH: { ...st0.limbs.LH.anchor }, RH: { ...st0.limbs.RH.anchor }, LF: { ...st0.limbs.LF.anchor }, RF: { ...st0.limbs.RF.anchor } };
-  const b = base(sc.wall);
+  const b = sc.boulder ? sc.boulder() : base(sc.wall);
   b.holds.push(...sc.extra(anchors, { ...st0.pelvis }));
   const holdX = b.holds.find((h) => h.id === 'x');
 
@@ -223,7 +318,7 @@ export async function runTech(canvas: HTMLCanvasElement, qs: URLSearchParams, hu
   while (t < end) step();
   // camera
   const st = sim.getState();
-  const wf = new WallFrame(sc.wall);
+  const wf = (r as unknown as { wallFrame: WallFrame }).wallFrame;
   const P = wf.toWorld(st.pelvis, st.pelvisDepth);
   const camMode = qs.get('cam') ?? 'follow';
   if (camMode !== 'follow') {
@@ -231,6 +326,8 @@ export async function runTech(canvas: HTMLCanvasElement, qs: URLSearchParams, hu
     const pos =
       camMode === 'side'
         ? look.clone().add(new THREE.Vector3(2.5, 0.45, 2.3))
+        : camMode === 'profile'
+          ? look.clone().add(new THREE.Vector3(3.4, 0.1, 0.35))
         : camMode === 'left'
           ? look.clone().add(new THREE.Vector3(-2.5, 0.45, 2.3))
           : camMode === 'low'
@@ -238,8 +335,33 @@ export async function runTech(canvas: HTMLCanvasElement, qs: URLSearchParams, hu
             : look.clone().add(new THREE.Vector3(-0.4, 0.35, 3.4));
     r.setDebugView(pos, look, 42);
   }
+  if (qs.has('camat')) {
+    // camat=<what>,dx,dy,dz[,fov]: look at the pelvis | chest | mid (pelvis–chest) | feet | hands (the rig's
+    // solved joints, world) from that point + (dx, dy, dz) (world axes)
+    const v = (qs.get('camat') as string).split(',');
+    const rig = (r as unknown as { climber: { rig: { joints: { hip: THREE.Vector3[]; knee: THREE.Vector3[]; ankle: THREE.Vector3[]; wrist: THREE.Vector3[]; shoulder: THREE.Vector3[] } } } }).climber.rig;
+    const J = rig.joints;
+    const mid = (a: THREE.Vector3, b: THREE.Vector3) => a.clone().add(b).multiplyScalar(0.5);
+    const hips = mid(J.hip[0], J.hip[1]);
+    const chest = mid(J.shoulder[0], J.shoulder[1]);
+    const look =
+      v[0] === 'chest'
+        ? chest
+        : v[0] === 'mid'
+          ? mid(hips, chest)
+          : v[0] === 'feet'
+            ? mid(J.ankle[0], J.ankle[1])
+            : v[0] === 'hands'
+              ? mid(J.wrist[0], J.wrist[1])
+              : v[0] === 'lknee' || v[0] === 'rknee'
+                ? J.knee[v[0] === 'lknee' ? 0 : 1].clone()
+                : v[0] === 'lfoot' || v[0] === 'rfoot'
+                  ? J.ankle[v[0] === 'lfoot' ? 0 : 1].clone()
+                  : hips;
+    r.setDebugView(look.clone().add(new THREE.Vector3(+v[1], +v[2], +v[3])), look, v[4] ? +v[4] : 40);
+  }
   const L = st.limbs;
-  const info = `${tech}: LF ${L.LF.footMode ?? '-'} RF ${L.RF.footMode ?? '-'} | LH ${L.LH.holdId ?? (L.LH.shakingOut ? 'shake' : L.LH.chalking ? 'chalk' : L.LH.flying ? 'fly' : 'free')} RH ${L.RH.holdId ?? (L.RH.shakingOut ? 'shake' : L.RH.chalking ? 'chalk' : L.RH.flying ? 'fly' : 'free')} | airborne ${!!st.airborne} t=${t.toFixed(2)}`;
+  const info = `${tech}: LF ${L.LF.footMode ?? '-'} RF ${L.RF.footMode ?? '-'} | LH ${L.LH.holdId ?? (L.LH.shakingOut ? 'shake' : L.LH.chalking ? 'chalk' : L.LH.flying ? 'fly' : 'free')} RH ${L.RH.holdId ?? (L.RH.shakingOut ? 'shake' : L.RH.chalking ? 'chalk' : L.RH.flying ? 'fly' : 'free')} | airborne ${!!st.airborne} special ${st.special ?? '-'}${st.bat ? ` bat ${st.bat.blend.toFixed(2)} fat ${st.bat.fatigue.toFixed(2)}` : ''}${st.figure4 ? ` f4 ${st.figure4.hand}/${st.figure4.leg} ${st.figure4.blend.toFixed(2)}` : ''} cam ${L.LF.camHoldId ?? '-'}/${L.RF.camHoldId ?? '-'} t=${t.toFixed(2)}`;
   document.title = info;
   console.log(`[tech] ${info}`);
   const tick = () => {
