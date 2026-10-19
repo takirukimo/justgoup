@@ -1,4 +1,4 @@
-// Steini's climbing tips: short, genuinely useful technique advice in the voice of the CHIRAL HQ
+// Steini's climbing tips: short, genuinely useful technique advice in the voice of the CHIRAL SPORTS
 // instructor. Shown on the route preview, after falls (results screen) and on loading beats.
 //
 //   TIPS                  every tip (string[], stable order)

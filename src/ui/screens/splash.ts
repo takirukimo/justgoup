@@ -1,13 +1,23 @@
-// Splash: STEIBOCK title (horn-mark crest, letters assemble), BY CHIRAL SPORTS, drifting topo,
-// "TAP TO START" (the first tap also unlocks audio).
+// Splash: the STEIBOCK key art full-bleed, the CHIRAL mark over STEIBOCK · BY CHIRAL SPORTS, and
+// "TAP TO START" (the first tap also unlocks audio). Nothing else on it (owner).
 
+import keyArt from '../../../assets/art/steibock-key-art.webp';
 import type { ScreenProps } from '../../core/contracts';
 import { bus } from '../../core/events';
 import { BRAND } from '../../config/brand';
-import { el, label } from '../dom';
+import { el } from '../dom';
 import { gameLockup } from '../logo';
-import { screenRoot, topoLayer } from '../parts';
+import { screenRoot } from '../parts';
 import type { ScreenView, UICtx } from '../screen';
+
+// Start fetching + decoding the art as soon as the UI module loads (while the 3D scene boots), so
+// it is ready the moment the splash goes up.
+if (typeof Image !== 'undefined') {
+  const warm = new Image();
+  warm.decoding = 'async';
+  warm.src = keyArt;
+  void warm.decode?.().catch(() => {});
+}
 
 export function createSplash(_ctx: UICtx, _props: ScreenProps['splash']): ScreenView<ScreenProps['splash']> {
   const root = screenRoot('splash');
@@ -22,18 +32,14 @@ export function createSplash(_ctx: UICtx, _props: ScreenProps['splash']): Screen
     bus.emit('ui:start-intro-done');
   });
 
-  const year = new Date().getFullYear();
+  const art = el('img', 'splash-art');
+  art.alt = '';
+  art.src = keyArt;
+
   root.append(
-    el('div', 'splash-bg', topoLayer('topo-drift topo-a'), topoLayer('topo-drift topo-b'), el('div', 'splash-sweep'), el('div', 'splash-vig')),
-    el('div', 'splash-frame', el('span', 'reg reg-tl'), el('span', 'reg reg-tr'), el('span', 'reg reg-bl'), el('span', 'reg reg-br')),
-    el('div', 'splash-top', label('46°57′N  07°26′E', 'stg'), label(`${BRAND.gym} · ALT 0542 M`, 'stg')),
-    el('div', 'splash-center', gameLockup('hero'), el('p', 'splash-sub', 'Bouldering · Lead · Daily')),
-    el(
-      'div',
-      'splash-bottom',
-      el('div', 'splash-cta', el('span', 'cta-line'), el('span', 'cta-txt', 'TAP TO START'), el('span', 'cta-line')),
-      el('div', 'splash-legal', label(`© ${year} ${BRAND.name} ${BRAND.sub}`), label('BUILD 0.2 · HANDHELD EDITION')),
-    ),
+    el('div', 'splash-bg', art, el('div', 'splash-scrim')),
+    el('div', 'splash-center', gameLockup('hero')),
+    el('div', 'splash-bottom', el('div', 'splash-cta', el('span', 'cta-line'), el('span', 'cta-txt', 'TAP TO START'), el('span', 'cta-line'))),
     tap,
   );
   return { el: root, update: () => undefined, reuse: true };

@@ -1,6 +1,6 @@
 // GameRenderer — the WORLD module's implementation of RendererAPI.
 //
-// Owns the WebGLRenderer, the scene (CHIRAL HQ gym, main wall, holds, quickdraws), the light
+// Owns the WebGLRenderer, the scene (CHIRAL SPORTS gym, main wall, holds, quickdraws), the light
 // rig (shadow-casting key spot that follows the climber + wash/fill/rim), the camera rig, fx,
 // highlights, contact shadows and post-processing. The app owns requestAnimationFrame and calls
 // frame(dt). Character pieces (climber, guide, rope, portraits) are used only through the
@@ -56,7 +56,7 @@ const TOWER_FLOOD = 500;
 function showcaseBoulder(): BoulderDef {
   return {
     id: 'showcase',
-    name: 'CHIRAL HQ',
+    name: 'CHIRAL SPORTS',
     grade: 0,
     mode: 'boulder',
     wallAngle: 15,
@@ -830,7 +830,7 @@ export class GameRenderer implements RendererAPI {
     const cam = this.rig.camera;
     // straight-on editor views of steep overhangs (and transitions out of them) sit below pad level
     this.env.setFloorVisible(cam.position.y > GAME.padHeight + 0.05);
-    // the title screen sets the STEIBOCK lockup right over the lit CHIRAL HQ sign: dim it there
+    // the title screen sets the STEIBOCK lockup right over the lit CHIRAL SPORTS sign: dim it there
     this.env.setSignLevel(this.rig.mode === 'title' && this.rig.introProgress >= 1 ? 0.3 : 1);
 
     this.updateLights(d, st);

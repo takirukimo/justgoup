@@ -1,9 +1,9 @@
-// CHIRAL HQ — the gym interior around the main wall.
+// CHIRAL SPORTS — the gym interior around the main wall.
 //
 // A dark, moody hall: faceted neighbouring walls at other angles covered in deco routes and big
 // branded volumes, thick charcoal crash pads with CHIRAL pink stripes and the CHIRAL SPORTS
 // lockup, black ceiling trusses with warm linear light bars, clerestory windows throwing cool
-// light shafts through the haze, the backlit CHIRAL HQ sign above the walls, props and banners
+// light shafts through the haze, the backlit CHIRAL SPORTS sign above the walls, props and banners
 // in the three tee colourways. All brand artwork is the official mark / wordmark / lockup. Everything static is merged into a
 // handful of meshes with baked vertex lighting; materials are lit by the renderer's light rig.
 
@@ -55,7 +55,7 @@ interface Hall {
   key: string;
   group: THREE.Group;
   floorGroup: THREE.Group;
-  /** The backlit CHIRAL HQ sign's material (its colour is the backlight level). */
+  /** The backlit CHIRAL SPORTS sign's material (its colour is the backlight level). */
   signMat: THREE.MeshBasicMaterial | null;
   materials: THREE.Material[];
   geometries: THREE.BufferGeometry[];
@@ -64,8 +64,8 @@ interface Hall {
 }
 
 const FOG_COLOR = '#0d0f12';
-/** Warm white backlight of the CHIRAL HQ sign at full level (HDR, feeds the bloom). */
-const SIGN_COLOR = new THREE.Color(1.85, 1.74, 1.62);
+/** CHIRAL pink backlight of the CHIRAL SPORTS sign at full level (HDR, feeds the bloom). */
+const SIGN_COLOR = new THREE.Color(PALETTE.signal).multiplyScalar(2.4);
 
 export class GymEnvironment {
   readonly group = new THREE.Group();
@@ -140,7 +140,7 @@ export class GymEnvironment {
   }
 
   /**
-   * Backlight level of the CHIRAL HQ sign (1 = full). The title screen dims it so the lit lockup
+   * Backlight level of the CHIRAL SPORTS sign (1 = full). The title screen dims it so the lit lockup
    * doesn't compete with the STEIBOCK logo set right over it; it eases over ~1 s.
    */
   setSignLevel(v: number): void {
@@ -466,7 +466,9 @@ export class GymEnvironment {
     }
 
     // ── backlit sign + windows (emissive) ──
-    // CHIRAL HQ: the official lockup backlit on a black fascia with a CHIRAL pink light line under it
+    // CHIRAL SPORTS: the official lockup backlit in CHIRAL pink on a black fascia, a pink light line
+    // under it. The sign plane floats clear of the fascia's front face (zBack + 0.07): coplanar, the
+    // two z-fought and the logo flickered as the camera moved.
     const signTex = signTexture();
     const signY = rope ? 16.3 : Hc - 1.3;
     const signW = 6.4;
@@ -476,7 +478,7 @@ export class GymEnvironment {
     const signGeo = new THREE.PlaneGeometry(signW, signH);
     geometries.push(signGeo);
     const sign = new THREE.Mesh(signGeo, signMat);
-    sign.position.set(0, signY, zBack + 0.07);
+    sign.position.set(0, signY, zBack + 0.1);
     sign.name = 'hall:sign';
     group.add(sign);
     darkBatch.add(new RoundedBoxGeometry(signW + 0.6, signH + 0.34, 0.08, 2, 0.025), tr(0, signY, zBack + 0.03), '#0f1012');

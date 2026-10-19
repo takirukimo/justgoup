@@ -1,8 +1,8 @@
-// TUTORIAL: Steini the ibex, the CHIRAL HQ instructor, runs the first-launch intro and the
+// TUTORIAL: Steini the ibex, the CHIRAL SPORTS instructor, runs the first-launch intro and the
 // scripted lesson on tutorialBoulder().
 //
 //   runIntro(ctx)     ~20 s cinematic: camera fly-in, letterbox + STEIBOCK title card (tap to move
-//                     on), Steini (the CHIRAL HQ instructor) waving on the mats, three lines paced
+//                     on), Steini (the CHIRAL SPORTS instructor) waving on the mats, three lines paced
 //                     for reading (S.holdTime), ends pointing at the wall. Skippable.
 //   runTutorial(ctx)  the lesson: one limb at a time from TUTORIAL_SEQUENCE (hand, foot, hips,
 //                     shaking + pump, match on TOP), with gating, hold highlights, guide reactions,
