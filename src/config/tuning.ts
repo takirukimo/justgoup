@@ -442,9 +442,9 @@ export type HoldTypeTable = typeof SIM.handCap;
 export const GEN: {
   /**
    * Multi-angle wall profiles (kicker → steep → roof stacks, caves, lead headwalls with a roof crux).
-   * OFF until the renderer folds the panels (it draws one flat wall at BoulderDef.wallAngle today); every
-   * archetype that needs no profile (slab / overhang angles, traverses, zigzags, diagonals, dynos,
-   * compression, hold variety) is on regardless. GenerateOptions.profiles overrides it per problem.
+   * ON: the renderer folds the panels (render/wall-frame.ts + wall.ts). Every archetype that needs no
+   * profile (slab / overhang angles, traverses, zigzags, diagonals, dynos, compression, hold variety)
+   * is on regardless. GenerateOptions.profiles overrides it per problem.
    */
   profiles: boolean;
   /**
@@ -455,6 +455,6 @@ export const GEN: {
    */
   holdsOnVolumes: boolean;
 } = {
-  profiles: false,
+  profiles: true,
   holdsOnVolumes: false,
 };
