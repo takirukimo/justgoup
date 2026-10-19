@@ -289,9 +289,11 @@ describe('archetypes — the bot sends every one of them', () => {
         for (const grade of [3, 7]) {
           const b = generateBoulder({ seed: 8100 + grade * 7 + STYLES.indexOf(style) * 131, grade, style, profiles });
           expect(b.style).toBe(style);
-          const r = autoClimb(new ClimberSim(b));
+          const sim = new ClimberSim(b);
+          const r = autoClimb(sim);
           if (!r.sent) failed.push(`${style} V${grade} (profiles ${profiles}): ${r.bot.log.slice(-3).join('; ')}`);
-          else if (style === 'dyno') expect(r.bot.throws, `${b.id} throws`).toBeGreaterThanOrEqual(1);
+          // (a dyno problem's signature move: a throw, or from V6 now and then a figure 4)
+          else if (style === 'dyno') expect(r.bot.throws + sim.getStats().figure4s, `${b.id} throws / figure 4s`).toBeGreaterThanOrEqual(1);
         }
     expect(failed).toEqual([]);
   });

@@ -1216,8 +1216,9 @@ class Planner {
     const H = slots[k] as HoldDef;
     const cap = fig4Capacity(H, this.angleOf(H.y), this.prm.assist, SOLVER.pump);
     const o = slots[1 - k];
-    const share = !alone && o && o !== 'smear' ? SIM.fig4OtherShare : 0;
-    return (SIM.fig4Load * (1 - share)) / Math.max(cap, 0.01);
+    // the other hand's share, as far as its hold allows (the sim's fig4Step)
+    const share = !alone && o && o !== 'smear' ? Math.min(SIM.fig4Load * SIM.fig4OtherShare, (SIM.fig4OtherMax * fig4Capacity(o, this.angleOf(o.y), this.prm.assist, SOLVER.pump)) / SIM.fig4Grip) : 0;
+    return (SIM.fig4Load - share) / Math.max(cap, 0.01);
   }
 
   /** Evaluate a figure-4 child: the holding hand carries the pressed-up body (fig4Stress ≤ stanceMax). */

@@ -169,6 +169,38 @@ const FOOT_INSET: Record<HoldType, number> = { jug: 0.32, edge: 0.3, crimp: 0.3,
  * FOOT_INSET: the grip surface of the drawn hold). Two hands matched on one hold are spread along the
  * hold's tangent.
  */
+/**
+ * Drawn footprint of each hold type (render/holds.ts holdGeometry), half extents across / along the hold's own
+ * axis per metre of size: the largest over seeds, sizes and edge depths, so a hold kept this far from a fold
+ * is never moved by the renderer's fold clamp. Shapes that grow it: rails (long), macros (wide). Keep in step
+ * with the drawn shapes (like the contact insets above).
+ */
+const DRAWN_HALF: Record<HoldType, readonly [number, number]> = {
+  jug: [1.26, 1.02],
+  edge: [2.14, 0.68],
+  crimp: [2.52, 0.69],
+  sloper: [1.18, 1.06],
+  pinch: [0.7, 1.58],
+  pocket: [1.23, 0.93],
+  foot: [1.49, 0.85],
+  volume: [1.16, 0.98],
+};
+
+/**
+ * How far (m) the drawn hold reaches up / down the surface from its centre (its footprint turned by
+ * hold.angle, as the renderer bolts it): what wall-profile.foldClearY keeps clear of a convex fold.
+ */
+export function drawnHalfAlong(h: Pick<HoldDef, 'type' | 'size' | 'angle' | 'shape'>): number {
+  let kx = DRAWN_HALF[h.type][0];
+  const ky = DRAWN_HALF[h.type][1];
+  if (h.shape === 'rail') kx = Math.max(kx, 4.18);
+  else if (h.shape === 'macro') kx = Math.max(kx, 1.77);
+  const rot = h.angle + Math.PI / 2;
+  const s = dsin(rot);
+  const c = dcos(rot);
+  return ((s < 0 ? -s : s) * kx + (c < 0 ? -c : c) * ky) * h.size;
+}
+
 export function contactPoint(h: HoldDef, limbIdx: number, matched: boolean, out: Vec2): Vec2 {
   const ca = dcos(h.angle);
   const sa = dsin(h.angle);

@@ -103,6 +103,12 @@ export const SIM = {
   /** Linear damping (1/s) while climbing / airborne / hanging on the rope. */
   dampClimb: 3.4,
   dampAir: 0.12,
+  /**
+   * In a flight, an attached hand within this (m) of its shoulder folds in 3D (a deadpoint's holding hand
+   * the body rises past: locked off, then pressing): the arm's in-plane wedges don't hold the body back, so
+   * the throw flies the path the preview and the planner launch (they judge the holding hand at the apex).
+   */
+  flyArmFold: 0.45,
   dampHang: 1.1,
   pbdIterations: 6,
   /**
@@ -323,8 +329,10 @@ export const SIM = {
   fig4Exit: 0.45,
   /** × the holding forearm's W′ drain while in the figure 4 (a locked-off, one-arm position: pumpy). */
   fig4Pump: 1.5,
-  /** Share of the weight the other hand takes once it holds a hold too. */
+  /** Share of the figure 4's load the other hand takes once it holds a hold too … */
   fig4OtherShare: 0.35,
+  /** … at most this fraction of what that hold gives it (a poor hold only steadies the body). */
+  fig4OtherMax: 0.6,
   /**
    * The leg reaches over the arm only with the holding hand within this (m) of its hip joint, above the hip
    * (from a straight-arm hang too: the climber pulls up on the arm as the knee comes over the elbow).

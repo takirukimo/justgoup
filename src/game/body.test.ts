@@ -7,7 +7,7 @@ import type { BoulderDef, HoldDef, LimbId } from '../core/types';
 import { GAME, SIM } from '../config/tuning';
 import { ClimberSim, type ClimberSimOptions } from './climber-sim';
 import { Forearm } from './forearm';
-import { edgeDepthFactor, frictionCapFactor, handGripBase, pumpCapFactor } from './holds';
+import { contactPoint, edgeDepthFactor, frictionCapFactor, handGripBase, pumpCapFactor } from './holds';
 import { evaluateStance, FOOT_HEEL, FOOT_PUSH, makeParams, newContact, setContact, StanceEval, type Contacts, type Pose } from './statics';
 import { hold, makeBoulder, moveLimb, run } from './test-helpers';
 import { autoClimb, BetaBot, BOT } from './bot';
@@ -863,7 +863,7 @@ describe('deadpoints and dynos (research §2.5, §6.6)', () => {
         sim.step(1 / 60);
       }
       const pv = sim.dynoCandidate('RH', { x: 0.25, y: 2.82 });
-      expect(pv).toEqual({ holdId: 'h1', kind: 'deadpoint', rise: expect.any(Number), feasible: true });
+      expect(pv).toEqual({ holdId: 'h1', kind: 'deadpoint', rise: expect.any(Number), feasible: true, sticks: true, catchStress: expect.any(Number) });
       return sim.endDrag('RH', velocity ? { velocity } : undefined);
     };
     expect(flick({ x: 0.2, y: 3.2 }).map((e) => e.type)).toEqual(['dyno-start']);
@@ -933,6 +933,54 @@ describe('deadpoints and dynos (research §2.5, §6.6)', () => {
     expect(p8).toBeGreaterThan(p6);
     expect(p8).toBeLessThan(1.4);
     expect(power(20)).toBe(1.4);
+  });
+
+  it('the throw preview agrees with the flight: a throw it calls sticking is caught, one too far falls short, one too poor rips', { timeout: 120_000 }, () => {
+    // a grid of deadpoints from a stance on two jugs, the hand stretched toward the hold first (as a player
+    // does), flicked at the ideal speed; walls 0–30°, jugs and edges up to 1.5 m above the hands
+    let n = 0;
+    let agree = 0;
+    let falsePos = 0;
+    let ripPredicted = 0;
+    for (const angle of [0, 15, 30])
+      for (const ty of [2.85, 3.0, 3.15, 3.3, 3.45, 3.6])
+        for (const tx of [-0.1, 0.25, 0.55])
+          for (const type of ['jug', 'edge'] as const) {
+            const target = hold('x', tx, ty, type, type === 'jug' ? 0.1 : 0.06, 'hand');
+            const b = makeBoulder([hold('s1', -0.2, 2.1, 'jug', 0.11, 'start'), hold('s2', 0.22, 2.05, 'jug', 0.11, 'start'), hold('f1', -0.25, 0.9, 'jug', 0.08, 'foot'), hold('f2', 0.3, 0.9, 'jug', 0.08, 'foot'), target, hold('t', 0, 4.2, 'jug', 0.12, 'top')], {
+              wallAngle: angle,
+              startFeet: { LF: 'f1', RF: 'f2' },
+            });
+            const sim = new ClimberSim(b, { sweat: 0 });
+            sim.start();
+            run(sim, 1);
+            const c = contactPoint(target, 1, false, { x: 0, y: 0 });
+            sim.beginDrag('RH');
+            const p0 = sim.getState().limbs.RH.pos;
+            for (let k = 1; k <= 20; k++) {
+              sim.dragTo('RH', { x: p0.x + (c.x - p0.x) * (k / 20), y: p0.y + (c.y - p0.y) * (k / 20) });
+              run(sim, 1 / 60);
+            }
+            run(sim, 0.2);
+            const pv = sim.dynoCandidate('RH', c);
+            if (!pv) continue;
+            const from = sim.getState().limbs.RH.pos;
+            const l = Math.hypot(c.x - from.x, c.y - from.y) || 1;
+            const ev = sim.endDrag('RH', { velocity: { x: ((c.x - from.x) / l) * SIM.dynoFlickRef, y: ((c.y - from.y) / l) * SIM.dynoFlickRef } });
+            run(sim, 2, ev);
+            const caught = ev.some((e) => e.type === 'dyno-catch');
+            const sticks = pv.feasible && pv.sticks !== false;
+            if (pv.feasible && pv.sticks === false) ripPredicted++;
+            n++;
+            if (sticks === caught) agree++;
+            else if (sticks) falsePos++;
+          }
+    expect(n).toBeGreaterThan(70);
+    // (before: 76 % — the holding arm's in-plane wedge ate half the flight's height and the catch load was
+    // never previewed; now ≈98 %)
+    expect(agree / n).toBeGreaterThan(0.95);
+    expect(falsePos).toBe(0);
+    expect(ripPredicted).toBeGreaterThan(5);
   });
 
   it('dynoCandidate flags a throw the climber cannot make', () => {

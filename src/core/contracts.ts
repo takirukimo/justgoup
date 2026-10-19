@@ -73,6 +73,14 @@ export interface DynoPreview {
   rise: number;
   /** False when the climber can't throw that far from this stance (the throw would fall short). */
   feasible: boolean;
+  /**
+   * Optional (additive): false when the throw reaches but the catch would rip off (the hold is too poor to
+   * stop the body at that speed: catchStress above the sim's catch limit). A throw sticks when
+   * `feasible && sticks !== false`.
+   */
+  sticks?: boolean;
+  /** Optional: predicted peak load / capacity of the catching hand (the sim rips off above SIM.dynoCatchStress). */
+  catchStress?: number;
 }
 
 export interface SimOptions {

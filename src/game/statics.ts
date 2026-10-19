@@ -1284,16 +1284,37 @@ export function optimizePose(
  * Best spine lean for a fixed pelvis (the climber can't control it by touch, so the sim picks it the
  * way the planner does). Writes the chest into `out` and returns the tension there.
  */
-export function bestLean(contacts: Contacts, prm: StaticsParams, px: number, py: number, ev: StanceEval, out: Pose, prevLean = 0): number {
+export function bestLean(
+  contacts: Contacts,
+  prm: StaticsParams,
+  px: number,
+  py: number,
+  ev: StanceEval,
+  out: Pose,
+  prevLean = 0,
+  aheadX = NaN,
+  aheadY = NaN,
+): number {
   let bestL = prevLean;
   let best = Infinity;
+  // (optional look-ahead: the hips are on their way to (aheadX, aheadY) — the lean must keep every limb in
+  // reach there too, or the torso turns the wrong way and a limb the destination needs runs out of reach on
+  // the way; only the reach counts there, the strain is judged where the body is)
+  const ahead = aheadX === aheadX && aheadY === aheadY;
   const tryL = (l: number): void => {
     TRY.px = px;
     TRY.py = py;
     placeChest(TRY, contacts, prm, l);
     evaluateStance(TRY, contacts, prm, ev);
     const v = poseViolation(contacts, prm, ev, py);
-    const c = ev.tension + 30 * v + 0.12 * Math.abs(l - prevLean) + LEAN_COST * l * l;
+    let c = ev.tension + 30 * v + 0.12 * Math.abs(l - prevLean) + LEAN_COST * l * l;
+    if (ahead) {
+      TRY.px = aheadX;
+      TRY.py = aheadY;
+      placeChest(TRY, contacts, prm, l);
+      evaluateStance(TRY, contacts, prm, ev);
+      c += 30 * poseViolation(contacts, prm, ev, aheadY);
+    }
     if (c < best) {
       best = c;
       bestL = l;

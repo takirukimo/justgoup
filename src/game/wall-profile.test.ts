@@ -2,9 +2,13 @@
 // the renderer share. Round trips, continuity across folds, frames, and the fold-aware reach metric.
 
 import { describe, expect, it } from 'vitest';
+import { generateBoulder } from './generator';
+import { drawnHalfAlong } from './holds';
 import {
   angleAt,
   FOLD,
+  FOLD_CLEAR,
+  foldClearY,
   local3DToSurface,
   makeProfile,
   normalAt,
@@ -240,5 +244,50 @@ describe('wall profile — determinism', () => {
     } finally {
       banned.forEach((k, i) => (m[k] = saved[i]));
     }
+  });
+});
+
+describe('hold clearance from convex folds (foldClearY, the renderer\'s foldClampY rule)', () => {
+  // vertical to 1.3 m, a 40° panel to 2.6 m, then easing off to 10° (a convex lip at 2.6 m)
+  const p = makeProfile([{ y0: 0, angle: 0 }, { y0: 1.3, angle: 40 }, { y0: 2.6, angle: 10 }], 40, 4.5);
+
+  it('slides a hold back onto its own panel at a lip, leaves inside corners and flat walls alone', () => {
+    // just below the lip: the footprint (0.06 up / down) ends FOLD_CLEAR.gap short of the fold
+    expect(foldClearY(p, 2.58, 0.06)).toBeCloseTo(2.6 - FOLD_CLEAR.gap - 0.06, 6);
+    // just above it, on the easier panel: pushed up past the fold
+    expect(foldClearY(p, 2.62, 0.06)).toBeCloseTo(2.6 + FOLD_CLEAR.gap + 0.06, 6);
+    // clear already: unchanged
+    expect(foldClearY(p, 2.3, 0.06)).toBe(2.3);
+    // the inside corner at 1.3 m (the wall steepens): left where it is
+    expect(foldClearY(p, 1.31, 0.06)).toBe(1.31);
+    expect(foldClearY(p, 1.29, 0.06)).toBe(1.29);
+    // never more than FOLD_CLEAR.maxShift
+    expect(foldClearY(p, 2.6, 0.4)).toBeCloseTo(2.6 + FOLD_CLEAR.maxShift, 6);
+    expect(foldClearY(null, 2.6, 0.1)).toBe(2.6);
+    expect(foldClearY(makeProfile([{ y0: 0, angle: 20 }], 20, 4.5), 2.6, 0.1)).toBe(2.6);
+  });
+
+  it('generated folded walls keep every hold\'s drawn footprint off their convex folds', { timeout: 120_000 }, () => {
+    let near = 0;
+    let n = 0;
+    for (let i = 0; i < 16; i++) {
+      const b = generateBoulder({ seed: 40_000 + i * 7919, grade: i % 13, style: i % 2 ? 'cave' : 'mixed' });
+      const prof = profileOf(b);
+      if (!prof) continue;
+      const mounted = new Set(b.holds.filter((h) => h.onVolume).map((h) => h.id));
+      for (const h of b.holds) {
+        if (h.type === 'volume' || mounted.has(h.id)) continue;
+        n++;
+        const e = drawnHalfAlong(h);
+        for (let k = 1; k < prof.n; k++) {
+          if (prof.ang[k - 1] - prof.ang[k] < FOLD_CLEAR.minDelta) continue;
+          // a footprint across a lip (allowing the capped shift of a hold set right onto the fold)
+          if (Math.abs(h.y - prof.y0[k]) < e + FOLD_CLEAR.gap - 1e-3 && Math.abs(h.y - prof.y0[k]) > 1e-3) near++;
+        }
+      }
+    }
+    expect(n).toBeGreaterThan(500);
+    // (≈2.5 % of the holds reached over a lip before: the renderer slid them back up to 12 cm)
+    expect(near / n).toBeLessThan(0.004);
   });
 });

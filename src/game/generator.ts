@@ -29,9 +29,9 @@ import { clamp, lerp } from '../core/math';
 import { planBetaDetailed, SOLVER, StanceLab, type PlanResult } from './solver';
 import type { Pose } from './statics';
 import { datan2, dcos, dhypot, dsin } from './dmath';
-import { canMatch, contactPoint, nominalCapacity, usableByHand } from './holds';
+import { canMatch, contactPoint, drawnHalfAlong, nominalCapacity, usableByHand } from './holds';
 import { fig4Capacity } from './figure4';
-import { angleAt as profAngleAt, makeProfile, steepestAngle, type WallProfile } from './wall-profile';
+import { angleAt as profAngleAt, foldClearY, makeProfile, steepestAngle, type WallProfile } from './wall-profile';
 import {
   dailyStyle,
   dressHold,
@@ -376,7 +376,7 @@ class Builder {
     const key = prefix === 'v' ? 'v' : (prefix as 's' | 'h' | 'f' | 't' | 'd');
     const id = `${prefix}${this.n[key]++}`;
     const h: HoldDef = { id, x: r3(x), y: r3(y), type, size: r3(size), angle: r3(angle), role, color, seed: this.rng.int(1, 0x7fffffff) };
-    this.dress(h, role !== 'deco');
+    this.clearFold(this.dress(h, role !== 'deco'));
     this.holds.push(h);
     return h;
   }
@@ -553,7 +553,17 @@ class Builder {
   /** A hold that is not part of the wall yet (unique temporary id; renamed when accepted). */
   private temp(role: HoldRole, type: HoldType, x: number, y: number, size: number, angle: number, color = this.color): HoldDef {
     const h: HoldDef = { id: `~${this.tmpSeq++}`, x: r3(x), y: r3(y), type, size: r3(size), angle: r3(angle), role, color, seed: 0 };
-    return this.dress(h, true);
+    return this.clearFold(this.dress(h, true));
+  }
+
+  /**
+   * Folded walls: a hold whose drawn footprint would reach over a convex fold (a lip, a steep panel easing
+   * off) slides back onto its own panel (wall-profile.foldClearY, the renderer's own rule), so it is drawn
+   * exactly where the sim holds it and hands / feet grip the drawn hold. Volumes sit across folds as they are.
+   */
+  private clearFold(h: HoldDef): HoldDef {
+    if (this.prof && h.type !== 'volume') h.y = r3(foldClearY(this.prof, h.y, drawnHalfAlong(h)));
+    return h;
   }
 
   /** Share of graded hand moves set on a hold bolted onto a route volume (Params.mounts). */

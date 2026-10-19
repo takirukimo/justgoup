@@ -197,6 +197,32 @@ export function panelIndexAt(p: WallProfile, y: number): number {
   return i;
 }
 
+/**
+ * Holds next to a convex fold (a roof lip, the top of a steep section easing off, a slab bulge): the same
+ * rule as the renderer's foldClampY (render/holds.ts) — folds of at least `minDelta` degrees, `gap` (m) of
+ * clearance, at most `maxShift` (m) of correction.
+ */
+export const FOLD_CLEAR = { minDelta: 8, gap: 0.006, maxShift: 0.12 } as const;
+
+/**
+ * Surface height for a hold centred at y whose drawn footprint reaches `e` (m) up and down the surface
+ * (holds.drawnHalfAlong): slid back along its own panel until the footprint ends FOLD_CLEAR.gap short of a
+ * convex fold above or below it (at most FOLD_CLEAR.maxShift; a panel shorter than the hold keeps it
+ * centred). Inside corners are left alone. The renderer draws a hold by exactly this rule, so a hold placed
+ * at foldClearY(…) is drawn where the sim holds it (no render-side shift, HoldInfo.dy ≈ 0).
+ */
+export function foldClearY(p: WallProfile | null, y: number, e: number): number {
+  if (!p || p.flat) return y;
+  const i = panelIndexAt(p, y);
+  const y0 = p.y0[i];
+  const y1 = i + 1 < p.n ? p.y0[i + 1] : p.length;
+  const lo = i > 0 && p.ang[i - 1] - p.ang[i] >= FOLD_CLEAR.minDelta ? y0 + FOLD_CLEAR.gap + e : -Infinity;
+  const hi = i + 1 < p.n && p.ang[i] - p.ang[i + 1] >= FOLD_CLEAR.minDelta ? y1 - FOLD_CLEAR.gap - e : Infinity;
+  const t = lo > hi ? (y0 + y1) / 2 : Math.min(hi, Math.max(lo, y));
+  const d = t - y;
+  return y + (d > FOLD_CLEAR.maxShift ? FOLD_CLEAR.maxShift : d < -FOLD_CLEAR.maxShift ? -FOLD_CLEAR.maxShift : d);
+}
+
 /** The panel containing surface height y. */
 export function panelAt(p: WallProfile, y: number): WallPanel {
   return p.panels[panelIndexAt(p, y)];
