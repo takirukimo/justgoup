@@ -48,7 +48,9 @@ export type SimEvent =
   | { type: 'shake-out-start'; limb: LimbId } // a free hand hangs by the side and shakes the forearm out
   | { type: 'shake-out-end'; limb: LimbId }
   | { type: 'pump-warning'; limb: LimbId; pump: number } // this forearm crossed SIM.pumpWarn (deep pump)
-  | { type: 'technique'; limb: LimbId; technique: 'heel' | 'toe' | 'flag' | 'drop' } // a foot technique began
+  | { type: 'technique'; limb: LimbId; technique: 'heel' | 'toe' | 'flag' | 'drop' | 'cam' | 'bat' | 'figure4' } // a technique began
+  // ── advanced moves (additive): 'bat' / 'figure4' end (the 'technique' event marks the start) ──
+  | { type: 'special-end'; special: 'bat' | 'figure4'; reason: 'grab' | 'foot' | 'fatigue' | 'slip' | 'fall' }
   | { type: 'dyno-start'; limbs: LimbId[]; holdId: string; kind: 'deadpoint' | 'dyno'; power: number }
   | { type: 'dyno-catch'; limbs: LimbId[]; holdId: string; quality: number; timing: number } // timing: s vs the apex (− = rising)
   | { type: 'dyno-miss'; limbs: LimbId[]; holdId: string; reason: 'short' | 'ripped' };
@@ -134,6 +136,23 @@ export interface ClimberSimAPI {
   dyno?(limb: 'LH' | 'RH' | 'both', holdId: string, power?: number): SimEvent[];
   /** What a committed flick of the dragged hand released at p would throw to, or null. */
   dynoCandidate?(limb: LimbId, p: Vec2): DynoPreview | null;
+
+  // ── advanced moves (optional; ClimberSim implements them) ──
+  /**
+   * Bat hang: let go with both hands and hang upside down from the feet. Needs both feet in strong hooks or
+   * heel-toe cams on a steep panel (≥ SIM.batMinAngle); false if not possible right now. Releasing the last
+   * hand in that position (endDrag over nothing, a slip) enters it too instead of falling.
+   */
+  batHang?(): boolean;
+  /** Could the climber let go with both hands into a bat hang right now? (input / HUD preview) */
+  canBatHang?(): boolean;
+  /**
+   * Figure 4: hook the leg `leg` over the opposite arm (it must hold a positive hold) and press the body up on
+   * it. false if not possible. Dropping that foot's handle onto the holding hand / forearm does the same.
+   */
+  figure4?(leg: 'LF' | 'RF'): boolean;
+  /** Which hand's arm a foot released at p would hook into a figure 4 (input preview), or null. */
+  figure4Candidate?(limb: LimbId, p: Vec2): 'LH' | 'RH' | null;
 }
 
 export interface BetaMove {
@@ -144,6 +163,12 @@ export interface BetaMove {
    * dyno (both hands go to `holdId`; `limb` is the left hand). Execute it with ClimberSimAPI.dyno.
    */
   dyno?: 'LH' | 'RH' | 'both';
+  /**
+   * Optional (advanced moves): 'figure4' — the foot `limb` hooks its leg over the opposite holding arm
+   * (`holdId` is that hand's hold); execute it with ClimberSimAPI.figure4. The next hand move reaches from
+   * the pressed-up stance, then a foot goes back on.
+   */
+  special?: 'figure4';
 }
 
 // Function signatures exported by src/game/*.ts (documented here for implementers):

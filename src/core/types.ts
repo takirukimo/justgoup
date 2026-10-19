@@ -92,9 +92,14 @@ export type HoldShape = 'bucket' | 'horn' | 'rail' | 'micro' | 'chip' | 'macro' 
  *  heel  — heel hook: a hold at/above hip height to the side on steep terrain; the leg PULLS,
  *  toe   — toe hook: the toe pulls on the far side of a feature / under a roof lip,
  *  flag  — no hold: the leg is out to the side (or crossed behind) as a counterweight,
- *  drop  — drop knee: foot on a sidepull-like foothold, knee turned in, hips close to the wall.
+ *  drop  — drop knee: foot on a sidepull-like foothold, knee turned in, hips close to the wall,
+ *  cam   — heel-toe cam: the foot jammed between two opposing surfaces (the toe presses one hold, the heel
+ *          the opposite one, LimbSnapshot.camHoldId / camPos): a strong foot in every direction that holds
+ *          on roofs; the ankle is locked, the shin flexed,
+ *  figure4 — the leg is hooked over the opposite holding arm (knee / thigh over the forearm near the
+ *          elbow): ClimberState.figure4; the foot is on no hold.
  */
-export type FootMode = 'edge' | 'smear' | 'heel' | 'toe' | 'flag' | 'drop';
+export type FootMode = 'edge' | 'smear' | 'heel' | 'toe' | 'flag' | 'drop' | 'cam' | 'figure4';
 
 export interface QuickdrawDef {
   id: string;
@@ -213,6 +218,35 @@ export interface LimbSnapshot {
   flightTarget?: string | null;
   /** Feet: how the foot is used (see FootMode); undefined while dangling / dragged. */
   footMode?: FootMode;
+  // ── contact geometry (sim → renderer, optional; set while the limb is attached, else null) ──
+  /**
+   * Exact contact point the sim uses for this limb (wall-local): where the fingertips sit on the grip
+   * (the shelf of an edge, inside a jug's lip, the upper dome of a sloper, inside a pocket's hole) or
+   * where the toe / sole presses (the top of a foothold, the heel's spot of a hook, the smear spot).
+   * `pos` eases toward it after a grab; this is the target. null while free.
+   */
+  contactPos?: Vec2 | null;
+  /**
+   * Outward unit normal of the surface the hand / foot touches, wall-local 3D: x right, y up the wall
+   * SURFACE, z out of the panel under the contact (on a folded wall the renderer maps it with that
+   * panel's frame). A hand on an incut edge ≈ (0, 0.97, −0.26) (the shelf faces up, tilted into the
+   * wall), on a sloper ≈ (0, 0.82, 0.57); a foot on a foothold ≈ (0, 1, 0.1); a smear (0, 0, 1). Holds
+   * bolted onto a volume are tilted with the volume's face. null while free.
+   */
+  contactNormal?: { x: number; y: number; z: number } | null;
+  /**
+   * In-plane unit direction from the touched surface toward the side the limb grips / presses from:
+   * hands and hooks — the hold's good direction (the body side they pull toward; the fingers wrap the
+   * lip from there); a standing foot — the side its sole presses from (above a classic foothold); a
+   * smear — from the toe toward the hip; a heel-toe cam — the foot's axis, heel → toe. null while free.
+   */
+  gripDir?: Vec2 | null;
+  /**
+   * Feet in a heel-toe cam (footMode 'cam'): the heel's hold and contact point (the toe is on `holdId`
+   * at `contactPos`, pressing the opposite way). Absent / null otherwise.
+   */
+  camHoldId?: string | null;
+  camPos?: Vec2 | null;
 }
 
 /** Optional ClimberState.flight: a dyno / deadpoint in progress. */
@@ -275,6 +309,24 @@ export interface ClimberState {
   airborne?: boolean;
   /** Optional (Phase B): the flight in progress, or null. */
   flight?: FlightInfo | null;
+  /**
+   * Optional (advanced moves): a special stance in progress, or null.
+   *  'bat'     — bat hang: no hands, hanging upside down from two hooked / cammed feet on a steep panel
+   *              (≥ ~45°). The body is inverted below the feet: chest.y < pelvis.y (wall-local), the
+   *              chest further out than the pelvis (chestDepth > pelvisDepth: the spine points out of the
+   *              wall under a roof, so its in-plane projection is shorter than BODY.spine). Hands are free
+   *              (LimbSnapshot.shakingOut while they shake out). Ends by a grab (a sit-up) or a fall.
+   *  'figure4' — figure 4: the leg `figure4.leg` is hooked over the holding arm `figure4.hand` (knee /
+   *              thigh over the forearm near the elbow, that foot's footMode 'figure4'), the body pressed
+   *              up on it so the free hand reaches much higher. Ends when a foot goes back on a hold.
+   */
+  special?: 'bat' | 'figure4' | null;
+  /** Optional, while special === 'bat': hang fatigue 0..1 (core + hamstrings; 1 = the feet let go) and the
+   * 0..1 blend of the swing into the inverted pose (smooth in and out). */
+  bat?: { fatigue: number; blend: number } | null;
+  /** Optional, while special === 'figure4': the holding hand, the leg over its arm, and 0..1 how far the
+   * body has pressed up on it (the swing into the figure 4). */
+  figure4?: { hand: 'LH' | 'RH'; leg: 'LF' | 'RF'; blend: number } | null;
 }
 
 // ───────────────────────────── Meta ─────────────────────────────
