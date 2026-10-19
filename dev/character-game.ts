@@ -83,6 +83,15 @@ export async function runGame(canvas: HTMLCanvasElement, qs: URLSearchParams, hu
   const n = Math.round(ff / dt);
   for (let i = 0; i < n; i++) stepOnce(i > n - 6);
   lap('fast-forward');
+  if (qs.has('hipcam')) {
+    // close-up of the harness / legs: camera at pelvis + right·a + out·b + up·c (wall frame), fov d
+    const v = (qs.get('hipcam') as string).split(',').map(Number);
+    const rig = (r as unknown as { climber: { rig: { joints: { hip: THREE.Vector3[]; tieIn: THREE.Vector3 } } } }).climber.rig;
+    const P = rig.joints.hip[0].clone().add(rig.joints.hip[1]).multiplyScalar(0.5);
+    const wf = (r as unknown as { wallFrame: { right: THREE.Vector3; normal: THREE.Vector3 } }).wallFrame;
+    const pos = P.clone().addScaledVector(wf.right, v[0] ?? 0.9).addScaledVector(wf.normal, v[1] ?? 0.5).addScaledVector(new THREE.Vector3(0, 1, 0), v[2] ?? 0.1);
+    r.setDebugView(pos, P.clone().addScaledVector(new THREE.Vector3(0, 1, 0), v[4] ?? -0.1), v[3] || 40);
+  }
   (window as unknown as Record<string, unknown>).__r = r;
   (window as unknown as Record<string, unknown>).__sim = sim;
   const pause = qs.get('pause') === '1';

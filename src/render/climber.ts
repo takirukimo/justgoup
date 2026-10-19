@@ -922,6 +922,51 @@ function torsoWeights(y: number, out: { i: [number, number, number, number]; w: 
   out.w[3] = 0;
 }
 
+/** Thigh tube (right leg, thigh-local: +y hip → knee, +z the knee's front, +x lateral) from its top at the waistband. */
+const THIGH_TOP = -0.085;
+/** Thigh cross-sections: y → rx, rz (front), back ratio, medial shift, superellipse exponent. */
+const THIGH_PROFILE = profile([
+  [THIGH_TOP, 0.084, 0.088, 1.18, -0.043, 3.4],
+  [-0.03, 0.085, 0.09, 1.2, -0.041, 3.2],
+  [0.02, 0.087, 0.091, 1.14, -0.031, 2.8],
+  [0.09, 0.088, 0.09, 1.0, -0.01, 2.3],
+  [0.2, 0.078, 0.08, 0.97, -0.004, 2.1],
+  [0.36, 0.064, 0.067, 0.97, 0, 2.1],
+  [THIGH, 0.06, 0.061, 1.0, 0, 2.1],
+]);
+/** How much of a thigh-tube vertex at height y follows the pelvis (the rest follows the thigh). */
+const thighPelvisW = (y: number): number => 1 - sstep(-0.03, 0.15, y);
+
+/**
+ * A point on the thigh's pants surface (right leg, thigh-local) at height y and angle a (0 = front, π/2 =
+ * lateral), lifted `off` along the section's outward normal (the leg loops ride on it).
+ */
+function thighSurface(y: number, a: number, off: number, out: THREE.Vector3): THREE.Vector3 {
+  const [rx, rz, back, ox, e] = THIGH_PROFILE(y);
+  const cz = superCos(a, e);
+  const sx = superSin(a, e);
+  const r = cz >= 0 ? rz : rz * back;
+  out.set(ox + sx * rx, y, cz * r);
+  // outward normal of the superellipse section (numerically, in the section plane)
+  const d = 1e-3;
+  const cz2 = superCos(a + d, e);
+  const sx2 = superSin(a + d, e);
+  const r2 = cz2 >= 0 ? rz : rz * back;
+  const tx = ox + sx2 * rx - out.x;
+  const tz = cz2 * r2 - out.z;
+  const l = Math.hypot(tx, tz) || 1;
+  // tangent (tx, tz) runs front → lateral: the outward normal is (tz, −tx) rotated to point away
+  let nx = tz / l;
+  let nz = -tx / l;
+  if (nx * (out.x - ox) + nz * out.z < 0) {
+    nx = -nx;
+    nz = -nz;
+  }
+  out.x += nx * off;
+  out.z += nz * off;
+  return out;
+}
+
 // ═══════════════════════════════ BodyRig ═══════════════════════════════
 
 export class BodyRig {
@@ -946,6 +991,8 @@ export class BodyRig {
     ankle: [new THREE.Vector3(), new THREE.Vector3()],
     toe: [new THREE.Vector3(), new THREE.Vector3()],
     tieIn: new THREE.Vector3(),
+    /** The way the rope leaves the tie-in knot (unit, rig space): up and away from the body. */
+    tieDir: new THREE.Vector3(0, 1, 0),
     head: new THREE.Vector3(),
     /** Chalk bag opening (centre of the collar) and the bag's up axis (chalk-up dips). */
     bagMouth: new THREE.Vector3(),
@@ -1451,17 +1498,8 @@ export class BodyRig {
     // thigh (pants): u = 0 front (+z apex = knee front), .25 lateral (+x). The tube starts at the
     // waistband and covers half of the pelvis (the two halves meet at the centre seams), blended
     // from the pelvis bone to the thigh bone so the hips stay one continuous surface.
-    const TOP = -0.085;
-    const th = profile([
-      // y, rx, rz(front), back ratio, medial shift, superellipse exponent
-      [TOP, 0.084, 0.088, 1.18, -0.043, 3.4],
-      [-0.03, 0.085, 0.09, 1.2, -0.041, 3.2],
-      [0.02, 0.087, 0.091, 1.14, -0.031, 2.8],
-      [0.09, 0.088, 0.09, 1.0, -0.01, 2.3],
-      [0.2, 0.078, 0.08, 0.97, -0.004, 2.1],
-      [0.36, 0.064, 0.067, 0.97, 0, 2.1],
-      [THIGH, 0.06, 0.061, 1.0, 0, 2.1],
-    ]);
+    const TOP = THIGH_TOP;
+    const th = THIGH_PROFILE;
     let st = b.vertexCount;
     capsule(b, {
       y0: TOP,
@@ -1478,7 +1516,7 @@ export class BodyRig {
       uvRect: ATLAS_RECTS.thigh,
       attrib: (p, n, v, u, out) => {
         attr(REGION.bottom, ids.thigh, 0, 1)(p, n, v, u, out);
-        const wp = 1 - sstep(-0.03, 0.15, p.y);
+        const wp = thighPelvisW(p.y);
         out.skinIndex[0] = ids.thigh;
         out.skinIndex[1] = BONE.pelvis;
         out.skinWeight[0] = 1 - wp;
@@ -1546,6 +1584,9 @@ export class BodyRig {
   }
 
   private shoeStart = 0;
+  /** Where the rope leaves the tie-in knot (pelvis-local) and the direction it leaves in. */
+  private tieLocal = new THREE.Vector3(0, 0.03, -0.155);
+  private tieDirLocal = new THREE.Vector3(0, 0.85, -0.53).normalize();
 
   /**
    * Aggressive downturned climbing shoe (right foot, foot-local: +y heel→toe, +z instep up,
@@ -1885,98 +1926,214 @@ export class BodyRig {
       attrib: (p, n, v, u, out) => attr(v < 0.2 || v > 0.8 ? REGION.webbing : REGION.harness, BONE.pelvis, 0, 1)(p, n, v, u, out),
       uvRect: ATLAS_RECTS.webbing,
     });
-    // leg loops around each thigh (thigh-local ring, tilted: higher at the front-outside)
+    // leg loops: padded bands lying ON each thigh's pants surface (the same cross-section and the same
+    // thigh ↔ pelvis skin blend as the pants underneath, so a loop follows its thigh through a high step
+    // or a frog instead of floating as a rigid ring), higher at the front toward the belay loop and
+    // dropping under the buttock at the back
+    const LOOP_Y = 0.088;
+    const loopY = (a: number): number => LOOP_Y - 0.026 * Math.cos(a) - 0.008 * Math.sin(a);
     for (let s = 0; s < 2; s++) {
       const bone = LEG[s].thigh;
       const st = b.vertexCount;
       loft(b, {
-        rows: 4,
-        cols: 30,
+        rows: 5,
+        cols: 40,
         point: (v, u, out) => {
           const a = u * Math.PI * 2;
-          const rr = 0.096 + 0.003 * Math.sin(v * Math.PI);
-          const yy = 0.085 + (v - 0.5) * 0.026 - Math.cos(a) * 0.022;
-          out.set(Math.sin(a) * rr, yy, Math.cos(a) * rr * 0.98);
+          thighSurface(loopY(a) + (v - 0.5) * 0.027, a, 0.0035 + 0.0045 * Math.sin(v * Math.PI), out);
         },
-        attrib: (p, n, v, u, out) => attr(v < 0.2 || v > 0.8 ? REGION.harness : REGION.webbing, bone, 0, 1)(p, n, v, u, out),
+        attrib: (p, n, v, u, out) => {
+          attr(v < 0.2 || v > 0.8 ? REGION.webbing : REGION.harness, bone, 0, 1)(p, n, v, u, out);
+          const wp = thighPelvisW(p.y);
+          out.skinIndex[1] = BONE.pelvis;
+          out.skinWeight[0] = 1 - wp;
+          out.skinWeight[1] = wp;
+        },
         uvRect: ATLAS_RECTS.webbing,
       });
       if (s === 0) b.mirrorInPlaceX(st, b.vertexCount, 0);
       b.transform(rest[bone], st);
     }
-    // belay loop: vertical ring at the front centre joining waist belt and leg loops
+    // where each leg loop meets the belay loop (front, toward the inside of the thigh), in the rest pose
+    const aBr = -0.55;
+    const brR = thighSurface(loopY(aBr), aBr, 0.008, new THREE.Vector3());
+    const brL = brR.clone().setX(-brR.x).applyMatrix4(rest[LEG[0].thigh]);
+    brR.applyMatrix4(rest[LEG[1].thigh]);
+    const wpBr = thighPelvisW(loopY(aBr));
+    // the belay loop runs from the waist belt's front (T, top) down to the leg loops' bridge (B, bottom)
+    const T = new THREE.Vector3(0, 0.96 + yW - 0.014, -(f + 0.003));
+    const Bc = brL.clone().add(brR).multiplyScalar(0.5).add(new THREE.Vector3(0, -0.003, -0.008));
+    const hBel = T.y - Bc.y;
+    /** Skin for the front pieces by rest height: the pelvis at the belt, both thighs sharing the bridge. */
+    const frontSkin = (y: number, out: { skinIndex: number[]; skinWeight: number[] }): void => {
+      const t = clampN((y - Bc.y) / hBel, 0, 1);
+      const wPel = wpBr + (1 - wpBr) * t;
+      out.skinIndex[0] = BONE.pelvis;
+      out.skinIndex[1] = LEG[0].thigh;
+      out.skinIndex[2] = LEG[1].thigh;
+      out.skinIndex[3] = 0;
+      out.skinWeight[0] = wPel;
+      out.skinWeight[1] = (1 - wPel) * 0.5;
+      out.skinWeight[2] = (1 - wPel) * 0.5;
+      out.skinWeight[3] = 0;
+    };
+    // the bridge: the two leg loops joined at the front through the bottom of the belay loop
     {
-      const st = b.vertexCount;
-      const R = 0.032;
+      const mid = Bc.clone().add(new THREE.Vector3(0, -0.004, -0.004));
+      const sideW = (x: number) => clampN((x - brL.x) / Math.max(1e-4, brR.x - brL.x), 0, 1);
       loft(b, {
-        rows: 24,
-        cols: 10,
+        rows: 9,
+        cols: 8,
         point: (v, u, out) => {
-          const a = v * Math.PI * 2;
+          // quadratic through brL → mid → brR, a flat webbing section (10 mm tall, 3 mm thick)
+          const q0 = (1 - v) * (1 - v);
+          const q1 = 2 * v * (1 - v);
+          const q2 = v * v;
+          out.set(brL.x * q0 + mid.x * q1 + brR.x * q2, brL.y * q0 + mid.y * q1 + brR.y * q2, brL.z * q0 + mid.z * q1 + brR.z * q2);
           const c = u * Math.PI * 2;
-          const cx = Math.cos(a) * R * 0.55;
-          const cy = Math.sin(a) * R;
-          const tube = 0.0065;
-          out.set(cx + Math.cos(a) * Math.cos(c) * tube, cy + Math.sin(c) * tube * 0.6 + Math.sin(a) * Math.cos(c) * tube, Math.sin(c) * tube * 0.8);
+          out.y += Math.cos(c) * 0.0055;
+          out.z -= Math.sin(c) * 0.0018;
         },
-        attrib: attr(REGION.harness, BONE.pelvis, 0, 1),
+        attrib: (p, n, v, u, out) => {
+          attr(REGION.webbing, BONE.pelvis, 0, 0.9)(p, n, v, u, out);
+          const k = sideW(p.x);
+          out.skinIndex[0] = BONE.pelvis;
+          out.skinIndex[1] = LEG[0].thigh;
+          out.skinIndex[2] = LEG[1].thigh;
+          out.skinWeight[0] = wpBr;
+          out.skinWeight[1] = (1 - wpBr) * (1 - k);
+          out.skinWeight[2] = (1 - wpBr) * k;
+        },
         uvRect: ATLAS_RECTS.blank,
       });
-      b.transform(new THREE.Matrix4().makeRotationY(Math.PI / 2).setPosition(0, 0.96 + 0.035, -(r0.f + 0.024)), st);
+    }
+    // belay loop: a flat webbing loop from the belt down to the bridge (its front strand bowed out)
+    const ey = T.clone().sub(Bc).normalize();
+    const ef = new THREE.Vector3(0, 0, -1).addScaledVector(ey, ey.z).normalize();
+    const C0 = T.clone().add(Bc).multiplyScalar(0.5);
+    const loopAt = (th: number, front: number, back: number, out: THREE.Vector3): THREE.Vector3 => {
+      const sn = Math.sin(th);
+      return out.copy(C0).addScaledVector(ey, (hBel / 2) * Math.cos(th)).addScaledVector(ef, (sn >= 0 ? front : back) * sn);
+    };
+    {
+      const tA = new THREE.Vector3();
+      const tB = new THREE.Vector3();
+      loft(b, {
+        rows: 33,
+        cols: 8,
+        point: (v, u, out) => {
+          const th = v * Math.PI * 2;
+          loopAt(th, 0.017, 0.004, out);
+          // the section's normal in the loop plane (tangent ⟂ lateral axis)
+          loopAt(th + 0.01, 0.017, 0.004, tA);
+          loopAt(th - 0.01, 0.017, 0.004, tB);
+          tA.sub(tB).normalize();
+          // n = tangent × x̂ (in the y–z plane)
+          const ny = tA.z;
+          const nz = -tA.y;
+          const c = u * Math.PI * 2;
+          out.x += Math.cos(c) * 0.0095;
+          out.y += ny * Math.sin(c) * 0.0019;
+          out.z += nz * Math.sin(c) * 0.0019;
+        },
+        attrib: (p, n, v, u, out) => {
+          attr(REGION.harness, BONE.pelvis, 0, 0.95)(p, n, v, u, out);
+          frontSkin(p.y, out);
+        },
+        uvRect: ATLAS_RECTS.blank,
+      });
     }
     if (this.outfit.tieIn === 'device') this.buildBelayDevice(b, r0.f);
-    // figure-8 follow-through knot at the tie-in (rope colour), two parallel strands
     else {
-      const knotC = new THREE.Vector3(0, 0.96 + 0.02, -(r0.f + 0.05));
+      // figure-8 follow-through: the rope runs through both tie-in points (the belt above the belay loop,
+      // the bridge below it) as a doubled loop, the knot sits in front of them, the standing rope leaves
+      // the knot up and forward (away from the body) and a short tail hangs below
+      const Tp = T.clone().add(new THREE.Vector3(0, 0.004, -0.006));
+      const Bp = Bc.clone().add(new THREE.Vector3(0, -0.003, -0.007));
+      const ty = Tp.clone().sub(Bp).normalize();
+      const tf = new THREE.Vector3(0, 0, -1).addScaledVector(ty, ty.z).normalize();
+      const tc = Tp.clone().add(Bp).multiplyScalar(0.5);
+      const th2 = Tp.distanceTo(Bp) / 2;
+      // the doubled tie-in loop: snug through the two tie-in points, its front strands running into the knot
+      const reachF = 0.012;
       for (const off of [-1, 1]) {
-        const st = b.vertexCount;
-        const N = 80;
-        const curve: THREE.Vector3[] = [];
-        for (let i = 0; i <= N; i++) {
-          const t = (i / N) * Math.PI * 2;
-          // figure-eight knot (4₁) parametric curve, flattened and stretched vertically
-          const x = (2 + Math.cos(2 * t)) * Math.cos(3 * t);
-          const y = (2 + Math.cos(2 * t)) * Math.sin(3 * t);
-          const z = Math.sin(4 * t);
-          curve.push(new THREE.Vector3(x * 0.0058, y * 0.0085, z * 0.006 + off * 0.0035));
-        }
         loft(b, {
-          rows: N + 1,
-          cols: 8,
+          rows: 28,
+          cols: 6,
           point: (v, u, out) => {
-            const i = Math.round(v * N);
-            const p = curve[i % N];
-            const q = curve[(i + 1) % N];
-            const pm = curve[(i + N - 1) % N];
-            _t0.subVectors(q, pm).normalize();
-            _t1.crossVectors(_t0, AX_Z);
-            if (_t1.lengthSq() < 1e-6) _t1.set(1, 0, 0);
-            _t1.normalize();
-            _t2.crossVectors(_t0, _t1).normalize();
-            const a = u * Math.PI * 2;
-            const r = 0.0048;
-            out.copy(p).addScaledVector(_t1, Math.cos(a) * r).addScaledVector(_t2, Math.sin(a) * r);
+            const a = v * Math.PI * 2;
+            const sn = Math.sin(a);
+            out.copy(tc).addScaledVector(ty, th2 * Math.cos(a)).addScaledVector(tf, (sn >= 0 ? reachF : 0.003) * sn);
+            const c = u * Math.PI * 2;
+            out.x += off * 0.0049 + Math.cos(c) * 0.0046;
+            out.addScaledVector(tf, Math.sin(c) * 0.0046);
           },
-          attrib: attr(REGION.rope, BONE.pelvis, 0, 1),
+          attrib: (p, n, v, u, out) => {
+            attr(REGION.rope, BONE.pelvis, 0, 0.9)(p, n, v, u, out);
+            frontSkin(p.y, out);
+          },
           uvRect: ATLAS_RECTS.rope,
         });
-        b.transform(new THREE.Matrix4().setPosition(knotC), st);
       }
-      // the rope leaving the knot upward (tail + standing end stub)
-      const st = b.vertexCount;
-      capsule(b, {
-        y0: 0,
-        y1: 0.05,
-        cap0: 0.005,
-        cap1: 0.005,
-        rows: 6,
-        capRows: 3,
-        cols: 8,
-        sec: () => ({ rx: 0.005, rz: 0.005 }),
-        uvRect: ATLAS_RECTS.rope,
-        attrib: attr(REGION.rope, BONE.pelvis, 0, 1),
-      });
-      b.transform(new THREE.Matrix4().makeRotationZ(-0.25).setPosition(knotC.x + 0.008, knotC.y + 0.018, knotC.z - 0.004), st);
+      // the knot: a dressed figure-8 reads as a short braid of four parallel strands (the rope doubled back
+      // through itself), twisting round each other in front of the tie-in loop
+      const K = tc.clone().addScaledVector(tf, reachF + 0.011).add(new THREE.Vector3(0, 0.006, 0));
+      const KL = 0.064;
+      for (let k = 0; k < 4; k++) {
+        const ph = k * (Math.PI / 2) + (k >= 2 ? 0.35 : 0);
+        loft(b, {
+          rows: 18,
+          cols: 6,
+          point: (v, u, out) => {
+            const yy = (v - 0.5) * KL;
+            const taper = 1 - 0.45 * (2 * v - 1) * (2 * v - 1);
+            const a = ph + yy * 70;
+            const r = 0.0078 * taper;
+            out.set(Math.cos(a) * r, yy, 0);
+            out.addScaledVector(tf, Math.sin(a) * r * 0.75);
+            // tangent ≈ along y with the twist: the tube section in the horizontal plane is close enough
+            const c = u * Math.PI * 2;
+            out.x += Math.cos(c) * 0.0046;
+            out.addScaledVector(tf, Math.sin(c) * 0.0046);
+            out.add(K);
+          },
+          attrib: (p, n, v, u, out) => {
+            attr(REGION.rope, BONE.pelvis, 0, 0.95)(p, n, v, u, out);
+            frontSkin(p.y, out);
+          },
+          uvRect: ATLAS_RECTS.rope,
+        });
+      }
+      // the standing rope out of the knot's top, up and forward (the dynamic rope continues from its end),
+      // and the tail out of its bottom
+      const s0 = K.clone().add(new THREE.Vector3(0.004, KL * 0.45, -0.002));
+      const s1 = K.clone().add(new THREE.Vector3(0.008, KL * 0.45 + 0.04, -0.026));
+      const t0 = K.clone().add(new THREE.Vector3(-0.005, -KL * 0.42, -0.002));
+      const t1 = K.clone().add(new THREE.Vector3(-0.014, -KL * 0.42 - 0.05, -0.016));
+      for (const [a, c] of [[s0, s1], [t0, t1]] as const) {
+        const st = b.vertexCount;
+        const len = a.distanceTo(c);
+        capsule(b, {
+          y0: 0,
+          y1: len,
+          cap0: 0.005,
+          cap1: 0.005,
+          rows: 6,
+          capRows: 3,
+          cols: 8,
+          sec: () => ({ rx: 0.005, rz: 0.005 }),
+          uvRect: ATLAS_RECTS.rope,
+          attrib: (p, n, v, u, out) => {
+            attr(REGION.rope, BONE.pelvis, 0, 1)(p, n, v, u, out);
+            frontSkin(K.y, out);
+          },
+        });
+        _q0.setFromUnitVectors(AX_Y, _t3.subVectors(c, a).normalize());
+        b.transform(new THREE.Matrix4().makeRotationFromQuaternion(_q0).setPosition(a), st);
+      }
+      // the dynamic rope starts where the standing end leaves the knot, heading the same way
+      this.tieLocal.copy(s1).sub(_t0.set(0, 0.96, 0));
+      this.tieDirLocal.subVectors(s1, s0).normalize();
     }
     // gear loops with two hanging quickdraw stubs on the hips
     for (let s = 0; s < 2; s++) {
@@ -2295,7 +2452,8 @@ export class BodyRig {
     }
 
     // ── tie-in point (front of the harness) + chalk bag ──
-    this.joints.tieIn.set(0, 0.03, -0.155).applyQuaternion(this.qPelvis).add(g.pelvis);
+    this.joints.tieIn.copy(this.tieLocal).applyQuaternion(this.qPelvis).add(g.pelvis);
+    this.joints.tieDir.copy(this.tieDirLocal).applyQuaternion(this.qPelvis);
     this.solveBag(dt);
 
     // culling spheres follow the body
@@ -2849,6 +3007,7 @@ export class BodyRig {
     this.chains++;
     let k = this.chainCircle(li, root, target);
     let th = this.swivel(li, pole);
+    if (!Number.isNaN(th)) th = this.keepSide(li, th);
     this.fallback[li] = Number.isNaN(th);
     if (Number.isNaN(th)) {
       // pull in along the wall (foot straight down below its hold, hand toward shoulder height);
@@ -2889,6 +3048,9 @@ export class BodyRig {
     this.wallSlack[li] = this.wallOn
       ? this.wallDepth(outMid) - (li >= 2 ? R_KNEE_WALL : R_ELBOW_WALL) - WALL_MARGIN
       : 1;
+    // a knee / elbow still in the wall after the swivel's rate limit (turning round to a new side): the
+    // hips / chest ease out for it like for a compromise swivel
+    if (this.wallSlack[li] < -0.01 && !this.quick) this.wallNeed[li] = Math.max(this.wallNeed[li], -this.wallSlack[li] * 0.5);
     this.cA.subVectors(this.cEnd, outMid);
     const l = this.cA.length();
     if (l > 1e-9) outEnd.copy(outMid).addScaledVector(this.cA, this.cL2 / l);
@@ -3060,6 +3222,42 @@ export class BodyRig {
     }
     this.lastTh[li] = 0;
     return (lo + hi) * 0.5;
+  }
+
+  /**
+   * Continuity of the swivel across a side flip: when the chosen swivel `th` lies far round the limb from
+   * last frame's apex (the knee flipping from out to in, the only fully valid swivel on the far side), the
+   * rate-limited apex would sweep there through the wall over several frames, and the two sides tend to
+   * alternate. Stay by last frame's apex instead while that is only just off (a hair past the joint range,
+   * a little into the wall): the wall need eases the hips / chest out to make room. Uses the basis from
+   * swivel(); returns the swivel to use.
+   */
+  private keepSide(li: number, th: number): number {
+    if (this.dtSolve <= 0 || !this.apexPrevOk[li]) return th;
+    const pv = this.apexPrev[li];
+    const e1x = pv.dot(this.cE1);
+    const e2x = pv.dot(this.cE2);
+    if (e1x * e1x + e2x * e2x < 1e-6) return th;
+    const thP = Math.atan2(e2x, e1x);
+    const far = Math.abs(Math.atan2(Math.sin(th - thP), Math.cos(th - thP)));
+    if (far < 1.75) return th;
+    let lo = thP - 0.7;
+    let hi = thP + 0.7;
+    for (let i = 0; i < 7; i++) {
+      const m1 = lo + (hi - lo) * 0.382;
+      const m2 = lo + (hi - lo) * 0.618;
+      const c1 = this.violation(li, m1) + SW_WALL_COST * this.vWall;
+      const c2 = this.violation(li, m2) + SW_WALL_COST * this.vWall;
+      if (c1 < c2) hi = m2;
+      else lo = m1;
+    }
+    const thN = (lo + hi) * 0.5;
+    const vN = this.violation(li, thN);
+    const wN = this.vWall;
+    if (vN >= SW_SOFT || wN >= 0.08) return th;
+    this.wallNeed[li] = Math.max(this.wallNeed[li], wN);
+    this.lastTh[li] = 0;
+    return thN;
   }
 
   /** Signed step of the side to use (hysteresis: keep last side unless the other is ≥ 2 steps closer). */
@@ -3458,6 +3656,37 @@ export class BodyRig {
     }
   }
 
+  /**
+   * Body capsules a rope must not pass through (rig space = world for the climber): the thighs, shins,
+   * pelvis, belly and ribcage of the last solve, as [ax, ay, az, bx, by, bz, ra, rb] × n into `out`
+   * (stride 8, ≥ 7 capsules). Returns n. No allocation.
+   */
+  ropeColliders(out: Float32Array): number {
+    const J = this.joints;
+    let n = 0;
+    const put = (a: THREE.Vector3, b: THREE.Vector3, ra: number, rb: number) => {
+      if (n * 8 + 8 > out.length) return;
+      const o = n * 8;
+      out[o] = a.x;
+      out[o + 1] = a.y;
+      out[o + 2] = a.z;
+      out[o + 3] = b.x;
+      out[o + 4] = b.y;
+      out[o + 5] = b.z;
+      out[o + 6] = ra;
+      out[o + 7] = rb;
+      n++;
+    };
+    for (let s = 0; s < 2; s++) {
+      put(J.hip[s], J.knee[s], R_THIGH[0] + 0.012, R_THIGH[1] + 0.01);
+      put(J.knee[s], J.ankle[s], R_SHIN[0] + 0.01, R_SHIN[1] + 0.008);
+    }
+    put(this.pelvA, this.pelvB, 0.088, 0.088);
+    put(this.bellyA, this.bellyB, 0.1, 0.1);
+    put(this.chestA, this.chestB, 0.11, 0.11);
+    return n;
+  }
+
   private solveBag(dt: number): void {
     const bag = this.bones[BONE.bag];
     // attach point: back of the belt, right of centre
@@ -3835,6 +4064,19 @@ export class ClimberModel extends THREE.Group {
 
   getHarnessWorld(out: THREE.Vector3): THREE.Vector3 {
     return out.copy(this.rig.joints.tieIn);
+  }
+
+  /**
+   * A point `len` m out of the tie-in knot along the way the standing rope leaves it (up and away from
+   * the body): the renderer pins the rope there too, so it never leaves the knot back into the body.
+   */
+  getRopeLead(out: THREE.Vector3, len = 0.05): THREE.Vector3 {
+    return out.copy(this.rig.joints.tieIn).addScaledVector(this.rig.joints.tieDir, len);
+  }
+
+  /** The body capsules the rope collides with (BodyRig.ropeColliders): stride 8, returns the count. */
+  getRopeColliders(out: Float32Array): number {
+    return this.rig.ropeColliders(out);
   }
 
   /** QA: the body's right axis in the wall plane (wall-local, from the last pose). */
@@ -4755,14 +4997,33 @@ export class ClimberModel extends THREE.Group {
       // roll onto the inside edge for frog feet
       this.q.setFromAxisAngle(dir, side * 0.32 * high);
       up.applyQuaternion(this.q);
-      // the knee tracks over the toes: a foot turned out opens its knee to the side (frog), a foot kept
-      // straight beside the other one points its knee out from the wall (no knock-knees, no X legs)
+      // the knee tracks over the toes: it points toward the wall (the leg's anatomical front) and out to
+      // the side — further out the higher the foot (frog, rock-over) and over a foot set out wide; a foot
+      // kept straight beside the other one keeps its knee forward (no knock-knees, no X legs). A knee
+      // aimed straight out sideways over a foot tucked under the hip made the leg stick out in a Z (owner
+      // feedback: "legs look a bit weird sometimes")
       const tk = 1 - this.narrow[s];
+      this.v2.subVectors(fg.target, Hp);
+      const wide = sstep(0.06, 0.38, this.v2.dot(Rw) * side);
+      let phi = Math.min(1.25, (turn + 0.8 * sstep(-0.6, -0.25, hf) + 0.35 * wide) * (0.55 + 0.45 * tk));
+      if (mode === 'hold') {
+        // room in front of the hip: the bent leg's knee sits hK off the hip → ankle line; aimed φ out from
+        // straight at the wall it comes ≈ hK·cos φ closer to the wall than the line's middle — it turns
+        // out at least as far as keeps it off the wall (and so the thigh off the belly)
+        const ank = this.v3.copy(fg.target).addScaledVector(dir, -0.168).addScaledVector(up, 0.066);
+        const half = Hp.distanceTo(ank) * 0.5;
+        const hK = Math.sqrt(Math.max(0, THIGH * THIGH - half * half));
+        if (hK > 0.02) {
+          const midD = (this.rig.wallDepth(Hp) + this.rig.wallDepth(ank)) * 0.5;
+          const room = midD - (R_KNEE_WALL + WALL_MARGIN + 0.015);
+          phi = Math.max(phi, Math.acos(clampN(room / hK, -1, 1)));
+        }
+      }
       pole
-        .copy(Rw)
-        .multiplyScalar(side * ((0.45 + 0.65 * high) * tk + 0.3 * (1 - tk)))
-        .addScaledVector(Nw, (0.6 - 0.15 * high) * tk - 0.35 * (1 - tk))
-        .addScaledVector(Uw, 0.05 + 0.55 * high + 0.6 * (1 - tk));
+        .copy(Nw)
+        .multiplyScalar(-Math.cos(phi))
+        .addScaledVector(Rw, side * Math.sin(phi))
+        .addScaledVector(Uw, 0.12 + 0.45 * high + 0.3 * (1 - tk));
       if (mode === 'wall') pole.copy(Nw).multiplyScalar(0.5).addScaledVector(WORLD_UP, 0.6).addScaledVector(Rw, side * 0.45);
       // drop knee: the knee turns in and down when the foot crosses inward of the hip; the foot rolls
       // onto its outside edge, toes into the wall and turned out, the instep facing out and up
@@ -4786,7 +5047,7 @@ export class ClimberModel extends THREE.Group {
         dir.lerp(this.v2, smk).normalize();
         up.lerp(this.v3, smk);
         up.addScaledVector(dir, -up.dot(dir)).normalize();
-        this.v2.copy(Nw).multiplyScalar(0.75).addScaledVector(Rw, side * 0.45).addScaledVector(Uw, 0.2).normalize();
+        this.v2.copy(Nw).multiplyScalar(-0.45).addScaledVector(Rw, side * 0.6).addScaledVector(Uw, 0.3).normalize();
         pole.normalize().lerp(this.v2, smk * 0.7);
         // the ball of the foot (not the toe tip) presses on the wall
         fg.target.addScaledVector(dir, -0.03 * smk).addScaledVector(Nw, -0.006 * smk);
@@ -4832,14 +5093,15 @@ export class ClimberModel extends THREE.Group {
       const xk = this.crossK;
       if (xk > 0.001 && mode === 'hold' && hk < 0.5) {
         if (s === this.crossFront) this.v2.copy(Nw).multiplyScalar(0.9).addScaledVector(Uw, 0.3).addScaledVector(Rw, -side * 0.25).normalize();
-        else this.v2.copy(Nw).multiplyScalar(0.2).addScaledVector(Rw, side * 0.75).addScaledVector(Uw, -0.25).normalize();
-        pole.normalize().lerp(this.v2, xk * 0.8);
+        else this.v2.copy(Nw).multiplyScalar(-0.25).addScaledVector(Rw, side * 0.75).addScaledVector(Uw, -0.25).normalize();
+        pole.normalize().lerp(this.v2, xk * 0.95);
         if (s === this.crossFront) fg.layer = Math.max(fg.layer, 1);
       }
     } else if (mode === 'drag') {
       dir.copy(Nw).multiplyScalar(-0.85).addScaledVector(Uw, -0.15).addScaledVector(Rw, side * 0.25).normalize();
       up.copy(Uw).addScaledVector(dir, -Uw.dot(dir)).normalize();
-      pole.copy(Rw).multiplyScalar(side * 0.6).addScaledVector(Nw, 0.55).addScaledVector(Uw, 0.3);
+      // a foot on its way: the knee leads, forward toward the wall and a little out (it lifts with a high foot)
+      pole.copy(Rw).multiplyScalar(side * 0.55).addScaledVector(Nw, -0.5).addScaledVector(Uw, 0.3 + 0.4 * high);
       const flk = this.flagK[s];
       if (flk > 0.001) {
         // flag: the leg held out long as a counterweight, toes pointed along it and just brushing the

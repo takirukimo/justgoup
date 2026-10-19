@@ -26,6 +26,9 @@ const RADIUS = 0.005;
 const ITER = 12;
 const GRAVITY = -9.81;
 const V_REPEAT = 0.034; // metres per texture repeat along the rope
+const MAX_COLLIDERS = 12;
+/** Rope radius + a hair: how far a particle stays off a body capsule's skin. */
+const COL_MARGIN = RADIUS + 0.004;
 
 export class RopeMesh extends THREE.Object3D {
   private mesh: THREE.Mesh;
@@ -64,6 +67,11 @@ export class RopeMesh extends THREE.Object3D {
   private oldArc: Float32Array = new Float32Array(MAX_PARTICLES);
   private tailEnd = new THREE.Vector3();
   private pileC = new THREE.Vector3();
+  // body capsules the rope may not pass through ([ax, ay, az, bx, by, bz, ra, rb] × colN) + their bounds
+  private col: Float32Array = new Float32Array(MAX_COLLIDERS * 8);
+  private colN = 0;
+  private colC = new THREE.Vector3();
+  private colR = 0;
 
   constructor(color?: string) {
     super();
@@ -130,6 +138,73 @@ export class RopeMesh extends THREE.Object3D {
     this.anchorCount = n;
     this.visible = true;
     this.hasPath = true;
+  }
+
+  /**
+   * Body capsules (the climber's legs, pelvis, torso: ClimberModel.getRopeColliders) the rope must go
+   * around instead of through, as [ax, ay, az, bx, by, bz, ra, rb] × n (copied). n = 0 clears them.
+   */
+  setColliders(data: Float32Array | null, n: number): void {
+    const m = data ? Math.min(n, MAX_COLLIDERS, Math.floor(data.length / 8)) : 0;
+    this.colN = m;
+    if (!data || !m) return;
+    for (let i = 0; i < m * 8; i++) this.col[i] = data[i];
+    // bounding sphere (cheap reject for particles far from the body)
+    const C = this.colC.set(0, 0, 0);
+    for (let i = 0; i < m; i++) {
+      const o = i * 8;
+      C.x += (data[o] + data[o + 3]) * 0.5;
+      C.y += (data[o + 1] + data[o + 4]) * 0.5;
+      C.z += (data[o + 2] + data[o + 5]) * 0.5;
+    }
+    C.multiplyScalar(1 / m);
+    let r = 0;
+    for (let i = 0; i < m; i++) {
+      const o = i * 8;
+      const ra = Math.hypot(data[o] - C.x, data[o + 1] - C.y, data[o + 2] - C.z) + data[o + 6];
+      const rb = Math.hypot(data[o + 3] - C.x, data[o + 4] - C.y, data[o + 5] - C.z) + data[o + 7];
+      r = Math.max(r, ra, rb);
+    }
+    this.colR = r + COL_MARGIN;
+  }
+
+  /** Push the free particles out of the body capsules (closest point on each capsule's axis). */
+  private collide(): void {
+    const D = this.col;
+    const C = this.colC;
+    const R2 = this.colR * this.colR;
+    for (let i = 0; i < this.pCount; i++) {
+      if (this.pinned[i]) continue;
+      const P = this.p[i];
+      const cx = P.x - C.x;
+      const cy = P.y - C.y;
+      const cz = P.z - C.z;
+      if (cx * cx + cy * cy + cz * cz > R2) continue;
+      for (let k = 0; k < this.colN; k++) {
+        const o = k * 8;
+        const ax = D[o];
+        const ay = D[o + 1];
+        const az = D[o + 2];
+        const ex = D[o + 3] - ax;
+        const ey = D[o + 4] - ay;
+        const ez = D[o + 5] - az;
+        const l2 = ex * ex + ey * ey + ez * ez;
+        let t = l2 > 1e-12 ? ((P.x - ax) * ex + (P.y - ay) * ey + (P.z - az) * ez) / l2 : 0;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const qx = P.x - (ax + ex * t);
+        const qy = P.y - (ay + ey * t);
+        const qz = P.z - (az + ez * t);
+        const r = D[o + 6] + (D[o + 7] - D[o + 6]) * t + COL_MARGIN;
+        const d2 = qx * qx + qy * qy + qz * qz;
+        if (d2 >= r * r) continue;
+        const d = Math.sqrt(d2);
+        if (d < 1e-6) continue;
+        const k2 = (r - d) / d;
+        P.x += qx * k2;
+        P.y += qy * k2;
+        P.z += qz * k2;
+      }
+    }
   }
 
   // ───────────────────────────── simulation ─────────────────────────────
@@ -266,6 +341,8 @@ export class RopeMesh extends THREE.Object3D {
           b.y -= dy * diff * wb;
           b.z -= dz * diff * wb;
         }
+        // the body: the rope goes round a thigh / the hips, never through them
+        if (this.colN && (it & 1) === 1) this.collide();
       }
     }
   }

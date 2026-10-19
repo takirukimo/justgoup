@@ -125,6 +125,8 @@ export class GameRenderer implements RendererAPI {
   private ropePath: Vec2[] | null = null;
   private clipped: string[] = [];
   private ropeWorld: THREE.Vector3[] = [];
+  /** The climber's body capsules for the rope (ClimberModel.getRopeColliders, stride 8). */
+  private ropeCol = new Float32Array(12 * 8);
   private pulls = new Map<string, Vec2>();
   private skin: { head: HeadId; colorway: ColorwayId; chalk: ChalkId } = { head: 'ibex', colorway: 'basalt', chalk: 'classic' };
   private focusHint: Vec2 | null = null;
@@ -840,8 +842,10 @@ export class GameRenderer implements RendererAPI {
       rope.update(dt);
       return;
     }
-    while (this.ropeWorld.length < path.length) this.ropeWorld.push(new THREE.Vector3());
-    this.ropeWorld.length = path.length;
+    // (+1: the lead out of the tie-in knot when the climber is drawn)
+    const lead = !!this.climber && this.climberVisible;
+    while (this.ropeWorld.length < path.length + 1) this.ropeWorld.push(new THREE.Vector3());
+    this.ropeWorld.length = path.length + (lead ? 1 : 0);
     const pts = this.ropeWorld;
     const n = path.length;
     // belayer end
@@ -870,9 +874,16 @@ export class GameRenderer implements RendererAPI {
       }
       if (!matched) this.wallFrame.toWorldXYZ(p.x, p.y, 0.04, pts[i]);
     }
-    // harness end
-    if (this.climber && this.climberVisible) this.climber.getHarnessWorld(pts[n - 1]);
-    else this.wallFrame.toWorldXYZ(path[n - 1].x, path[n - 1].y, 0.3, pts[n - 1]);
+    // harness end: the rope leaves the figure-8 up and away from the body (a pinned lead a few cm out of
+    // the knot), then goes round the legs / hips to the draw (body capsules), never through a thigh
+    if (lead && this.climber) {
+      this.climber.getRopeLead(pts[n - 1]);
+      this.climber.getHarnessWorld(pts[n]);
+      rope.setColliders(this.ropeCol, this.climber.getRopeColliders(this.ropeCol));
+    } else {
+      this.wallFrame.toWorldXYZ(path[n - 1].x, path[n - 1].y, 0.3, pts[n - 1]);
+      rope.setColliders(null, 0);
+    }
     // CHARACTER integration: the hanging climber grabs the rope toward the last clipped draw
     this.climber?.setRopeAnchor(n > 2 ? pts[n - 2] : null);
     this.wall.quickdraws.setClipped(this.clipped, this.pulls);
