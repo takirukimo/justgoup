@@ -151,6 +151,9 @@ export class BoulderEditor implements EditorAPI {
   private solveCache = new Map<string, SolveResult>();
   private solveTimer = 0;
   private saveTimer = 0;
+  /** First-visit tip (Steini over the top bar) is up; it hides itself after a read. */
+  private introOn = false;
+  private introTimer = 0;
 
   private panel: EditorPanel | null = null;
   private overlay: EditorOverlay | null = null;
@@ -341,6 +344,7 @@ export class BoulderEditor implements EditorAPI {
   };
 
   private teardown(): void {
+    this.dismissIntro();
     this.saveNow();
     clearTimeout(this.solveTimer);
     clearTimeout(this.saveTimer);
@@ -1108,6 +1112,7 @@ export class BoulderEditor implements EditorAPI {
 
   private readonly onDown = (e: PointerEvent): void => {
     if (!this.opened) return;
+    this.dismissIntro();
     if (e.pointerType === 'mouse' && e.button !== 0 && e.button !== 1 && e.button !== 2) return;
     const cr = this.renderer.canvas.getBoundingClientRect();
     this.canvasRect = { left: cr.left, top: cr.top, width: cr.width || this.canvasRect.width, height: cr.height || this.canvasRect.height };
@@ -1533,12 +1538,20 @@ export class BoulderEditor implements EditorAPI {
       seen = true;
     }
     if (seen) return;
-    void this.ui.guide.say({
-      text: 'Your wall, your rules. Tap to set holds, pick START, HAND, FOOT or TOP below. Send it yourself, then publish it for everyone.',
-      mood: 'point',
-      waitForTap: true,
-      position: 'top',
-    });
+    const text = 'Your wall, your rules. Tap to set holds, pick START, HAND, FOOT or TOP below. Send it yourself, then publish it for everyone.';
+    void this.ui.guide.say({ text, mood: 'point', waitForTap: true, position: 'top' });
+    // the tip sits over the top bar (close, TEST, PUBLISH): it leaves on the first touch of the wall,
+    // or by itself once it has been readable (≈220 ms a word, plus a beat)
+    this.introOn = true;
+    clearTimeout(this.introTimer);
+    this.introTimer = window.setTimeout(() => this.dismissIntro(), Math.max(6000, text.split(/\s+/).length * 220 + 3000));
+  }
+
+  private dismissIntro(): void {
+    clearTimeout(this.introTimer);
+    if (!this.introOn) return;
+    this.introOn = false;
+    this.ui.guide.hide();
   }
 }
 

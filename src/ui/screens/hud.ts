@@ -111,6 +111,8 @@ function arcGauge(): { svg: SVGSVGElement; val: SVGPathElement } {
 export class HudView implements ScreenView<P> {
   readonly el: HTMLElement;
   readonly reuse = true;
+  /** Unsubscribes the per-event HUD reactions (pump-warning flash, airborne). */
+  private readonly offSim: () => void;
 
   // static-ish
   private nameEl = el('span', 'hr-name');
@@ -219,7 +221,7 @@ export class HudView implements ScreenView<P> {
       el('div', 'tg-meta', icon('warn', 'inst-alert'), this.tenState),
     );
     this.instBox = el('div', 'hud-inst hud-glass', this.arms[0].btn, el('i', 'inst-sep'), this.tenBox, el('i', 'inst-sep'), this.arms[1].btn);
-    bus.on('sim:event', this.onSimEvent);
+    this.offSim = bus.on('sim:event', this.onSimEvent);
 
     this.hintBtn = button({ icon: 'bulb', variant: 'icon', cls: 'hud-hint', aria: 'Hint', onTap: () => bus.emit('ui:hint') });
     this.hintBtn.appendChild(this.hintCount);
@@ -504,6 +506,11 @@ export class HudView implements ScreenView<P> {
   entered(): void {
     this.overview = false;
     this.eyeBtn.classList.remove('on');
+  }
+
+  /** The screen left: stop listening (a fresh HUD is built for the next climb). */
+  destroy(): void {
+    this.offSim();
   }
 }
 
