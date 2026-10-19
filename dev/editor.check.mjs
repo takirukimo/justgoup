@@ -173,9 +173,9 @@ await tapSel('.ed-hist .ed-hbtn');
 check(Math.abs((await draft()).holds.find((h) => h.id === ht.id).angle - ht.angle) < 1e-6, 'undo restores the rotation');
 await page.evaluate(() => window.__ed.editor['select'](null));
 
-// colour + angle drawers
-await tapSel('.ed-tool-angle');
-await shot('s6-angle', 1500);
+// colour + wall drawers
+await tapSel('.ed-tool-wall');
+await shot('s6-wall', 1500);
 await tapSel('.ed-tool-color');
 await tapSel('.ed-sw[aria-label="Blue"]');
 d = await draft();
@@ -236,7 +236,8 @@ await page.evaluate(() => {
     { y0: 1.8, angle: 30 },
     { y0: 3.0, angle: 60 },
   ];
-  d.holds = d.holds.filter((h) => h.y < 2.9 || h.role === 'top');
+  // (clear the two spots the taps below aim at: the sample is random)
+  d.holds = d.holds.filter((h) => (h.y < 2.9 || h.role === 'top') && Math.hypot(h.x - 1.35, h.y - 3.55) > 0.5 && Math.hypot(h.x + 1.2, h.y - 2.45) > 0.5);
   window.__ed.editor.open(d);
   window.__ed.renderer.setCameraMode('editor', { instant: true });
 });
@@ -279,24 +280,67 @@ check(drift < 0.15, `pinch zoom on the steep panel keeps that wall point under t
 await shot('s14-folded-zoom', 800);
 await ptr([['pointerdown', 1, 60, 300], ['pointerup', 1, 60, 300], ['pointerdown', 1, 62, 302], ['pointerup', 1, 62, 302]]);
 await wait(1200);
-// the angle slider turns the folded wall into one flat panel; undo brings the folds back
-await tapSel('.ed-tool-angle');
+// WALL drawer: wall-type presets and per-panel editing (the angle slider no longer flattens a folded wall)
+await tapSel('.ed-tool-wall');
+await shot('s15-wall-drawer', 1500);
+await page.evaluate(() => window.__ed.editor['act'].selectPanel(2));
+await wait(300);
 await page.evaluate(() => {
-  const i = document.querySelector('.ed-angle-in');
-  i.value = '20';
+  const i = document.querySelector('.ed-wp-in');
+  i.value = String(Number(i.value) + 7);
   i.dispatchEvent(new Event('input', { bubbles: true }));
   i.dispatchEvent(new Event('change', { bubbles: true }));
 });
 await wait(800);
 d = await draft();
-check(!d.profile && d.wallAngle === 20, `the angle slider makes one flat panel (profile ${d.profile ? d.profile.length : 'none'}, ${d.wallAngle}°)`);
-await tapSel('.ed-tool-angle');
+check(d.profile?.length === 3 && d.profile.some((p) => p.angle === 67), `the panel slider sets one panel's angle and keeps the folds (${JSON.stringify(d.profile)})`);
 await tapSel('.ed-hist .ed-hbtn');
+await wait(400);
+d = await draft();
+check(d.profile?.length === 3 && d.profile[2].angle === 60, 'undo restores the panel angle');
+const presets = { slab: 'slab', vertical: 'vertical', overhang: 'overhang', steep: 'overhang', cave: 'cave', mixed: 'mixed' };
+for (const [type, style] of Object.entries(presets)) {
+  await tapSel(`.ed-wt-${type}`);
+  await wait(2600);
+  d = await draft();
+  const rb = await page.evaluate(() => window.__ed.renderer.getBoulder());
+  const same = JSON.stringify(rb?.profile ?? null) === JSON.stringify(d.profile ?? null) && rb?.height === d.height;
+  check(d.style === style && same, `${type.toUpperCase()} preset: style ${d.style}, ${d.profile ? d.profile.length + ' panels' : d.wallAngle + '°'}, ${d.height} m (3D wall rebuilt: ${same})`);
+  await shot(`s16-wall-${type}`, 400);
+}
+// variants of a type: CAVE → ROOF 90°
+await tapSel('.ed-wt-cave');
+await wait(800);
+await tapSel('.ed-wv-b:nth-child(2)');
+await wait(1200);
+d = await draft();
+check(d.profile?.some((p) => p.angle === 90), 'the ROOF variant sets a 90° roof');
+// split the selected panel, then drag the new fold in the side view
+const before = (await draft()).profile.length;
+await tapSel('.ed-wp-fold[aria-label^="Add"]');
+await wait(500);
+d = await draft();
+check(d.profile.length === before + 1, `ADD FOLD splits the selected panel (${before} → ${d.profile.length} panels)`);
+const foldY = d.profile.map((p) => p.y0);
+const handle = await page.evaluate(() => {
+  const c = [...document.querySelectorAll('.sv-fold')].pop();
+  const r = c.getBoundingClientRect();
+  return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+});
+await page.evaluate((h) => {
+  const s = document.querySelector('.ed-side');
+  for (const [type, dx, dy] of [['pointerdown', 0, 0], ['pointermove', 4, 6], ['pointermove', 8, 12], ['pointerup', 8, 12]]) {
+    s.dispatchEvent(new PointerEvent(type, { pointerId: 9, pointerType: 'touch', clientX: h.x + dx, clientY: h.y + dy, bubbles: true, isPrimary: true }));
+  }
+}, handle);
 await wait(600);
 d = await draft();
-check(d.profile?.length === 3, 'undo restores the folded wall');
+check(JSON.stringify(d.profile.map((p) => p.y0)) !== JSON.stringify(foldY) && d.profile.every((p, i) => i === 0 || p.y0 - d.profile[i - 1].y0 >= 0.3 - 1e-6), `dragging a fold moves it along the wall (${foldY.join(',')} → ${d.profile.map((p) => p.y0).join(',')})`);
+await tapSel('.ed-wp-fold[aria-label^="Remove"]');
+await wait(500);
+check((await draft()).profile.length === before, 'REMOVE FOLD merges the panel back');
+await tapSel('.ed-tool-wall');
 await wait(1500);
-check(await page.evaluate(() => (window.__ed.renderer.getBoulder()?.profile?.length ?? 0) === 3), 'the 3D wall folds again after the undo');
 
 // close
 await tapSel('.ed-x');

@@ -18,6 +18,26 @@ import { Analyzer, type SolveResult } from './analyzer';
 import { EditorOverlay, type OverlayGhost, type OverlayState, type Projector } from './overlay';
 import { EditorPanel, type Drawer, type EditorPanelState, type PanelActions, type StatusKind } from './panel';
 import { EditorView, type ZoomAnchor } from './view';
+import type { WallCardState } from './wallcard';
+import {
+  mainPanel,
+  matchPreset,
+  mergePanel,
+  moveFold,
+  presetById,
+  presetsOf,
+  presetWall,
+  setPanelAngle,
+  setWall,
+  splitPanel,
+  wallHeightOf,
+  wallOf,
+  wallTypeOf,
+  wallWords,
+  WALL_TYPE_LABEL,
+  type WallPreset,
+  type WallState,
+} from './walls';
 import {
   clampToBounds,
   cleanName,
@@ -95,9 +115,9 @@ const snapAngle = (a: number): number => {
 };
 const r3 = (v: number): number => Math.round(v * 1000) / 1000;
 
-/** Identity of a draft's wall panels (undo / redo rebuild the wall when it changes). */
+/** Identity of a draft's wall: panels + surface length (undo / redo rebuild the wall when it changes). */
 function profileKey(b: BoulderDef): string {
-  return b.profile ? b.profile.map((p) => `${p.y0}:${p.angle}`).join(',') : '';
+  return `${b.profile ? b.profile.map((p) => `${p.y0}:${p.angle}`).join(',') : ''}|${b.height}`;
 }
 
 function readPrefs(): { snap: boolean; sampleGrade: number } {
@@ -186,8 +206,10 @@ export class BoulderEditor implements EditorAPI {
   private hover: { x: number; y: number } | null = null;
   private ghost: OverlayGhost | null = null;
   private canvasRect = { left: 0, top: 0, width: 390, height: 844 };
-  /** Continuous edits (slider, angle) hold one checkpoint until they end. */
-  private continuous: 'size' | 'angle' | null = null;
+  /** Continuous edits (size slider, panel angle, fold drag) hold one checkpoint until they end. */
+  private continuous: 'size' | 'angle' | 'fold' | null = null;
+  /** Wall panel the WALL drawer edits. */
+  private wallSel = 0;
   /** View before an automatic pan that revealed the selection (restored on deselect if untouched). */
   private autoPan: { before: { center: Vec2; meters: number }; after: Vec2 } | null = null;
   private continuousStart = '';
@@ -396,6 +418,7 @@ export class BoulderEditor implements EditorAPI {
       this.history.clear();
     }
     this.loaded = true;
+    this.wallSel = mainPanel(wallOf(this.draft));
     this.refreshDerived();
     const starts = this.check.counts.start;
     this.tool.role = starts === 0 ? 'start' : this.check.counts.top === 0 && starts > 0 && this.check.counts.hands >= 3 ? 'top' : 'hand';
@@ -461,7 +484,7 @@ export class BoulderEditor implements EditorAPI {
       role: this.tool.role,
       color: this.draft.color,
       angle: this.draft.wallAngle,
-      profile: this.draft.profile,
+      wall: this.wallState(),
       snap: this.snap,
       drawer: this.drawer,
       sampleGrade: this.sampleGrade,
@@ -481,8 +504,11 @@ export class BoulderEditor implements EditorAPI {
   private commit(o: { wall?: boolean } = {}): void {
     this.version++;
     this.refreshDerived();
-    if (o.wall) this.wallDirty = true;
-    else this.holdsDirty = true;
+    if (o.wall) {
+      this.wallDirty = true;
+      // the surface length may have changed: refit a fitted view
+      this.layoutView(false);
+    } else this.holdsDirty = true;
     this.scheduleAnalysis(SOLVE_DEBOUNCE_MS);
     this.scheduleSave();
     this.applyHighlights();
@@ -542,7 +568,7 @@ export class BoulderEditor implements EditorAPI {
   private select(id: string | null): void {
     if (this.selectedId === id) return;
     this.selectedId = id;
-    if (id) this.drawer = null;
+    if (id) this.closeDrawer();
     this.applyHighlights();
     this.render();
     if (id) this.ensureVisible(id);
@@ -730,7 +756,7 @@ export class BoulderEditor implements EditorAPI {
       publish: () => void this.publish(),
       toggleCheck: () => {
         this.checkOpen = !this.checkOpen;
-        if (this.checkOpen) this.drawer = null;
+        if (this.checkOpen) this.closeDrawer();
         this.render();
       },
       toggleBeta: () => {
@@ -770,31 +796,61 @@ export class BoulderEditor implements EditorAPI {
         this.wallCooldown = Math.max(this.wallCooldown, 0.12);
         this.commit({ wall: true });
       },
-      angleInput: (deg) => {
-        const a = clamp(Math.round(deg), EDITOR.angleMin, EDITOR.angleMax);
-        if (this.continuous !== 'angle') this.beginContinuous('angle');
-        if (a === this.draft.wallAngle && !this.draft.profile) return;
-        // a multi-angle wall (a generated sample) becomes one flat panel at the slider's angle;
-        // editing the panels themselves comes later. Undo brings the folded wall back.
-        if (this.draft.profile) {
-          delete this.draft.profile;
-          delete this.draft.style;
-          this.toast('One flat panel now · undo restores the folded wall');
-        }
-        this.draft.wallAngle = a;
-        // the profile diagram follows live; the 3D wall rebuilds once the slider rests
-        this.wallDirty = true;
-        this.wallCooldown = Math.max(this.wallCooldown, 0.28);
+      pickWallType: (t) => {
+        // a type's chip applies its first preset; the variants row picks within the type
+        if (wallTypeOf(wallOf(this.draft)) === t) return;
+        this.applyPreset(presetsOf(t)[0]);
+      },
+      pickPreset: (id) => {
+        const p = presetById(id);
+        if (p) this.applyPreset(p);
+      },
+      selectPanel: (i) => {
+        this.wallSel = clamp(i, 0, wallOf(this.draft).panels.length - 1);
         this.render();
       },
-      angleCommit: (deg) => {
+      panelAngleInput: (deg) => {
         if (this.continuous !== 'angle') this.beginContinuous('angle');
-        if (this.draft.profile) {
-          delete this.draft.profile;
-          delete this.draft.style;
+        // the side view follows live; the 3D wall rebuilds when the slider is let go
+        this.editWall(setPanelAngle(wallOf(this.draft), this.wallSel, deg), false);
+      },
+      panelAngleCommit: () => {
+        if (this.continuous === 'angle') this.endContinuous(true);
+      },
+      panelAngleStep: (delta) => {
+        const w = wallOf(this.draft);
+        const i = clamp(this.wallSel, 0, w.panels.length - 1);
+        const a = w.panels[i].angle;
+        const next = delta > 0 ? Math.floor(a / 5) * 5 + 5 : Math.ceil(a / 5) * 5 - 5;
+        this.history.checkpoint(this.draft);
+        const before = draftHash(this.draft);
+        this.editWall(setPanelAngle(w, i, next), true, before);
+      },
+      foldInput: (i, y0) => {
+        if (this.continuous !== 'fold') this.beginContinuous('fold');
+        this.editWall(moveFold(wallOf(this.draft), i, y0), false);
+      },
+      foldCommit: () => {
+        if (this.continuous === 'fold') this.endContinuous(true);
+      },
+      splitPanel: () => {
+        const r = splitPanel(wallOf(this.draft), this.wallSel);
+        if (!r) {
+          this.toast('This panel is too short to fold', 'bad');
+          return;
         }
-        this.draft.wallAngle = clamp(Math.round(deg), EDITOR.angleMin, EDITOR.angleMax);
-        this.endContinuous(true);
+        this.history.checkpoint(this.draft);
+        this.wallSel = r.index;
+        this.editWall(r.wall, true);
+        this.toast('New fold · drag it, set the panel’s angle');
+      },
+      mergePanel: () => {
+        const r = mergePanel(wallOf(this.draft), this.wallSel);
+        if (!r) return;
+        this.history.checkpoint(this.draft);
+        this.wallSel = r.index;
+        this.editWall(r.wall, true);
+        if (r.clamped) this.toast('One panel goes from −15° to 45°');
       },
       toggleSnap: () => {
         this.snap = !this.snap;
@@ -803,7 +859,10 @@ export class BoulderEditor implements EditorAPI {
         this.render();
       },
       setDrawer: (d) => {
+        const wasWall = this.drawer === 'wall';
+        if (d === 'wall' && !wasWall) this.wallSel = clamp(this.wallSel, 0, wallOf(this.draft).panels.length - 1);
         this.drawer = d;
+        if ((d === 'wall') !== wasWall) this.wallFraming(d === 'wall');
         if (d) this.checkOpen = false;
         this.render();
       },
@@ -836,8 +895,55 @@ export class BoulderEditor implements EditorAPI {
     };
   }
 
-  private beginContinuous(kind: 'size' | 'angle'): void {
-    if (this.continuous) this.endContinuous(this.continuous === 'angle');
+  // ═══════════════════════════════ wall ═══════════════════════════════
+
+  private wallState(): WallCardState {
+    const w = wallOf(this.draft);
+    const selected = clamp(this.wallSel, 0, w.panels.length - 1);
+    const holds = this.draft.holds.map((h) => ({ y: h.y, role: h.role }));
+    const cut = this.draft.holds.filter((h) => h.y > w.length + 0.005).length;
+    return { wall: w, selected, type: wallTypeOf(w), preset: matchPreset(w)?.id ?? null, words: wallWords(w), height: wallHeightOf(w), holds, cut };
+  }
+
+  /** A wall preset (research §3.2): panels, surface length, style. Holds keep their place on the surface. */
+  private applyPreset(p: WallPreset): void {
+    const before = draftHash(this.draft);
+    this.history.checkpoint(this.draft);
+    setWall(this.draft, presetWall(p));
+    this.wallSel = mainPanel(wallOf(this.draft));
+    if (draftHash(this.draft) === before) {
+      this.history.discard();
+      this.render();
+      return;
+    }
+    this.wallCooldown = Math.max(this.wallCooldown, 0.05);
+    this.commit({ wall: true });
+    const cut = this.draft.holds.filter((h) => h.y > this.draft.height + 0.005).length;
+    this.toast(cut ? `${cut} hold${cut === 1 ? '' : 's'} above the new wall · move ${cut === 1 ? 'it' : 'them'} down` : `${WALL_TYPE_LABEL[p.type]} wall · ${p.label}`, cut ? 'bad' : 'info');
+  }
+
+  /**
+   * Write an edited wall onto the draft. `commitNow`: a discrete edit (stepper, fold button) rebuilds the
+   * 3D wall after a short rest; otherwise only the side view follows until the gesture ends.
+   */
+  private editWall(w: WallState, commitNow: boolean, before?: string): void {
+    setWall(this.draft, w);
+    this.wallSel = clamp(this.wallSel, 0, wallOf(this.draft).panels.length - 1);
+    if (!commitNow) {
+      this.render();
+      return;
+    }
+    if (before !== undefined && draftHash(this.draft) === before) {
+      this.history.discard();
+      this.render();
+      return;
+    }
+    this.wallCooldown = Math.max(this.wallCooldown, 0.25);
+    this.commit({ wall: true });
+  }
+
+  private beginContinuous(kind: 'size' | 'angle' | 'fold'): void {
+    if (this.continuous) this.endContinuous(this.continuous !== 'size');
     this.continuous = kind;
     this.continuousStart = draftHash(this.draft);
     this.history.checkpoint(this.draft);
@@ -903,10 +1009,13 @@ export class BoulderEditor implements EditorAPI {
 
   private async newDraft(): Promise<void> {
     if (this.draft.holds.length) {
-      const ok = await this.ui.confirm('Start a new problem?', 'This replaces the wall with a blank panel. Your current draft will be discarded.', 'DISCARD', 'CANCEL');
+      const ok = await this.ui.confirm('Start a new problem?', 'Strips every hold for a blank problem on this wall. Your current draft will be discarded.', 'DISCARD', 'CANCEL');
       if (!ok || !this.opened) return;
     }
+    // a new problem on the same wall (type, panels, length)
+    const wall = wallOf(this.draft);
     this.draft = createDraft({ wallAngle: this.draft.wallAngle });
+    setWall(this.draft, wall);
     this.resetForNewDraft();
     this.toast(`New problem · ${this.draft.name}`);
   }
@@ -947,7 +1056,7 @@ export class BoulderEditor implements EditorAPI {
     this.draft.holds = [];
     delete this.draft.startFeet;
     this.selectedId = null;
-    this.drawer = null;
+    this.closeDrawer();
     this.tool.role = 'start';
     this.commit();
     this.toast('Wall cleared · undo to restore');
@@ -955,9 +1064,10 @@ export class BoulderEditor implements EditorAPI {
 
   private resetForNewDraft(): void {
     this.history.clear();
+    this.wallSel = mainPanel(wallOf(this.draft));
     this.passed = this.published = this.tested = null;
     this.selectedId = null;
-    this.drawer = null;
+    this.closeDrawer();
     this.checkOpen = false;
     this.betaOn = false;
     this.refreshDerived();
@@ -1057,11 +1167,44 @@ export class BoulderEditor implements EditorAPI {
     const h = cr.height || this.renderer.canvas.clientHeight || 844;
     this.canvasRect = { left: cr.left, top: cr.top, width: w, height: h };
     const tb = p.top.getBoundingClientRect();
-    const tr = p.tray.getBoundingClientRect();
+    // with the WALL drawer open the whole wall sits in the space above it (its 3D rebuilds show there)
+    const tr = this.drawer === 'wall' ? p.wallCardRect() : p.tray.getBoundingClientRect();
     const top = Math.max(0, tb.bottom - cr.top + 10);
     const bottom = Math.min(h, (tr.top > 0 ? tr.top : h) - cr.top - 8);
     this.view.layout({ w, h, top, bottom: Math.max(top + 120, bottom) }, { width: this.draft.width, height: this.draft.height }, reset);
     this.pushView();
+  }
+
+  /** Close the open drawer (the WALL drawer gives the setter's view back). */
+  private closeDrawer(): void {
+    if (!this.drawer) return;
+    const wasWall = this.drawer === 'wall';
+    this.drawer = null;
+    if (wasWall) this.wallFraming(false);
+  }
+
+  /** View before the WALL drawer framed the whole wall above itself (restored when it closes). */
+  private preWallView: { center: Vec2; meters: number } | null = null;
+
+  /** Frame the whole wall above the WALL drawer while it is open; give the setter's view back after. */
+  private wallFraming(open: boolean): void {
+    if (open) {
+      this.preWallView = { center: { ...this.view.center }, meters: this.view.meters };
+      // after the drawer (and the slimmer tray) are laid out
+      requestAnimationFrame(() => {
+        if (this.drawer === 'wall') this.layoutView(true);
+      });
+      return;
+    }
+    const v = this.preWallView;
+    this.preWallView = null;
+    requestAnimationFrame(() => {
+      this.layoutView(!v);
+      if (v && this.drawer !== 'wall') {
+        this.view.zoomAbout({ x: v.center.x, y: v.center.y }, { x: this.canvasRect.width / 2, y: this.canvasRect.height / 2 }, v.meters);
+        this.pushView();
+      }
+    });
   }
 
   private pushView(): void {
@@ -1119,7 +1262,7 @@ export class BoulderEditor implements EditorAPI {
     this.panel?.blurName();
     if (this.drawer || this.checkOpen) {
       // first touch on the wall just dismisses pop-ups
-      this.drawer = null;
+      this.closeDrawer();
       this.checkOpen = false;
       this.render();
       this.gesture = { kind: 'settle' };
@@ -1197,7 +1340,7 @@ export class BoulderEditor implements EditorAPI {
           const w = this.renderer.screenToWall(ptr.x0, ptr.y0) ?? { x: h.x, y: h.y };
           this.history.checkpoint(this.draft);
           this.selectedId = h.id;
-          this.drawer = null;
+          this.closeDrawer();
           this.applyHighlights();
           this.gesture = { kind: 'drag', id: g.id, holdId: h.id, offset: { x: h.x - w.x, y: h.y - w.y }, changed: false };
           this.render();
@@ -1459,7 +1602,7 @@ export class BoulderEditor implements EditorAPI {
         // also the Android back button (src/app/lifecycle.ts): peel one layer per press
         if (this.checkOpen || this.drawer) {
           this.checkOpen = false;
-          this.drawer = null;
+          this.closeDrawer();
           this.render();
         } else if (sel) this.select(null);
         else this.close(); // the draft is saved on the way out

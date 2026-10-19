@@ -3,7 +3,8 @@
 // No DOM, no three.js — unit-tested in model.test.ts and shared with the solver worker.
 
 import type { BoulderDef, HoldDef, HoldRole, HoldShape, HoldType, RouteStyle, Vec2, WallPanel } from '../core/types';
-import { makeProfile, steepestAngle } from '../game/wall-profile';
+import { makeProfile } from '../game/wall-profile';
+import { cleanWall, setWall, WALL } from './walls';
 import { GAME } from '../config/tuning';
 import { ROUTE_COLORS } from '../config/brand';
 import { hashString, Rng, uid } from '../core/rng';
@@ -18,8 +19,9 @@ export const EDITOR = {
   /** T-nut lattice: rows every 0.2 m from y = 0.1 m, odd rows offset by 0.1 m (a checkerboard of the 0.1 m grid). */
   tnutStep: 0.2,
   tnutRow0: 0.1,
-  angleMin: -10,
-  angleMax: 45,
+  /** One-panel wall angle range (walls.ts WALL.flatMin / flatMax). */
+  angleMin: WALL.flatMin,
+  angleMax: WALL.flatMax,
   angleDefault: 10,
   rotateStep: 15 * DEG,
   /** Free clearance (m) between hold footprints when placing or moving. */
@@ -119,7 +121,7 @@ export function createDraft(o: DraftOptions = {}): BoulderDef {
     mode: 'boulder',
     wallAngle: clamp(Math.round(o.wallAngle ?? EDITOR.angleDefault), EDITOR.angleMin, EDITOR.angleMax),
     width: GAME.boulderWall.width,
-    height: GAME.boulderWall.height,
+    height: WALL.defaultLength,
     holds: [],
     color: o.color && isHex(o.color) ? o.color : ROUTE_COLORS[rng.int(0, 6)].hex,
     seed,
@@ -135,14 +137,19 @@ export function normalizeDraft(input: BoulderDef): BoulderDef {
   const base = createDraft();
   const color = isHex(input.color) ? input.color : base.color;
   const W = GAME.boulderWall.width;
-  const H = GAME.boulderWall.height;
+  // the wall: its surface length (a folded sample's own, e.g. a cave's lip), panels, and the ceiling
+  const H0 = clamp(finite(input.height, WALL.defaultLength), WALL.lengthMin, WALL.lengthMax);
+  const prof = cleanProfile(input.profile, H0);
+  const wall = cleanWall({ panels: prof ?? [{ y0: 0, angle: clamp(Math.round(finite(input.wallAngle, EDITOR.angleDefault)), EDITOR.angleMin, EDITOR.angleMax) }], length: H0 });
+  const H = wall.length;
   const seen = new Set<string>();
   const holds: HoldDef[] = [];
   for (const raw of Array.isArray(input.holds) ? input.holds : []) {
     if (!raw || raw.role === 'deco' || !isType(raw.type) || !isRole(raw.role)) continue;
     const x = finite(raw.x, NaN);
     const y = finite(raw.y, NaN);
-    if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > W / 2 || y < 0 || y > H) continue;
+    // (a hold a little past the top of a shortened wall stays: the rules flag it, the setter moves it)
+    if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > W / 2 || y < 0 || y > H + 0.5) continue;
     let id = typeof raw.id === 'string' && raw.id ? raw.id.slice(0, 40) : uid('h');
     while (seen.has(id)) id = uid('h');
     seen.add(id);
@@ -176,14 +183,11 @@ export function normalizeDraft(input: BoulderDef): BoulderDef {
     seed: Math.floor(Math.abs(finite(input.seed, base.seed))) || 1,
   };
   if (typeof input.author === 'string' && input.author) out.author = input.author.slice(0, 40);
-  // a multi-angle wall (generated samples, community problems) keeps its panels; wallAngle is then
-  // the steepest panel's angle, as everywhere else (panel editing itself is a later phase)
-  const prof = cleanProfile(input.profile, H);
-  if (prof) {
-    out.profile = prof;
-    out.wallAngle = Math.round(steepestAngle(prof));
-  }
   if (typeof input.style === 'string' && ROUTE_STYLES.includes(input.style)) out.style = input.style;
+  // a multi-angle wall (generated samples, community problems, the setter's own) keeps its panels;
+  // wallAngle is then the steepest panel's angle, as everywhere else. A route style (dyno, traverse…)
+  // stays; a missing style is read off the wall.
+  setWall(out, wall, { keepStyle: true });
   const sf = pruneStartFeet(input.startFeet, holds);
   if (sf) out.startFeet = sf;
   return out;
@@ -267,7 +271,17 @@ export function draftHash(b: BoulderDef): string {
   const hs = [...b.holds].sort((a, c) => (a.id < c.id ? -1 : a.id > c.id ? 1 : 0));
   let s = `${b.wallAngle}|${b.color}|${b.startFeet?.LF ?? ''},${b.startFeet?.RF ?? ''}`;
   if (b.profile) s += `|p${b.profile.map((p) => `${r3(p.y0)}:${r3(p.angle)}`).join(',')}`;
-  for (const h of hs) s += `|${h.id}:${r3(h.x)},${r3(h.y)},${h.type},${r3(h.size)},${r3(h.angle)},${h.role},${h.seed}`;
+  // the wall's surface length (only when it differs from the standard wall: older hashes stay valid)
+  if (Number.isFinite(b.height) && Math.abs(b.height - WALL.defaultLength) > 1e-6) s += `|L${r3(b.height)}`;
+  for (const h of hs) {
+    s += `|${h.id}:${r3(h.x)},${r3(h.y)},${h.type},${r3(h.size)},${r3(h.angle)},${h.role},${h.seed}`;
+    // product details change the climb too (grip, shape); mounted holds name their volume
+    if (h.shape) s += `,${h.shape}`;
+    if (h.edgeDepthMm !== undefined) s += `,d${r3(h.edgeDepthMm)}`;
+    if (h.lipAngle !== undefined) s += `,l${r3(h.lipAngle)}`;
+    if (h.fingers !== undefined) s += `,f${h.fingers}`;
+    if (h.onVolume) s += `,@${h.onVolume}`;
+  }
   return hashString(s).toString(36) + hs.length.toString(36);
 }
 
@@ -522,14 +536,17 @@ export interface Snapshot {
   wallAngle: number;
   color: string;
   startFeet?: BoulderDef['startFeet'];
-  /** Multi-angle panels (flattening a sample's wall with the angle slider is undoable). */
+  /** Multi-angle panels, surface length and style (wall presets and panel edits are undoable). */
   profile?: WallPanel[];
+  height: number;
+  style?: RouteStyle;
 }
 
 export function snapshotOf(b: BoulderDef): Snapshot {
-  const s: Snapshot = { holds: b.holds.map((h) => ({ ...h })), wallAngle: b.wallAngle, color: b.color };
+  const s: Snapshot = { holds: b.holds.map((h) => ({ ...h })), wallAngle: b.wallAngle, color: b.color, height: b.height };
   if (b.startFeet) s.startFeet = { ...b.startFeet };
   if (b.profile) s.profile = b.profile.map((p) => ({ ...p }));
+  if (b.style) s.style = b.style;
   return s;
 }
 
@@ -537,10 +554,13 @@ export function applySnapshot(b: BoulderDef, s: Snapshot): void {
   b.holds = s.holds.map((h) => ({ ...h }));
   b.wallAngle = s.wallAngle;
   b.color = s.color;
+  b.height = s.height;
   if (s.startFeet) b.startFeet = { ...s.startFeet };
   else delete b.startFeet;
   if (s.profile) b.profile = s.profile.map((p) => ({ ...p }));
   else delete b.profile;
+  if (s.style) b.style = s.style;
+  else delete b.style;
 }
 
 /** Snapshot undo/redo stack. Call checkpoint(draft) right BEFORE a mutation. */

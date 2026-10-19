@@ -4,18 +4,16 @@
 // Pure view: it renders EditorPanelState and reports intents through PanelActions.
 // Built from the UI design system (src/ui/dom.ts helpers, .btn / .seg / .range / .grade / .t-label).
 
-import type { HoldDef, HoldType, WallPanel } from '../core/types';
-import { clamp } from '../core/math';
-import { GAME } from '../config/tuning';
+import type { HoldDef, HoldType } from '../core/types';
 import { ROUTE_COLORS } from '../config/brand';
 import { fontGrade, gradeColor, gradeLabel } from '../game/grades';
 import { button, el, label, setText, toggle } from '../ui/dom';
-import { wallLabel } from '../ui/format';
 import { icon } from '../ui/icons';
 import { glyph, holdGlyph, type EditorGlyph } from './glyphs';
 import { EDIT_ROLES, EDITOR, HOLD_TYPES, ROLE_LABEL, SIZE_RANGE, TYPE_LABEL, type DraftCheck, type EditRole } from './model';
+import { setWallGlyph, WallCard, wallGlyph, type WallCardActions, type WallCardState } from './wallcard';
 
-export type Drawer = 'color' | 'angle' | 'more';
+export type Drawer = 'color' | 'wall' | 'more';
 
 export type StatusKind = 'empty' | 'invalid' | 'solving' | 'ok' | 'nobeta' | 'sent' | 'live';
 
@@ -35,9 +33,10 @@ export interface EditorPanelState {
   type: HoldType;
   role: EditRole;
   color: string;
+  /** Steepest panel angle (BoulderDef.wallAngle). */
   angle: number;
-  /** Multi-angle panels of the draft's wall (a generated sample), if any. */
-  profile?: WallPanel[];
+  /** The WALL drawer: presets, panels, the selected panel. */
+  wall: WallCardState;
   snap: boolean;
   drawer: Drawer | null;
   sampleGrade: number;
@@ -46,7 +45,7 @@ export interface EditorPanelState {
   selection: { hold: HoldDef; index: number } | null;
 }
 
-export interface PanelActions {
+export interface PanelActions extends WallCardActions {
   close(): void;
   undo(): void;
   redo(): void;
@@ -59,8 +58,6 @@ export interface PanelActions {
   pickType(t: HoldType): void;
   pickRole(r: EditRole): void;
   pickColor(hex: string): void;
-  angleInput(deg: number): void;
-  angleCommit(deg: number): void;
   toggleSnap(): void;
   setDrawer(d: Drawer | null): void;
   newDraft(): void;
@@ -137,10 +134,7 @@ export class EditorPanel {
   private sizeVal: HTMLElement;
   private drawers: Record<Drawer, HTMLElement>;
   private swatches: HTMLButtonElement[] = [];
-  private angleIn: HTMLInputElement;
-  private angleVal: HTMLElement;
-  private angleWord: HTMLElement;
-  private profile!: { wall: SVGPolylineElement; arc: SVGPathElement; dots: SVGCircleElement[] };
+  private wallCard: WallCard;
   private sampleVal: HTMLElement;
   private sampleBtn: HTMLButtonElement;
 
@@ -149,6 +143,7 @@ export class EditorPanel {
   private toolColorTx: HTMLElement;
   private toolAngle: HTMLButtonElement;
   private toolAngleTx: HTMLElement;
+  private toolAngleG: SVGSVGElement;
   private toolSnap: HTMLButtonElement;
   private toolSnapTx: HTMLElement;
   private toolSnapIc: HTMLElement;
@@ -269,28 +264,8 @@ export class EditorPanel {
     }
     const drColor = el('div', 'ed-drawer ed-float-card', el('div', 'ed-dr-h', label('ROUTE COLOUR'), label('ALL HOLDS', 'ed-dr-hint')), sw);
 
-    this.angleIn = el('input', 'range ed-angle-in');
-    this.angleIn.type = 'range';
-    this.angleIn.min = String(EDITOR.angleMin);
-    this.angleIn.max = String(EDITOR.angleMax);
-    this.angleIn.step = '1';
-    this.angleIn.setAttribute('aria-label', 'Wall angle');
-    this.angleIn.addEventListener('input', () => a.angleInput(Number(this.angleIn.value)));
-    this.angleIn.addEventListener('change', () => a.angleCommit(Number(this.angleIn.value)));
-    this.angleVal = el('span', 'ed-angle-v');
-    this.angleWord = label('', 'ed-angle-w');
-    const ticks = el('div', 'ed-ticks');
-    for (const t of [-10, 0, 15, 30, 45]) {
-      const tk = el('span', 'ed-tick', `${t}°`);
-      tk.style.setProperty('--p', String((t - EDITOR.angleMin) / (EDITOR.angleMax - EDITOR.angleMin)));
-      ticks.appendChild(tk);
-    }
-    const drAngle = el(
-      'div',
-      'ed-drawer ed-float-card',
-      el('div', 'ed-dr-h', label('WALL ANGLE'), this.angleWord),
-      el('div', 'ed-angle-row', this.buildProfile(), this.angleVal, el('div', 'ed-angle-slider', this.angleIn, ticks)),
-    );
+    this.wallCard = new WallCard(a);
+    const drWall = this.wallCard.el;
 
     this.sampleVal = el('span', 'ed-sample-v');
     this.sampleBtn = button({ label: 'LOAD', variant: 'glass', cls: 'ed-sample-go', onTap: () => a.loadSample() });
@@ -327,22 +302,23 @@ export class EditorPanel {
         })(),
       ),
     );
-    this.drawers = { color: drColor, angle: drAngle, more: drMore };
-    const float = el('div', 'ed-float', this.insp, drColor, drAngle, drMore);
+    this.drawers = { color: drColor, wall: drWall, more: drMore };
+    const float = el('div', 'ed-float', this.insp, drColor, drWall, drMore);
 
     // ── tray ──
     this.toolColorSw = el('span', 'ed-tool-sw');
     this.toolColorTx = el('span', 'ed-tool-tx');
     this.toolColor = el('button', 'ed-tool ed-tool-color', this.toolColorSw, this.toolColorTx);
     this.toolAngleTx = el('span', 'ed-tool-tx t-num');
-    this.toolAngle = el('button', 'ed-tool ed-tool-angle', icon('angle', 'ed-tool-ic'), this.toolAngleTx);
+    this.toolAngleG = wallGlyph({ panels: [{ y0: 0, angle: 10 }], length: 4.5 }, 'ed-tool-ic');
+    this.toolAngle = el('button', 'ed-tool ed-tool-angle ed-tool-wall', this.toolAngleG, this.toolAngleTx);
     this.toolSnapIc = el('span', 'ed-tool-icw');
     this.toolSnapTx = el('span', 'ed-tool-tx');
     this.toolSnap = el('button', 'ed-tool ed-tool-snap', this.toolSnapIc, this.toolSnapTx);
     this.toolMore = el('button', 'ed-tool ed-tool-more', glyph('more', 'ed-tool-ic'));
     for (const [b, aria] of [
       [this.toolColor, 'Route colour'],
-      [this.toolAngle, 'Wall angle'],
+      [this.toolAngle, 'Wall type and angle'],
       [this.toolSnap, 'Snap to T-nuts'],
       [this.toolMore, 'Problem menu'],
     ] as const) {
@@ -350,7 +326,7 @@ export class EditorPanel {
       b.setAttribute('aria-label', aria);
     }
     this.toolColor.addEventListener('click', () => a.setDrawer(this.last.drawer === 'color' ? null : 'color'));
-    this.toolAngle.addEventListener('click', () => a.setDrawer(this.last.drawer === 'angle' ? null : 'angle'));
+    this.toolAngle.addEventListener('click', () => a.setDrawer(this.last.drawer === 'wall' ? null : 'wall'));
     this.toolMore.addEventListener('click', () => a.setDrawer(this.last.drawer === 'more' ? null : 'more'));
     this.toolSnap.addEventListener('click', () => a.toggleSnap());
     const tools = el('div', 'ed-tools', this.toolColor, this.toolAngle, this.toolSnap, this.toolMore);
@@ -378,74 +354,6 @@ export class EditorPanel {
     this.tray = el('footer', 'ed-tray', tools, this.roles, palette);
     this.bottom = el('div', 'ed-bottom', float, this.tray);
     this.el = el('div', 'ed', this.surface, this.top, this.toasts, this.bottom);
-  }
-
-  /** Side-profile diagram of the wall angle (live while the slider moves; the 3D wall rebuilds on rest). */
-  private buildProfile(): SVGSVGElement {
-    const NS = 'http://www.w3.org/2000/svg';
-    const mk = <K extends keyof SVGElementTagNameMap>(tag: K, cls: string, attrs: Record<string, string | number> = {}): SVGElementTagNameMap[K] => {
-      const e = document.createElementNS(NS, tag);
-      e.setAttribute('class', cls);
-      for (const k in attrs) e.setAttribute(k, String(attrs[k]));
-      return e;
-    };
-    const svgEl = mk('svg', 'ed-profile', { viewBox: '0 0 64 56', 'aria-hidden': 'true' });
-    const wall = mk('polyline', 'pf-wall', { points: '18,50 18,6' });
-    const arc = mk('path', 'pf-arc');
-    const dots = [0.35, 0.6, 0.85].map(() => mk('circle', 'pf-hold', { r: 2.1 }));
-    svgEl.append(
-      mk('line', 'pf-ref', { x1: 18, y1: 50, x2: 18, y2: 4 }),
-      mk('rect', 'pf-pad', { x: 28, y: 45.5, width: 32, height: 4.5, rx: 1 }),
-      mk('line', 'pf-stripe', { x1: 29, y1: 45.6, x2: 59, y2: 45.6 }),
-      mk('line', 'pf-floor', { x1: 2, y1: 50.5, x2: 62, y2: 50.5 }),
-      arc,
-      wall,
-      ...dots,
-    );
-    this.profile = { wall, arc, dots };
-    return svgEl;
-  }
-
-  /** Side view: one line at `angle`, or the folded panels of a multi-angle wall (arc = steepest). */
-  private renderProfile(angle: number, panels?: readonly WallPanel[]): void {
-    const p = this.profile;
-    const t = (angle * Math.PI) / 180;
-    const L = 44;
-    // the wall as a polyline from its foot (18, 50): one segment, or every panel at its own angle
-    const pts: { x: number; y: number; a: number }[] = [{ x: 18, y: 50, a: t }];
-    if (panels && panels.length >= 2) {
-      const total = Math.max(GAME.boulderWall.height, panels[panels.length - 1].y0 + 0.3);
-      for (let i = 0; i < panels.length; i++) {
-        const len = ((i + 1 < panels.length ? panels[i + 1].y0 : total) - panels[i].y0) * (L / total);
-        const a = (clamp(panels[i].angle, -30, 95) * Math.PI) / 180;
-        const q = pts[pts.length - 1];
-        pts.push({ x: q.x + Math.sin(a) * len, y: q.y - Math.cos(a) * len, a });
-      }
-    } else pts.push({ x: 18 + Math.sin(t) * L, y: 50 - Math.cos(t) * L, a: t });
-    p.wall.setAttribute('points', pts.map((q) => `${q.x.toFixed(2)},${q.y.toFixed(2)}`).join(' '));
-    const R = 15;
-    const ax = 18 + Math.sin(t) * R;
-    const ay = 50 - Math.cos(t) * R;
-    p.arc.setAttribute('d', `M18 ${50 - R}A${R} ${R} 0 0 ${angle >= 0 ? 1 : 0} ${ax.toFixed(2)} ${ay.toFixed(2)}`);
-    // holds sit on the climbing side of the wall, along its length
-    let total = 0;
-    for (let i = 1; i < pts.length; i++) total += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
-    [0.35, 0.6, 0.85].forEach((k, i) => {
-      let left = k * total;
-      let j = 1;
-      for (; j < pts.length - 1; j++) {
-        const seg = Math.hypot(pts[j].x - pts[j - 1].x, pts[j].y - pts[j - 1].y);
-        if (left <= seg) break;
-        left -= seg;
-      }
-      const a = pts[j - 1];
-      const b = pts[j];
-      const seg = Math.max(1e-6, Math.hypot(b.x - a.x, b.y - a.y));
-      const f = Math.min(1, left / seg);
-      const d = p.dots[i];
-      d.setAttribute('cx', (a.x + (b.x - a.x) * f + Math.cos(b.a) * 2.6).toFixed(2));
-      d.setAttribute('cy', (a.y + (b.y - a.y) * f + Math.sin(b.a) * 2.6).toFixed(2));
-    });
   }
 
   /** Overlay SVG goes between the gesture surface and the controls. */
@@ -485,7 +393,9 @@ export class EditorPanel {
       setText(this.toolColorTx, colorName(s.color).toUpperCase());
       toggle(this.el, 'route-dark', luminance(s.color) < 0.05);
     }
-    setText(this.toolAngleTx, `${s.angle > 0 ? '+' : ''}${s.angle}°`);
+    setText(this.toolAngleTx, `${s.angle > 0 ? '+' : s.angle < 0 ? '−' : ''}${Math.abs(s.angle)}°`);
+    const wk = `${s.wall.wall.panels.map((p) => `${p.y0}:${p.angle}`).join(',')}|${s.wall.wall.length}`;
+    if (this.changed('wallGlyph', wk)) setWallGlyph(this.toolAngleG, s.wall.wall);
     if (this.changed('snap', String(s.snap))) {
       this.toolSnapIc.replaceChildren(glyph(s.snap ? 'snap' : 'free', 'ed-tool-ic'));
       setText(this.toolSnapTx, s.snap ? 'SNAP' : 'FREE');
@@ -493,7 +403,7 @@ export class EditorPanel {
       this.toolSnap.setAttribute('aria-pressed', String(s.snap));
     }
     toggle(this.toolColor, 'open', s.drawer === 'color');
-    toggle(this.toolAngle, 'open', s.drawer === 'angle');
+    toggle(this.toolAngle, 'open', s.drawer === 'wall');
     toggle(this.toolMore, 'open', s.drawer === 'more');
 
     // role + palette (reflect the selection while one exists)
@@ -511,6 +421,8 @@ export class EditorPanel {
       b.setAttribute('aria-pressed', String(t === type));
     }
     toggle(this.tray, 'is-editing', !!sel);
+    // editing the wall: the hold tools step aside so the wall shows above the drawer
+    toggle(this.tray, 'wall-mode', s.drawer === 'wall');
 
     // drawers + inspector
     const floatKey = s.drawer ?? (sel ? 'insp' : '');
@@ -519,18 +431,8 @@ export class EditorPanel {
     }
     toggle(this.insp, 'open', floatKey === 'insp');
     for (const b of this.swatches) toggle(b, 'on', (b.dataset.hex ?? '').toLowerCase() === s.color.toLowerCase());
-    // a folded wall shows its steepest panel on the slider (moving it makes one flat panel)
-    const sa = clamp(s.angle, EDITOR.angleMin, EDITOR.angleMax);
-    if (document.activeElement !== this.angleIn && this.angleIn.value !== String(sa)) this.angleIn.value = String(sa);
-    setVar(this.angleIn, '--v', `${((sa - EDITOR.angleMin) / (EDITOR.angleMax - EDITOR.angleMin)) * 100}%`);
-    const pkey = s.profile ? s.profile.map((p) => `${p.y0}:${p.angle}`).join(',') : '';
-    if (this.changed('angle', `${s.angle}|${pkey}`)) {
-      setText(this.angleVal, `${s.angle > 0 ? '+' : ''}${s.angle}°`);
-      this.renderProfile(s.angle, s.profile);
-    }
-    // the same honest wall words as the route preview and the problem cards (±6° reads VERTICAL)
-    const wl = wallLabel({ wallAngle: s.angle, profile: s.profile });
-    setText(this.angleWord, wl.kind === 'WALL' ? wl.value : wl.kind);
+    if (s.drawer === 'wall' || this.last.drawerWasWall === '1') this.wallCard.render(s.wall);
+    this.last.drawerWasWall = s.drawer === 'wall' ? '1' : '';
     setText(this.sampleVal, gradeLabel(s.sampleGrade));
     this.sampleBtn.disabled = s.generating;
     toggle(this.sampleBtn, 'is-busy', s.generating);
@@ -676,6 +578,11 @@ export class EditorPanel {
     this.pubBtn.classList.remove('ed-pulse');
     void this.pubBtn.offsetWidth;
     this.pubBtn.classList.add('ed-pulse');
+  }
+
+  /** Client rect of the WALL drawer card. */
+  wallCardRect(): DOMRect {
+    return this.wallCard.el.getBoundingClientRect();
   }
 
   /** Top edge (client px) of the floating inspector card. */
