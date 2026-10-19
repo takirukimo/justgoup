@@ -3760,7 +3760,12 @@ export class ClimberModel extends THREE.Group {
     }
     // ── pelvis + chest ──
     frame.toWorld(state.pelvis, Math.max(0.13, state.pelvisDepth) + this.sSit + this.hipPush, this.rawP);
-    let chestDepth = Math.min(0.42, Math.max(0.17, 0.15 + 0.36 * state.pelvisDepth));
+    // the sim's own chest depth when it reports one (body tension: the chest hangs further out
+    // under steep panels), else the classic relation to the pelvis depth
+    let chestDepth =
+      state.chestDepth !== undefined && Number.isFinite(state.chestDepth)
+        ? Math.min(0.5, Math.max(0.15, state.chestDepth))
+        : Math.min(0.42, Math.max(0.17, 0.15 + 0.36 * state.pelvisDepth));
     if (ph === 'climbing' || ph === 'idle' || ph === 'topped') {
       for (let s = 0; s < 2; s++) {
         const L = state.limbs[HAND_IDS[s]];
