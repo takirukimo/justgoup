@@ -285,7 +285,11 @@ async function dragMove(limb, holdId) {
   const after = await look(holdId, limb);
   if (!after) return 'gone';
   if (after.on === holdId || after.busy || after.clipped.includes(holdId)) return 'ok';
-  return `miss(${after.on})`;
+  const why = await page.evaluate(([l, id]) => {
+    const sim = window.__jgu.sim;
+    return sim && sim.getState().phase === 'climbing' ? (sim.reachableHolds(l).includes(id) ? 'in reach' : 'out of reach') : '';
+  }, [limb, holdId]);
+  return `miss(${after.on}) ${why}${s && s.to && !s.to.visible ? ' off-screen' : ''}`;
 }
 
 /**
@@ -428,8 +432,10 @@ async function tryClip() {
 async function autoClimb({ until, maxMoves = 60, label, careful = false }) {
   let moves = 0;
   let misses = 0;
+  /** Moves that missed from the current stance: the replan starts with another one (what the sim's bot does). */
+  let avoid = [];
   for (let replans = 0; replans < 8 && moves < maxMoves; replans++) {
-    const plan = await page.evaluate(async () => {
+    const plan = await page.evaluate(async (avoid) => {
       const j = window.__jgu;
       const sim = j.sim;
       const { planBetaDetailed } = await import('/src/game/solver.ts');
@@ -443,6 +449,7 @@ async function autoClimb({ until, maxMoves = 60, label, careful = false }) {
         maxNodes: b.mode === 'rope' ? 2600 : 900,
         clipped: st.clipped,
         goalY: b.height > 6 ? lowHand + 2.2 : undefined,
+        avoid,
       });
       if (!r) return null;
       return r.steps.map((s) => ({
@@ -453,7 +460,7 @@ async function autoClimb({ until, maxMoves = 60, label, careful = false }) {
         stance: s.pose ? { x: s.pose.px, y: s.pose.py } : null,
         clip: s.clip ? { limb: s.clip.limb, id: s.clip.quickdrawId } : null,
       }));
-    });
+    }, avoid);
     if (!plan || !plan.length) {
       log(`${label}: no plan from here`);
       return false;
@@ -488,8 +495,10 @@ async function autoClimb({ until, maxMoves = 60, label, careful = false }) {
       }
       if (step.dyno) log(`  ${step.dyno === 'both' ? 'double dyno' : `deadpoint ${step.dyno}`} → ${step.holdId}: ${r}`);
       moves++;
+      if (r === 'ok') avoid = [];
       if (r !== 'ok' && r !== 'skip') {
         misses++;
+        if (!avoid.some((m) => m.limb === step.limb && m.holdId === step.holdId)) avoid.push({ limb: step.limb, holdId: step.holdId });
         log(`  ${step.limb}→${step.holdId}: ${r}`);
         log(`    last sim events: ${(await page.evaluate(() => window.__e2eEv.slice(-8).join(' '))) || 'none'}`);
         replan = true;
@@ -797,11 +806,21 @@ if (want('editor')) {
     await tap('#ui button[aria-label="Easier"]', 'sample: easier');
   }
   await tap('.ed-sample-go', 'LOAD sample');
+  // a fixed sample seed (the editor draws it from Math.random once REPLACE is confirmed), so every
+  // run tests and publishes the same problem: "Opposable", V0 vertical, sent 3/3 by the sim's bot
+  await page.evaluate(() => {
+    window.__e2eRandom = Math.random;
+    Math.random = () => 0.4;
+  });
   await tapText('REPLACE');
   await waitFor(() => {
     const d = window.__jgu.editor.getDraft();
     return d.holds.length > 8 && !document.querySelector('.ed-sample-go.is-busy');
   }, 'sample problem', 120000);
+  await page.evaluate(() => {
+    Math.random = window.__e2eRandom;
+  });
+  log(`sample: ${await page.evaluate(() => window.__jgu.editor.getDraft().name)}`);
   await page.waitForTimeout(1500);
   await shot('editor-sample');
   ok(await page.evaluate(() => document.querySelector('.ed-pub')?.disabled === true), 'PUBLISH is locked before a sent test climb');
