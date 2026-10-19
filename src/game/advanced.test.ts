@@ -6,6 +6,9 @@ import type { SimEvent } from '../core/contracts';
 import type { BoulderDef, HoldDef } from '../core/types';
 import { ClimberSim } from './climber-sim';
 import type { Forearm } from './forearm';
+import { autoClimb, BetaBot } from './bot';
+import { generateBoulder } from './generator';
+import { nextHint, planBetaDetailed, type PlanStep } from './solver';
 import { hold, makeBoulder, moveLimb, run } from './test-helpers';
 
 /** A cave: vertical to 1.3 m, then a flat roof. Hands on two roof jugs, feet on two roof edges `a1` / `a2`. */
@@ -300,5 +303,115 @@ describe('figure 4', () => {
     expect(ev.some((e) => e.type === 'technique' && e.technique === 'figure4')).toBe(true);
     expect(sim.getState().special).toBe('figure4');
     expect(sim.getState().figure4!.hand).toBe('LH');
+  });
+});
+
+describe('advanced moves in the planner and the bot', () => {
+  /** A vertical V7 'dyno' problem: start jugs at ≈2.2 m, the start feet low, the top 1.1 m higher and no feet between. */
+  const noFeet = (style: 'dyno' | 'vertical' = 'dyno'): BoulderDef =>
+    makeBoulder(
+      [
+        hold('s1', -0.2, 2.2, 'jug', 0.11, 'start'),
+        hold('s2', 0.22, 2.15, 'jug', 0.11, 'start'),
+        hold('f1', -0.25, 1.0, 'jug', 0.08, 'foot'),
+        hold('f2', 0.3, 1.0, 'jug', 0.08, 'foot'),
+        hold('t', 0.25, 3.3, 'jug', 0.12, 'top'),
+      ],
+      { grade: 7, style, startFeet: { LF: 'f1', RF: 'f2' } },
+    );
+
+  it('a figure 4 is planned where no static beta (or throw) gets there, and the bot climbs it', { timeout: 60_000 }, () => {
+    const b = noFeet();
+    expect(planBetaDetailed(b, { maxNodes: 900, figure4: false, dynos: false })).toBeNull();
+    // a V7 'dyno' problem plans figure 4s by default; any other problem only on request
+    const p = planBetaDetailed(b, { maxNodes: 900, dynos: false })!;
+    expect(p).not.toBeNull();
+    const k = p.moves.findIndex((m) => m.special === 'figure4');
+    expect(k).toBeGreaterThanOrEqual(0);
+    // the leg over the opposite arm, then the free hand reaches from the pressed-up body, then a foot back on
+    const f4 = p.moves[k];
+    const handOf = (leg: string) => (leg === 'RF' ? 'LH' : 'RH');
+    const startIds = { LH: 's1', RH: 's2' } as const;
+    expect(f4.holdId).toBe(startIds[handOf(f4.limb)]);
+    expect(p.moves[k + 1].limb).toBe(handOf(f4.limb) === 'LH' ? 'RH' : 'LH');
+    expect(p.steps[k].pose.py).toBeGreaterThan(p.startPose.py + 0.2);
+    expect(['LF', 'RF']).toContain(p.moves[k + 2].limb);
+    expect(planBetaDetailed(noFeet('vertical'), { maxNodes: 900, dynos: false })).toBeNull();
+    expect(planBetaDetailed(noFeet('vertical'), { maxNodes: 900, dynos: false, figure4: true })).not.toBeNull();
+    // the bot executes it through the public API (figure4, the reach, the foot back on, the match)
+    const sim = new ClimberSim(b, { sweat: 0 });
+    const r = autoClimb(sim, { maxTime: 60 });
+    expect(r.sent, r.bot.log.join('; ')).toBe(true);
+    expect(sim.getStats().figure4s).toBe(1);
+  });
+
+  it('a hint in a figure 4 puts a foot back on once both hands hold', () => {
+    const sim = new ClimberSim(noFeet(), { sweat: 0 });
+    sim.start();
+    run(sim, 1);
+    expect(sim.figure4('RF')).toBe(true);
+    run(sim, 0.8);
+    const ev = moveLimb(sim, 'RH', 't');
+    run(sim, 0.4, ev);
+    expect(sim.getState().limbs.RH.holdId).toBe('t');
+    const h = nextHint(sim)!;
+    expect(h).not.toBeNull();
+    expect(['LF', 'RF']).toContain(h.limb);
+    expect(sim.reachableHolds(h.limb)).toContain(h.holdId);
+  });
+
+  it('pumped on a roof with the feet cammed, the bot rests in a bat hang and sits back up onto its holds', { timeout: 60_000 }, () => {
+    const sim = new ClimberSim(cave(true, [hold('m0', 0.3, 2.5, 'jug', 0.1, 'hand')]), { sweat: 0 });
+    sim.start();
+    run(sim, 1);
+    (sim as unknown as { forearms: Forearm[] }).forearms.forEach((f) => f.spend(0.65));
+    run(sim, 1 / 60);
+    const pump0 = sim.forearm('RH').pump;
+    const g = sim.getState();
+    const pose = { px: g.pelvis.x, py: g.pelvis.y, cx: g.chest.x, cy: g.chest.y };
+    const step: PlanStep = { move: { limb: 'RH', holdId: 'm0' }, moveTension: 0.5, tension: 0.5, distance: 0.3, pose, reachPose: pose };
+    const bot = new BetaBot(sim, { moves: [step.move], steps: [step], startTension: 0.5, startPose: pose, nodes: 0, ms: 0 });
+    let ev: SimEvent[] = [];
+    const all: SimEvent[] = [];
+    let bat = false;
+    for (let t = 0; t < 40 && sim.getState().limbs.RH.holdId !== 'm0' && !bot.failed; t += 1 / 60) {
+      bot.update(1 / 60, ev);
+      ev = sim.step(1 / 60);
+      for (const e of ev) all.push(e);
+      if (sim.getState().special === 'bat') bat = true;
+    }
+    expect(bat, bot.log.join('; ')).toBe(true);
+    expect(bot.batRests).toBe(1);
+    expect(all.some((e) => e.type === 'special-end' && e.special === 'bat' && e.reason === 'grab')).toBe(true);
+    expect(quiet(all), bot.log.join('; ')).toBe(true);
+    // rested, back on the holds, and the move made
+    expect(sim.getState().limbs.RH.holdId).toBe('m0');
+    expect(sim.getState().limbs.LH.holdId).toBe('s1');
+    expect(sim.forearm('RH').pump).toBeLessThan(pump0 - 0.1);
+  });
+});
+
+describe('advanced moves in the generator', () => {
+  it("'dyno' problems from V6 now and then set a figure 4 as the signature move, and the bot climbs it", { timeout: 300_000 }, () => {
+    const withF4: BoulderDef[] = [];
+    for (let k = 0; k < 12; k++) {
+      const b = generateBoulder({ seed: 3000 + k * 17, grade: 8, style: 'dyno' });
+      const p = planBetaDetailed(b, { maxNodes: 700 })!;
+      expect(p).not.toBeNull();
+      // a dyno problem's signature: a throw or a figure 4
+      expect(p.moves.some((m) => m.dyno !== undefined || m.special === 'figure4')).toBe(true);
+      if (p.moves.some((m) => m.special === 'figure4')) withF4.push(b);
+    }
+    expect(withF4.length).toBeGreaterThanOrEqual(1);
+    expect(withF4.length).toBeLessThanOrEqual(6);
+    const sim = new ClimberSim(withF4[0], { sweat: 0 });
+    const r = autoClimb(sim, { maxTime: 120 });
+    expect(r.sent, r.bot.log.join('; ')).toBe(true);
+    expect(sim.getStats().figure4s).toBeGreaterThanOrEqual(1);
+    // below V6 the planner never reaches for one
+    for (let k = 0; k < 4; k++) {
+      const b = generateBoulder({ seed: 3000 + k * 17, grade: 4, style: 'dyno' });
+      expect(planBetaDetailed(b, { maxNodes: 700 })!.moves.some((m) => m.special === 'figure4')).toBe(false);
+    }
   });
 });

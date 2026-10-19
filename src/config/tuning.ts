@@ -309,10 +309,11 @@ export const SIM = {
   /** The pelvis presses up to this far (m) below the holding hand (the climber sits on the arm, the hold at the hip)… */
   fig4Drop: 0.03,
   /**
-   * …rising at most this much (m) from where the move started. From a stance the free hand then reaches
-   * ≈0.3–0.45 m higher than it could by standing up into the reach.
+   * …rising at most this much (m) from where the move started (from a straight-arm hang too: the hips come
+   * up to the hand). From a stance the free hand then reaches ≈0.3–0.45 m higher than it could by
+   * standing up into the reach.
    */
-  fig4Rise: 0.75,
+  fig4Rise: 1.2,
   /** Pelvis offset (m) from the holding hand toward the free side (the thigh crosses over the arm). */
   fig4Side: 0.14,
   /** Pelvis wall distance (m) in the figure 4 (pressed in). */
@@ -324,8 +325,11 @@ export const SIM = {
   fig4Pump: 1.5,
   /** Share of the weight the other hand takes once it holds a hold too. */
   fig4OtherShare: 0.35,
-  /** The leg reaches over the arm only with the holding hand within this (m) of its hip joint, above the hip. */
-  fig4LegReach: 1.15,
+  /**
+   * The leg reaches over the arm only with the holding hand within this (m) of its hip joint, above the hip
+   * (from a straight-arm hang too: the climber pulls up on the arm as the knee comes over the elbow).
+   */
+  fig4LegReach: 1.32,
   /** A foot dropped within this (m) of the holding hand / forearm hooks over it (figure4Candidate). */
   fig4Snap: 0.2,
   // ── High feet (shared sim + render spec, v0.2 playtest: "feet should go above hip height") ──

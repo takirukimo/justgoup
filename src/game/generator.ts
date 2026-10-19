@@ -30,6 +30,7 @@ import { planBetaDetailed, SOLVER, StanceLab, type PlanResult } from './solver';
 import type { Pose } from './statics';
 import { datan2, dcos, dhypot, dsin } from './dmath';
 import { canMatch, contactPoint, nominalCapacity, usableByHand } from './holds';
+import { fig4Capacity } from './figure4';
 import { angleAt as profAngleAt, makeProfile, steepestAngle, type WallProfile } from './wall-profile';
 import {
   dailyStyle,
@@ -78,6 +79,9 @@ function routeName(rng: Rng): string {
 /** Lead setter: evaluations without a new high point before it jumps back, and how far (m) below the high point. */
 const LEAD_STUCK = 320;
 const LEAD_JUMP = 1.3;
+
+/** Share of 'dyno' boulders from SOLVER.fig4MinGrade whose signature move is a figure 4 (Builder.fig4Want). */
+const FIG4_CHANCE = 0.4;
 
 /** Minimum gap (m) between a quickdraw's clip point and the edge of any route hold. */
 const CLIP_CLEARANCE = 0.07;
@@ -182,6 +186,11 @@ interface Cand {
   maxT: number;
   /** A throw (deadpoint / double dyno) instead of a static move. */
   dyno?: 'LH' | 'RH' | 'both';
+  /**
+   * A figure 4 (advanced moves): hand `fig4` holds, the opposite leg hooks over its arm, the free hand
+   * (li) catches `hold` from the pressed-up body, then that leg steps onto the hold the free hand left.
+   */
+  fig4?: number;
   /** The route volume a fresh hand hold is bolted onto (set with the hold; GEN.holdsOnVolumes). */
   vol?: HoldDef;
 }
@@ -237,6 +246,12 @@ class Builder {
   private readonly dressRng: Rng;
   /** High heel hooks (hookCands): their own stream, so the rest of a route sets as before. */
   private readonly hookRng: Rng;
+  /**
+   * A 'dyno' problem from SOLVER.fig4MinGrade sets a figure 4 as its signature move instead of the throw
+   * now and then (FIG4_CHANCE, decided on its own stream: every other problem sets exactly as before).
+   */
+  readonly fig4Want: boolean;
+  private readonly fig4Rng: Rng;
   private x0: number;
   private amp: number;
   private freq: number;
@@ -269,6 +284,8 @@ class Builder {
     this.color = color;
     this.dressRng = rng.fork(0xd7e55);
     this.hookRng = rng.fork(0x4ee1);
+    this.fig4Rng = rng.fork(0xf164);
+    this.fig4Want = !p.rope && p.style === 'dyno' && p.grade >= SOLVER.fig4MinGrade && this.fig4Rng.chance(FIG4_CHANCE);
     this.x0 = p.rope ? rng.range(-0.7, 0.7) : rng.range(-1.05, 1.05);
     this.amp = rng.range(0.08, p.rope ? 0.4 : 0.45);
     this.freq = rng.range(0.7, 1.5);
@@ -585,6 +602,15 @@ class Builder {
   /** Evaluate a candidate from the current stance (no state change). */
   private evalCand(c: Cand): { slots: (HoldDef | null)[]; pose: Pose; tension: number } | null {
     const lab = this.lab!;
+    if (c.fig4 !== undefined) {
+      // a figure 4 only where the free hand can't get there statically from the stance
+      if (lab.reach(this.slots, c.li, c.hold, this.pose).ok) return null;
+      // … nor throw for it (the figure 4 is the signature move, not one of two ways)
+      for (const d of ['LH', 'RH', 'both'] as const) if (lab.dyno(this.slots, d, c.hold, this.pose).ok) return null;
+      const r = lab.figure4(this.slots, c.fig4, c.hold, this.pose);
+      if (!r.ok) return null;
+      return { slots: r.slots, pose: r.pose, tension: r.tension };
+    }
     if (c.dyno) {
       const r = lab.dyno(this.slots, c.dyno, c.hold, this.pose);
       // both hands must end on holds (a deadpoint whose other hand can't stay is no route move)
@@ -727,6 +753,12 @@ class Builder {
       const easy = mode === 'jug' || mode === 'good';
       let type: HoldType = mode === 'jug' ? 'jug' : mode === 'good' ? this.goodType(ty) : mode === 'better' ? this.upgrade(this.handType(ty)) : this.handType(ty);
       let size = holdSize(type, p.t, rng);
+      // a figure-4 problem sets up its signature move: a big jug the leg can press the arm onto (the
+      // figure 4 needs a positive hold) now and then on the way to it
+      if (this.fig4Want && !this.dynoDone && this.handMoves >= 1 && this.fig4Rng.chance(0.45)) {
+        type = 'jug';
+        size = this.fig4Rng.range(0.105, 0.125);
+      }
       // compression: some of the squeezes are route volumes the hands press on
       if (squeeze && !easy && rng.chance(0.22)) {
         type = 'volume';
@@ -760,6 +792,32 @@ class Builder {
       const both = canMatch(0, target) && rng.chance(p.grade >= 4 ? 0.5 : 0.25);
       const order: ('LH' | 'RH' | 'both')[] = both ? ['both', low, high] : [low, high, 'both'];
       for (const d of order) out.push({ li: d === 'RH' ? 1 : 0, hold: target, fresh: true, maxT: SOLVER.dynoLandMax, dyno: d });
+    }
+  }
+
+  /**
+   * 'dyno' with a figure 4 (Builder.fig4Want): from a positive hand hold (a jug the leg can press the arm
+   * onto, figure4.fig4Hold), a good hold for the other hand 1.0–1.3 m above it, out of static reach; the
+   * route below stays without feet (the dyno shadow), so the figure 4 is the way.
+   */
+  private fig4Cands(out: Cand[]): void {
+    const { rng, p } = this;
+    const a = this.slots[0]!;
+    const b = this.slots[1]!;
+    // the higher hand holds (its leg comes over from the other side), else the lower one
+    const order = a.y >= b.y ? [0, 1] : [1, 0];
+    for (const k of order) {
+      const H = this.slots[k]!;
+      if (fig4Capacity(H, this.angleAt(H.y), 0, SOLVER.pump) < SIM.fig4MinCap) continue;
+      const side = k === 0 ? 1 : -1;
+      for (let n = 0; n < 4; n++) {
+        const gapY = lerp(0.88, 1.0, p.t) * rng.range(0.96, 1.06) + n * 0.035;
+        const ty = H.y + gapY;
+        if (ty > this.topY - 0.4) continue;
+        const tx = this.clampX(H.x + side * rng.range(0.12, 0.42));
+        const target = this.temp('hand', 'jug', tx, ty, rng.range(0.095, 0.12), -HALF_PI + rng.range(-0.1, 0.1));
+        out.push({ li: 1 - k, hold: target, fresh: true, maxT: SOLVER.dynoLandMax, fig4: k });
+      }
     }
   }
 
@@ -933,7 +991,10 @@ class Builder {
     } else {
       const highY = Math.max(a.y, b.y);
       const lowY = Math.min(a.y, b.y);
-      if (p.style === 'dyno' && !this.dynoDone && this.handMoves >= 2 && highY >= (p.rope ? 3 : 1.9)) this.dynoCands(cands);
+      if (p.style === 'dyno' && !this.dynoDone && this.handMoves >= 2 && highY >= (p.rope ? 3 : 1.9)) {
+        if (this.fig4Want) this.fig4Cands(cands);
+        else this.dynoCands(cands);
+      }
       if (this.topY - highY <= p.gain * 1.35) this.topCands(cands);
       const lowH = a.y < b.y || (a.y === b.y && this.rng.chance(0.5)) ? 0 : 1;
       const hands: Cand[] = [];
@@ -1086,11 +1147,11 @@ class Builder {
       if (!r0) continue;
       let c = first;
       let r = r0;
-      if (first.fresh && first.hold.role !== 'top' && !first.dyno) {
+      if (first.fresh && first.hold.role !== 'top' && !first.dyno && first.fig4 === undefined) {
         let bestErr = Math.abs(r0.tension - this.targetT);
         for (let k = top.idx, seen = 0; k < top.cands.length && seen < 3 && budget > 0; k++) {
           const alt = top.cands[k];
-          if (alt.li !== first.li || !alt.fresh || alt.hold.role === 'top' || alt.dyno) continue;
+          if (alt.li !== first.li || !alt.fresh || alt.hold.role === 'top' || alt.dyno || alt.fig4 !== undefined) continue;
           seen++;
           budget--;
           const ra = this.evalCand(alt);
@@ -1113,12 +1174,12 @@ class Builder {
       this.pose = r.pose;
       if (c.fresh && c.vol) c.hold.onVolume = this.accept(c.vol).id;
       if (c.fresh) this.accept(c.hold);
-      if (c.dyno) {
+      if (c.dyno || c.fig4 !== undefined) {
         this.dynoDone = true;
         this.transient = true;
         this.handMoves++;
       } else if (this.transient && this.slots[2] && this.slots[3] && r.tension <= SOLVER.stanceMax) this.transient = false;
-      if (c.li < 2 && !c.dyno) {
+      if (c.li < 2 && !c.dyno && c.fig4 === undefined) {
         this.handMoves++;
         if (c.fresh && c.hold.angle > 0.5) this.boost = 1.12;
         if (p.rope && c.fresh) {
@@ -1448,7 +1509,7 @@ function interesting(plan: PlanResult, rope: boolean): boolean {
 
 /** Does the verified beta climb the archetype the problem claims (labels must match the wall)? */
 function climbsStyle(def: BoulderDef, plan: PlanResult): boolean {
-  if (def.style === 'dyno') return plan.steps.some((s) => s.move.dyno !== undefined);
+  if (def.style === 'dyno') return plan.steps.some((s) => s.move.dyno !== undefined || s.move.special === 'figure4');
   if (def.style === 'traverse') {
     const starts = def.holds.filter((h) => h.role === 'start');
     const top = def.holds.find((h) => h.role === 'top');

@@ -59,8 +59,9 @@ export function fig4Pose(entry: Pose, hx: number, hy: number, k: number, out: Po
   const rise = Math.min(Math.max(want - entry.py, 0), SIM.fig4Rise);
   out.px = hx + side * SIM.fig4Side;
   out.py = entry.py + rise;
+  // (deterministic trig: the planner, and so the generator, uses this pose)
   const lean = 0.16 * side;
-  out.cx = out.px + Math.sin(lean) * BODY.spine;
-  out.cy = out.py + Math.cos(lean) * BODY.spine;
+  out.cx = out.px + dsin(lean) * BODY.spine;
+  out.cy = out.py + dcos(lean) * BODY.spine;
   return out;
 }

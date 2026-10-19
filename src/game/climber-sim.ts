@@ -854,8 +854,9 @@ export class ClimberSim implements ClimberSimAPI {
       this.syncState();
       return out;
     }
-    if (this.special === null && i >= 2 && this.figure4Candidate(limb, p) !== null && (!hold || hold === this.limbs[fig4HandOf(i)].hold)) {
-      // the foot dropped onto the opposite holding hand / forearm: hook the leg over it
+    if (this.special === null && i >= 2 && this.figure4Candidate(limb, p) !== null && (!hold || (hold === this.limbs[fig4HandOf(i)].hold && p.y < this.limbs[fig4HandOf(i)].cy - 0.04))) {
+      // the foot dropped onto the opposite holding hand / forearm: hook the leg over it (onto the hand's own
+      // hold only below the grip, on the forearm: higher up it is a foot on that hold)
       this.figure4(limb as 'LF' | 'RF');
       for (const e of this.events.splice(0)) out.push(e);
       return out;

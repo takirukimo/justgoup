@@ -64,6 +64,7 @@ import {
 import { dhypot } from './dmath';
 import { aboveHip, envEvalOn } from './anatomy';
 import { angleAt, makeProfile, profileOf, smoothAngleAt, type WallProfile } from './wall-profile';
+import { FIG4_LEG, fig4Capacity, fig4LegReaches, fig4Pose } from './figure4';
 
 /** Planner thresholds. The sim slips only above stress 1.05, so these leave a margin. */
 export const SOLVER = {
@@ -136,6 +137,18 @@ export const SOLVER = {
    * holds on an easy ladder (the tutorial must stay a V0).
    */
   highFootCost: 0.7,
+  // ── figure 4 (advanced moves; planned on 'dyno' problems from fig4MinGrade, or PlanOptions.figure4) ──
+  /** Extra cost of a figure 4 (a trick for a reach with no feet: a static beta or a throw is preferred). */
+  fig4Cost: 3.5,
+  /** Grade (V) from which a 'dyno' problem's beta may use a figure 4. */
+  fig4MinGrade: 6,
+  /** A figure 4 is planned only when it raises the hips at least this much (m). */
+  fig4MinRise: 0.2,
+  /**
+   * Reach margin (m) inside the sim's tolerance for the free hand from the pressed-up body (the live
+   * figure 4 sits where the plan's does, but the shoulders sway a little).
+   */
+  fig4ReachMargin: 0.03,
 } as const;
 
 /** Extra clearance (m) the planner keeps beyond the sim's self-clipping limits. */
@@ -169,6 +182,8 @@ export interface PlanOptions {
    * (the bot, a hint after a failed move) gets a different first move when one exists.
    */
   avoid?: readonly { limb: LimbId; holdId: string }[];
+  /** Plan figure 4s too (advanced moves; default: only on 'dyno' boulders from SOLVER.fig4MinGrade). */
+  figure4?: boolean;
 }
 
 export interface PlanStep {
@@ -225,6 +240,9 @@ interface DynoMove {
   cut: number[];
 }
 
+/** Heuristic extra of a node in a figure 4: the feet still have to go back on. */
+const FIG4_FEET_H = 1;
+
 /** Planner node behind each step (for post-processing such as clip planning). */
 const STEP_NODE = new WeakMap<PlanStep, Node>();
 
@@ -250,6 +268,12 @@ interface Node {
    * SOLVER.dynoLandMax while the climber gets the cut limbs back on.
    */
   transient?: boolean;
+  /**
+   * In a figure 4 (advanced moves): the holding hand (0 / 1) — the opposite leg hooked over its arm, both
+   * feet off, the body pressed up (`pose`). Children: the free hand reaches from there, then a foot goes
+   * back on (which ends it). Undefined otherwise.
+   */
+  f4?: number;
 }
 
 interface LazyMove {
@@ -264,6 +288,8 @@ interface LazyMove {
   reachKey: string;
   /** A thrown move (deadpoint / dyno) instead of a static reach. */
   dyno?: DynoMove;
+  /** A figure 4 over hand `fig4`'s arm (li is the leg), with the pressed-up pose. */
+  fig4?: { hand: number; pose: Pose };
 }
 
 class Heap {
@@ -335,6 +361,8 @@ class Planner {
   readonly prof: WallProfile | null;
   /** Plan deadpoints / dynos (style 'dyno' problems, or PlanOptions.dynos). */
   dynos = false;
+  /** Plan figure 4s (style 'dyno' boulders from SOLVER.fig4MinGrade, or PlanOptions.figure4). */
+  fig4 = false;
   /**
    * Traverse: the top is far to the side of the start, so progress is measured as the distance to the
    * top (not just height). Weight of the horizontal distance in the heuristic (0 = height only).
@@ -370,6 +398,7 @@ class Planner {
     this.topY = tops.length ? Math.max(...tops.map((h) => h.y)) : b.height - 0.35;
     this.topX = tops.length ? tops.reduce((a, h) => a + h.x, 0) / tops.length : 0;
     this.dynos = b.style === 'dyno';
+    this.fig4 = b.mode !== 'rope' && b.style === 'dyno' && b.grade >= SOLVER.fig4MinGrade;
     // a traverse: the top well off to the side of the start holds
     const starts = b.holds.filter((h) => h.role === 'start' && usableByHand(h));
     if (starts.length && tops.length) {
@@ -715,6 +744,8 @@ class Planner {
     const parent = n.parent!;
     n.move = null;
     if (m.dyno) return this.evaluateDyno(n, m, m.dyno);
+    if (m.fig4) return this.evaluateFig4(n, m, m.fig4.hand, m.fig4.pose);
+    if (parent.f4 !== undefined) return this.evaluateInFig4(n, m, parent.f4);
     const r = this.reach(parent, m.li, m.tx, m.ty, m.reachKey, m.hold !== null && this.hookAt(parent.pose, m.li, m.hold, m.tx, m.ty));
     if (!r.ok) return false;
     // the sim checks self-clipping where the limb is released, i.e. around the reach pose
@@ -1012,7 +1043,8 @@ class Planner {
         if (h.y > n.pose.py + (this.hookWall(h.y) ? 0.5 : 0.3)) continue;
         if (h.y < maxHandY - 2.15) continue;
         if (n.slots[pair] === h && (h.size < 0.05 || !canMatch(li, h))) continue;
-        const ideal = minHandY - 1.2;
+        // (out of a figure 4 the foot steps down to about hip height: often onto the hold a hand just left)
+        const ideal = n.f4 !== undefined ? n.pose.py - 0.3 : minHandY - 1.2;
         score = -Math.abs(h.y - ideal) * 1.4 + nominalCapacity(h, false, this.angleOf(h.y)) * 0.35 + (h.y - curY) * 0.5 - Math.abs(h.x - n.pose.px) * 0.4;
       }
       const cp = contactPoint(h, li, n.slots[pair] === h, this.tmpC);
@@ -1042,12 +1074,16 @@ class Planner {
    */
   expand(n: Node, push: (c: Node) => void, closed: Set<string>): void {
     const hBase = n.g + 1;
+    const f4 = n.f4;
     for (let li = 0; li < 4; li++) {
       const hand = li < 2;
       if (hand) {
         const other = n.slots[li === 0 ? 1 : 0];
         if (!other || other === 'smear') continue;
       }
+      // in a figure 4 the holding hand stays (the leg is over its arm); the feet go back on once the free
+      // hand holds again (that ends the figure 4)
+      if (f4 !== undefined && (li === f4 || (li >= 2 && !n.slots[1 - f4]))) continue;
       let subKey: string | null = null;
       // anchor of the moving limb in the node pose
       const a = this.anchorOf(n.pose, li);
@@ -1074,7 +1110,8 @@ class Planner {
           sx[li] = Math.round(c.x * 100) / 100;
           sy[li] = Math.round(c.y * 100) / 100;
         }
-        const key = slots.map(slotId).join('|');
+        // (the free hand of a figure 4 moves in it: its children stay in it)
+        const key = slots.map(slotId).join('|') + (f4 !== undefined && li < 2 ? `|F${f4}` : '');
         if (closed.has(key)) continue;
         // target contact point
         let tx = c.x;
@@ -1089,6 +1126,7 @@ class Planner {
         const reachKey = `${subKey}>${li}:${c.hold ? c.hold.id : `s${sx[li]},${sy[li]}`}`;
         // a lower bound of the evaluated cost (crossed feet cost the same once evaluated)
         const g0 = hBase + this.crossCost(slots, sx);
+        const stay4 = f4 !== undefined && li < 2;
         push({
           slots,
           sx,
@@ -1097,15 +1135,174 @@ class Planner {
           pose: n.pose,
           tension: n.tension,
           g: g0,
-          f: g0 + this.hw * this.heuristic(slots),
+          f: g0 + this.hw * (this.heuristic(slots) + (stay4 ? FIG4_FEET_H : 0)),
           parent: n,
           step: null,
           depth: n.depth + 1,
           move: { li, hold: c.hold, tx, ty, fromX, fromY, reachKey },
+          f4: stay4 ? f4 : undefined,
         });
       }
     }
+    if (f4 !== undefined) return;
     if (this.dynos) this.expandDynos(n, push, closed);
+    if (this.fig4) this.expandFig4(n, push, closed);
+  }
+
+  private readonly f4Tmp = { x: 0, y: 0 };
+  private readonly f4Tmp2 = { x: 0, y: 0 };
+
+  /**
+   * Lazy figure-4 children of n (only when this.fig4): hand k on a positive hold (figure4.fig4Capacity at
+   * the planning pump ≥ SIM.fig4MinCap) at or above the other hand, the opposite leg's hip within its reach
+   * below it (fig4LegReaches), and the pressed-up body (figure4.fig4Pose, the sim's) at least
+   * SOLVER.fig4MinRise above the stance. Both feet come off; the other hand lets go when its hold is out of
+   * its reach from up there (the sim's rule).
+   */
+  expandFig4(n: Node, push: (c: Node) => void, closed: Set<string>): void {
+    if (n.transient) return;
+    const a = n.slots[0];
+    const b = n.slots[1];
+    if (!a || !b || a === 'smear' || b === 'smear') return;
+    computeAnchors(n.pose, this.AX, this.AY);
+    for (let k = 0; k < 2; k++) {
+      const H = k === 0 ? a : b;
+      const O = k === 0 ? b : a;
+      if (H === O || H.y < O.y - 0.15) continue;
+      if (fig4Capacity(H, this.angleOf(H.y), this.prm.assist, SOLVER.pump) < SIM.fig4MinCap) continue;
+      const leg = FIG4_LEG[k];
+      const hc = contactPoint(H, k, false, this.f4Tmp);
+      if (!fig4LegReaches(this.AX[leg], this.AY[leg], hc.x, hc.y)) continue;
+      const pose: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
+      fig4Pose(n.pose, hc.x, hc.y, k, pose);
+      if (pose.py - n.pose.py < SOLVER.fig4MinRise) continue;
+      const slots = n.slots.slice();
+      slots[2] = null;
+      slots[3] = null;
+      // the other hand: out of its reach from the pressed-up body, it lets go
+      const j = 1 - k;
+      const oc = contactPoint(O, j, false, this.f4Tmp2);
+      const sh = this.anchorOf(pose, j);
+      const ux0 = pose.cx - pose.px;
+      const uy0 = pose.cy - pose.py;
+      const ul = dhypot(ux0, uy0) || 1;
+      if (envEvalOn(this.prof, j, sh.x, sh.y, ux0 / ul, uy0 / ul, oc.x, oc.y).excess > 0.1) slots[j] = null;
+      const key = slots.map(slotId).join('|') + `|F${k}`;
+      if (closed.has(key)) continue;
+      const g0 = n.g + 1 + SOLVER.fig4Cost;
+      push({
+        slots,
+        sx: n.sx.slice(),
+        sy: n.sy.slice(),
+        key,
+        pose: n.pose,
+        tension: n.tension,
+        g: g0,
+        f: g0 + this.hw * (this.heuristic(slots) + FIG4_FEET_H),
+        parent: n,
+        step: null,
+        depth: n.depth + 1,
+        move: { li: leg, hold: H, tx: hc.x, ty: hc.y, fromX: hc.x, fromY: hc.y, reachKey: '', fig4: { hand: k, pose } },
+        f4: k,
+      });
+    }
+  }
+
+  /**
+   * Stress of the holding hand k in a figure 4 (the sim's fig4Step loads): SIM.fig4Load BW, less the other
+   * hand's share (SIM.fig4OtherShare) when it holds too, over the hand's figure-4 capacity.
+   */
+  private fig4Stress(slots: Slot[], k: number, alone = false): number {
+    const H = slots[k] as HoldDef;
+    const cap = fig4Capacity(H, this.angleOf(H.y), this.prm.assist, SOLVER.pump);
+    const o = slots[1 - k];
+    const share = !alone && o && o !== 'smear' ? SIM.fig4OtherShare : 0;
+    return (SIM.fig4Load * (1 - share)) / Math.max(cap, 0.01);
+  }
+
+  /** Evaluate a figure-4 child: the holding hand carries the pressed-up body (fig4Stress ≤ stanceMax). */
+  evaluateFig4(n: Node, m: LazyMove, k: number, pose: Pose): boolean {
+    const parent = n.parent!;
+    const t = this.fig4Stress(n.slots, k);
+    // the holding arm carries it all while the other hand moves (that move must be possible)
+    const tAlone = this.fig4Stress(n.slots, k, true);
+    // (with the other hand off — out of its reach from up there — the free hand is on its way: a move)
+    if (t > (n.slots[1 - k] ? SOLVER.stanceMax : SOLVER.moveMax) || tAlone > SOLVER.moveMax) return false;
+    const step: PlanStep = {
+      move: { limb: LIMB_IDS[m.li], holdId: (m.hold as HoldDef).id, special: 'figure4' },
+      moveTension: Math.max(parent.tension, t),
+      tension: t,
+      distance: dhypot(pose.px - parent.pose.px, pose.py - parent.pose.py),
+      pose,
+      reachPose: parent.pose,
+    };
+    n.pose = pose;
+    n.tension = t;
+    n.step = step;
+    n.g = parent.g + this.moveCost(t, t) + SOLVER.fig4Cost;
+    n.f = n.g + this.hw * (this.heuristic(n.slots) + FIG4_FEET_H);
+    STEP_NODE.set(step, n);
+    return true;
+  }
+
+  /**
+   * Evaluate a move made IN a figure 4 (parent.f4 = the holding hand k): the body stays pressed up (the
+   * sim moves it kinematically), so the free hand reaches from the parent pose — inside its envelope,
+   * no self-clipping, the holding arm carrying everything meanwhile; a foot going back on (from the same
+   * body, the sim's technique-aware foot reach) ends the figure 4: the stance it makes must settle
+   * (up to SOLVER.dynoLandMax, like the landing of a throw — the other foot follows at once).
+   */
+  evaluateInFig4(n: Node, m: LazyMove, k: number): boolean {
+    const parent = n.parent!;
+    const p = parent.pose;
+    computeAnchors(p, this.AX, this.AY);
+    let ux = p.cx - p.px;
+    let uy = p.cy - p.py;
+    const ul = dhypot(ux, uy) || 1;
+    ux /= ul;
+    uy /= ul;
+    const li = m.li;
+    const ei = li >= 2 && m.hold !== null && this.hookAt(p, li, m.hold, m.tx, m.ty) ? li + 2 : li;
+    const tol = SIM.reachTolerance - (li < 2 ? SOLVER.fig4ReachMargin : 0.01);
+    if (envEvalOn(this.prof, ei, this.AX[li], this.AY[li], ux, uy, m.tx, m.ty).excess > tol) return false;
+    if (!this.clearAt(p, parent, li, m.hold, m.tx, m.ty)) return false;
+    const distance = dhypot(m.tx - m.fromX, m.ty - m.fromY);
+    if (li < 2) {
+      // the free hand: the holding arm alone while it reaches, then shared
+      const moveT = this.fig4Stress(parent.slots, k, true);
+      const t = this.fig4Stress(n.slots, k);
+      if (moveT > SOLVER.moveMax || t > SOLVER.stanceMax) return false;
+      const step: PlanStep = { move: { limb: LIMB_IDS[li], holdId: m.hold ? m.hold.id : SMEAR_ID }, moveTension: moveT, tension: t, distance, pose: p, reachPose: p };
+      n.pose = p;
+      n.tension = t;
+      n.step = step;
+      n.f4 = k;
+      n.g = parent.g + this.moveCost(t, moveT);
+      n.f = n.g + this.hw * (this.heuristic(n.slots) + FIG4_FEET_H);
+      STEP_NODE.set(step, n);
+      return true;
+    }
+    // a foot back on: out of the figure 4 into the stance it makes
+    n.f4 = undefined;
+    const st = this.stance(n, p);
+    if (st.violation > 0.004 || st.tension > SOLVER.dynoLandMax) return false;
+    n.transient = st.tension > SOLVER.stanceMax || !n.slots[2] || !n.slots[3];
+    const step: PlanStep = {
+      move: { limb: LIMB_IDS[li], holdId: m.hold ? m.hold.id : SMEAR_ID },
+      moveTension: parent.tension,
+      tension: st.tension,
+      distance,
+      pose: st.pose,
+      reachPose: p,
+      smear: m.hold ? undefined : { x: n.sx[li], y: n.sy[li] },
+    };
+    n.pose = st.pose;
+    n.tension = st.tension;
+    n.step = step;
+    n.g = parent.g + this.moveCost(st.tension, parent.tension) + this.crossCost(n.slots, n.sx);
+    n.f = n.g + this.hw * this.heuristic(n.slots);
+    STEP_NODE.set(step, n);
+    return true;
   }
 
   private anchorTmp = { x: 0, y: 0 };
@@ -1221,6 +1418,53 @@ export class StanceLab {
     return { ok: true, slots: next, pose: child.pose, tension: child.tension, kind: d.kind, cut: d.cut.slice(), rise: d.rise };
   }
 
+  /**
+   * A figure 4 from the stance (the planner's model, the sim's figure4 / fig4Step): hand k holds, the
+   * opposite leg hooks over its arm and the body presses up; the free hand (1 − k) catches `target` from
+   * up there; then that leg comes off the arm and steps onto the hold the free hand left (the usual way out
+   * of a figure 4). On success: the stance after (`slots`: k's hold, the target, that foot on the vacated
+   * hold, the other foot off), its pose and tension (≤ SOLVER.dynoLandMax), and the pressed-up pose.
+   */
+  figure4(
+    slots: (HoldDef | null)[],
+    k: number,
+    target: HoldDef,
+    pose: Pose,
+  ): { ok: boolean; slots: (HoldDef | null)[]; pose: Pose; tension: number; up: Pose } {
+    const fail = { ok: false, slots, pose, tension: Infinity, up: pose };
+    const j = 1 - k;
+    const vac = slots[j];
+    if (!slots[k] || !vac || slots[k] === vac || !usableByFoot(vac)) return fail;
+    const p = this.p;
+    const mk = (sl: Slot[], parent: Node | null, ps: Pose, move: LazyMove | null, f4?: number): Node =>
+      ({ slots: sl, sx: this.empty, sy: this.empty, key: `lab-f${this.seq++}`, pose: ps, tension: 0, g: 0, f: 0, parent, step: null, depth: 0, move, f4 }) as Node;
+    const root = mk(slots, null, pose, null);
+    root.tension = p.stance(root, pose).tension;
+    // the leg over the arm (the planner's own children of this stance)
+    let entry: Node | null = null;
+    p.expandFig4(root, (c) => {
+      if (c.f4 === k) entry = c;
+    }, new Set());
+    const e = entry as Node | null;
+    if (!e) return fail;
+    e.key = `lab-f${this.seq++}`;
+    if (!p.evaluate(e)) return fail;
+    // the free hand from the pressed-up body
+    const tp = contactPoint(target, j, false, { x: 0, y: 0 });
+    const s2 = e.slots.slice();
+    s2[j] = target;
+    const n2 = mk(s2, e, e.pose, { li: j, hold: target, tx: tp.x, ty: tp.y, fromX: tp.x, fromY: tp.y, reachKey: '' }, k);
+    if (!p.evaluate(n2)) return fail;
+    // that leg off the arm onto the vacated hold
+    const leg = FIG4_LEG[k];
+    const fp = contactPoint(vac, leg, false, { x: 0, y: 0 });
+    const s3 = s2.slice();
+    s3[leg] = vac;
+    const n3 = mk(s3, n2, n2.pose, { li: leg, hold: vac, tx: fp.x, ty: fp.y, fromX: fp.x, fromY: fp.y, reachKey: '' });
+    if (!p.evaluate(n3)) return fail;
+    return { ok: true, slots: s3 as (HoldDef | null)[], pose: n3.pose, tension: n3.tension, up: e.pose };
+  }
+
   /** Anchor (shoulder / hip) of a limb in a pose. */
   anchor(pose: Pose, li: number): Vec2 {
     const a = this.p.anchorOf(pose, li);
@@ -1322,6 +1566,7 @@ export function planBetaDetailed(boulder: BoulderDef, opts: PlanOptions & { goal
   const t0 = now();
   const planner = new Planner(boulder, opts.assist ?? 0);
   if (opts.dynos !== undefined) planner.dynos = opts.dynos;
+  if (opts.figure4 !== undefined) planner.fig4 = opts.figure4 && boulder.mode !== 'rope';
   if (!planner.topIds.size) return null;
   const startIds = opts.start ?? startPlacement(boulder);
   const st = startSlots(planner, startIds, boulder, opts.startPose);
@@ -1491,6 +1736,24 @@ export function nextHint(sim: ClimberSimAPI): BetaMove | null {
       }
     }
     return best ? { limb: free, holdId: best } : null;
+  }
+  if (s.special === 'figure4' && !ids[2] && !ids[3]) {
+    // in a figure 4 with both hands on: put a foot back on (the best foothold in reach below the hips)
+    let best: BetaMove | null = null;
+    let bs = -Infinity;
+    for (const foot of ['LF', 'RF'] as const) {
+      if (s.limbs[foot].dragging) continue;
+      const ideal = { x: s.pelvis.x + (foot === 'LF' ? -0.2 : 0.2), y: s.pelvis.y - 0.7 };
+      for (const id of sim.reachableHolds(foot)) {
+        const h = b.holds.find((x) => x.id === id)!;
+        const sc = sim.predictGrip(foot, id) - dhypot(h.x - ideal.x, h.y - ideal.y) * 1.5;
+        if (sc > bs) {
+          bs = sc;
+          best = { limb: foot, holdId: id };
+        }
+      }
+    }
+    return best;
   }
   // rope: clip when the next draw is within reach of a hand
   if (b.mode === 'rope' && b.quickdraws?.length) {

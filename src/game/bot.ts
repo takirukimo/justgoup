@@ -5,7 +5,11 @@
 // has worn off (lead routes, ≈ every 4–5 moves) and, when a forearm is pumped, it lets go with it and
 // shakes it out by the side (the other hand holding) before re-gripping and going on. Thrown moves of the
 // beta (BetaMove.dyno: deadpoints and double dynos) are launched from the planned stance with
-// ClimberSimAPI.dyno and caught in flight; the following steps put the cut limbs back on.
+// ClimberSimAPI.dyno and caught in flight; the following steps put the cut limbs back on. A planned figure 4
+// (BetaMove.special) hooks the leg over the holding arm with ClimberSimAPI.figure4; the free hand then
+// reaches from the pressed-up body and a foot going back on ends it. Pumped on a roof with both feet hooked
+// or cammed, it rests in a bat hang (ClimberSimAPI.batHang: both hands off, shaking out) and sits back up
+// onto its holds.
 
 import type { HoldDef, LimbId, Vec2 } from '../core/types';
 import type { BetaMove, ClimberSimAPI, SimEvent } from '../core/contracts';
@@ -13,7 +17,7 @@ import { clamp } from '../core/math';
 import { contactPoint, LIMB_INDEX } from './holds';
 import { planBetaDetailed, SMEAR_ID, type PlanResult, type PlanStep } from './solver';
 
-type BotPhase = 'prep' | 'drag' | 'hold' | 'settle' | 'clip' | 'clipwait' | 'recover' | 'chalk' | 'shake' | 'regrab' | 'fly' | 'done' | 'failed';
+type BotPhase = 'prep' | 'drag' | 'hold' | 'settle' | 'clip' | 'clipwait' | 'recover' | 'chalk' | 'shake' | 'regrab' | 'fly' | 'fig4' | 'bat' | 'batgrab' | 'batup' | 'done' | 'failed';
 
 /** Body management thresholds of the bot. */
 export const BOT = {
@@ -70,6 +74,10 @@ export class BetaBot {
   shakes = 0;
   /** Deadpoints / dynos thrown. */
   throws = 0;
+  /** Bat-hang rests taken. */
+  batRests = 0;
+  /** The hand holds the bat hang let go of (the sit-up grabs them back). */
+  private batHolds: (HoldDef | null)[] = [null, null];
   /** A throw cut the feet: put them back on at once. */
   private fastFeet = false;
   /** Extra launch power after a short throw (reset on a catch). */
@@ -143,7 +151,7 @@ export class BetaBot {
       else if (this.t > 3) this.fail('stuck after a missed move');
       return;
     }
-    if (this.phase === 'chalk' || this.phase === 'shake' || this.phase === 'regrab') {
+    if (this.phase === 'chalk' || this.phase === 'shake' || this.phase === 'regrab' || this.phase === 'bat' || this.phase === 'batgrab' || this.phase === 'batup') {
       this.bodyStep(s);
       return;
     }
@@ -163,7 +171,25 @@ export class BetaBot {
             return;
           }
         }
-        if (this.t < dt * 1.5 && this.opts.manageBody && this.manage(limb)) return;
+        // a foot just went back on out of a figure 4: nothing moves while the body steps down onto it
+        const prevStep = this.plan && this.idx > 0 ? this.plan.steps[this.idx - 1] : null;
+        if (s.special === 'figure4' && prevStep && !prevStep.move.special && (prevStep.move.limb === 'LF' || prevStep.move.limb === 'RF')) {
+          if (this.t > 2) this.fail('stuck stepping out of the figure 4');
+          break;
+        }
+        if (st.move.special === 'figure4') {
+          // hook the leg over the holding arm and press up (no weight shift first: the move is the shift)
+          if (!sim.figure4 || !sim.figure4(st.move.limb as 'LF' | 'RF')) {
+            this.log.push(`figure 4 refused ${st.move.limb}`);
+            this.retry();
+            return;
+          }
+          this.moveStance = this.stanceKey();
+          this.phase = 'fig4';
+          this.t = 0;
+          return;
+        }
+        if (this.t < dt * 1.5 && this.opts.manageBody && !s.special && this.manage(limb)) return;
         // shift the weight toward the reach position while still on four limbs, then let go
         if (this.opts.useHips) sim.setHipTarget({ x: st.reachPose.px, y: st.reachPose.py });
         if (this.prepTension < 0) this.prepTension = s.tension;
@@ -221,6 +247,22 @@ export class BetaBot {
           return;
         }
         if (this.t > 2.5) this.fail('dyno: no catch');
+        break;
+      }
+      case 'fig4': {
+        if (!st) break;
+        // pressing up onto the arm: the next move reaches from the top of it
+        if (s.special !== 'figure4') {
+          this.log.push('figure 4 lost');
+          this.retry();
+          return;
+        }
+        if ((s.figure4 && s.figure4.blend >= 0.98) || this.t > 1.5) {
+          this.moves++;
+          this.idx++;
+          this.phase = 'prep';
+          this.t = 0;
+        }
         break;
       }
       case 'drag': {
@@ -358,6 +400,18 @@ export class BetaBot {
         return true;
       }
     }
+    if (sim.batHang && sim.canBatHang?.() && Math.max(s.limbs.LH.pump ?? 0, s.limbs.RH.pump ?? 0) >= BOT.shakeAbove) {
+      // a roof with both feet hooked / cammed: let go with both hands and rest upside down
+      const lh = s.limbs.LH.holdId;
+      const rh = s.limbs.RH.holdId;
+      this.batHolds = [lh ? this.holds.get(lh) ?? null : null, rh ? this.holds.get(rh) ?? null : null];
+      if (this.batHolds[0] && this.batHolds[1] && sim.batHang()) {
+        this.batRests++;
+        this.phase = 'bat';
+        this.t = 0;
+        return true;
+      }
+    }
     if (sim.shakeOut) {
       // the more pumped forearm first (the other hand holds meanwhile; the move comes after the re-grip)
       const order: ('LH' | 'RH')[] = (s.limbs.LH.pump ?? 0) >= (s.limbs.RH.pump ?? 0) ? ['LH', 'RH'] : ['RH', 'LH'];
@@ -412,6 +466,74 @@ export class BetaBot {
         const pair = hand === 'LH' ? 'RH' : 'LH';
         this.from = { x: s.limbs[hand].pos.x, y: s.limbs[hand].pos.y };
         this.target = contactPoint(h, LIMB_INDEX[hand], s.limbs[pair].holdId === h.id, { x: 0, y: 0 });
+        this.phase = 'regrab';
+        this.t = 0;
+        return;
+      }
+      case 'bat': {
+        // hanging from the feet, both arms shaking out: until they recover (or the core tires)
+        if (s.special !== 'bat') {
+          this.log.push('bat hang ended early');
+          if (s.phase === 'climbing') this.retry();
+          return;
+        }
+        const pump = Math.max(s.limbs.LH.pump ?? 0, s.limbs.RH.pump ?? 0);
+        const blend = s.bat?.blend ?? 0;
+        if (blend < 1 || ((pump > BOT.shakeUntil || this.t < 2) && (s.bat?.fatigue ?? 0) < 0.55 && this.t < BOT.shakeMax)) return;
+        // sit up onto the hold of the hand that let go last … the other one re-grips after
+        const first: 'LH' | 'RH' = 'LH';
+        const h = this.batHolds[0];
+        if (!h || !sim.beginDrag(first)) {
+          this.fail('bat hang: could not sit up');
+          return;
+        }
+        this.bodyHand = first;
+        this.bodyHold = h;
+        this.from = { x: s.limbs[first].pos.x, y: s.limbs[first].pos.y };
+        this.target = contactPoint(h, 0, false, { x: 0, y: 0 });
+        this.phase = 'batgrab';
+        this.t = 0;
+        return;
+      }
+      case 'batgrab': {
+        const k = Math.min(1, this.t / this.opts.dragTime);
+        const e = k * k * (3 - 2 * k);
+        sim.dragTo(hand, { x: this.from.x + (this.target.x - this.from.x) * e, y: this.from.y + (this.target.y - this.from.y) * e });
+        if (k < 1) return;
+        const h = this.bodyHold;
+        if (h && sim.snapCandidate(hand, this.target)?.id !== h.id && this.t < this.opts.dragTime + 1) return;
+        const ev = sim.endDrag(hand);
+        if (!ev.some((x) => x.type === 'grab' && x.holdId === h?.id)) {
+          this.fail(`bat hang: sit-up grab missed (${ev.map((x) => x.type).join(',')})`);
+          return;
+        }
+        this.phase = 'batup';
+        this.t = 0;
+        return;
+      }
+      case 'batup': {
+        // the sit-up: once upright, the other hand re-grips its hold
+        if (s.special === 'bat' && this.t < 3) return;
+        const other: 'LH' | 'RH' = 'RH';
+        const h = this.batHolds[1];
+        if (!h) {
+          this.replan();
+          return;
+        }
+        if (s.limbs[other].holdId === h.id) {
+          this.phase = 'prep';
+          this.t = 0;
+          return;
+        }
+        if (!sim.beginDrag(other)) {
+          this.fail('bat hang: could not re-grip');
+          return;
+        }
+        const s2 = sim.getState();
+        this.bodyHand = other;
+        this.bodyHold = h;
+        this.from = { x: s2.limbs[other].pos.x, y: s2.limbs[other].pos.y };
+        this.target = contactPoint(h, 1, s2.limbs.LH.holdId === h.id, { x: 0, y: 0 });
         this.phase = 'regrab';
         this.t = 0;
         return;
