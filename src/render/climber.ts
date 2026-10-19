@@ -3476,9 +3476,10 @@ export interface HoldInfo {
    * back from a roof lip, render/holds.ts foldClampY): a hand / foot on it follows the drawn hold.
    */
   dy?: number;
-  /** Optional product details (HoldDef.shape / fingers): buckets, rails, micros, horns, pockets. */
+  /** Optional product details (HoldDef.shape / fingers / edgeDepthMm): buckets, rails, micros, horns, pockets, deep edges. */
   shape?: HoldShape;
   fingers?: number;
+  edgeDepthMm?: number;
   /**
    * Optional: the drawn hold's geometry and world transform (hold-local → world, incl. a volume mount):
    * hands and feet are then placed on its real surface (render/grip.ts). `hasMatrix` says it is set.
@@ -3608,7 +3609,7 @@ export class ClimberModel extends THREE.Group {
   // ── hands on the real hold surface (render/grip.ts) ──
   /** Per hand: the placement on the hold (hold-local) and its world copy; whether it is in use. */
   private site = [createHandSite(), createHandSite()];
-  private siteKey = [0, 1].map(() => ({ id: null as string | null, geom: null as HoldGeometry | null, x: 0, y: 0, t: 0, f: 0, a: 0 }));
+  private siteKey = [0, 1].map(() => ({ id: null as string | null, geom: null as HoldGeometry | null, cx: 0, cy: 0, th: 0, f: 0, a: 0 }));
   private siteOn = [false, false];
   private siteP = [new THREE.Vector3(), new THREE.Vector3()];
   private siteDir = [new THREE.Vector3(), new THREE.Vector3()];
@@ -3626,6 +3627,7 @@ export class ClimberModel extends THREE.Group {
   private fUpOk = [false, false];
   private fN = [new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 1, 0)];
   private fGrabId: (string | null)[] = [null, null];
+  private fKey = [0, 1].map(() => ({ geom: null as HoldGeometry | null, x: 0, y: 0, a: 0, b: 0, c: 0, p: new THREE.Vector3(), n: new THREE.Vector3() }));
   private fGrabT = [9, 9];
   private sRope = [0, 0];
   private sStand = 0;
@@ -3782,6 +3784,7 @@ export class ClimberModel extends THREE.Group {
     out.geom = null;
     out.shape = undefined;
     out.fingers = undefined;
+    out.edgeDepthMm = undefined;
     return this.holdLookup(id, out) ? out : null;
   }
 
@@ -4518,7 +4521,7 @@ export class ClimberModel extends THREE.Group {
     const M = info.matrix;
     const inv = this.mInv.copy(M).invert();
     const surf = holdSurface(info.geom, info.type);
-    const def = gripStyleOf(info.type, info.shape);
+    const def = gripStyleOf(info.type, info.shape, info.edgeDepthMm);
     // where the sim holds it, at the hold's base (a volume mount's face), into hold-local XY
     const lift = Math.max(0, info.depth - info.geom.depth);
     const cp = L.contactPos ?? L.pos;
@@ -4537,20 +4540,26 @@ export class ClimberModel extends THREE.Group {
       th = clampN(a, -def.turn, def.turn) * sstep(2.7, 1.7, Math.abs(a));
     }
     const across = this.v1.x >= 0 ? 1 : -1;
-    // the placement only changes when the hold, the spot on it or the hand's turn does (quantised)
+    // the placement only changes when the hold, the spot on it (≥ 4 mm) or the hand's turn (≥ 0.07 rad)
+    // does: the fitted fingers are reused in between (no per-frame refit, no flicker between fits)
     const key = this.siteKey[s];
-    const qx = Math.round(cx / 0.002);
-    const qy = Math.round(cy / 0.002);
-    const qt = Math.round(th / 0.025);
     const fingers = info.fingers ?? 3;
     let site = this.site[s];
-    if (key.id !== L.holdId || key.geom !== info.geom || key.x !== qx || key.y !== qy || key.t !== qt || key.f !== fingers || key.a !== across) {
-      site = handSite(surf, def, qx * 0.002, qy * 0.002, -Math.sin(qt * 0.025), Math.cos(qt * 0.025), SIGN[s], fingers, across, this.site[s]);
+    if (
+      key.id !== L.holdId ||
+      key.geom !== info.geom ||
+      Math.abs(key.cx - cx) > 0.004 ||
+      Math.abs(key.cy - cy) > 0.004 ||
+      Math.abs(key.th - th) > 0.07 ||
+      key.f !== fingers ||
+      key.a !== across
+    ) {
+      site = handSite(surf, def, cx, cy, -Math.sin(th), Math.cos(th), SIGN[s], fingers, across, this.site[s]);
       key.id = L.holdId;
       key.geom = info.geom;
-      key.x = qx;
-      key.y = qy;
-      key.t = qt;
+      key.cx = cx;
+      key.cy = cy;
+      key.th = th;
       key.f = fingers;
       key.a = across;
     }
@@ -4833,7 +4842,7 @@ export class ClimberModel extends THREE.Group {
       info.hasMatrix === true &&
       !!info.geom &&
       (fm === undefined || fm === 'edge' || fm === 'drop');
-    this.placeFootOnHold(s, standing, info, L, frame, fg, Uw, snap, d);
+    this.placeFootOnHold(s, standing, info, L, frame, fg, Uw, Hp, snap, d);
     if (mode === 'hold' && L.shake > 0.02) {
       // the knee jiggles with the heel (Elvis leg)
       const e = L.shake * Math.min(1.6, this.cueGain);
@@ -4849,7 +4858,7 @@ export class ClimberModel extends THREE.Group {
    * surface the hold is bolted to; on a volume the shoe stands / smears on the face under it. A fresh
    * placement sets the toe down from just above and out. Blends in / out of the sim's point.
    */
-  private placeFootOnHold(s: number, on: boolean, info: HoldInfo | null, L: LimbSnapshot, frame: WallFrame, fg: LimbGoal, Uw: THREE.Vector3, snap: boolean, d: number): void {
+  private placeFootOnHold(s: number, on: boolean, info: HoldInfo | null, L: LimbSnapshot, frame: WallFrame, fg: LimbGoal, Uw: THREE.Vector3, Hp: THREE.Vector3, snap: boolean, d: number): void {
     const want = on ? 1 : 0;
     this.fSiteK[s] += (want - this.fSiteK[s]) * (snap ? 1 : dampK(on ? 14 : 10, d));
     if (L.holdId !== this.fGrabId[s]) {
@@ -4877,8 +4886,26 @@ export class ClimberModel extends THREE.Group {
     frame.toWorld(this.p2, lift, this.lq).applyMatrix4(inv);
     const c = this.v2;
     const n = this.v3;
-    soleContact(surf, uL, this.lq.x, this.lq.y, 1, 0, 0.034, c, n);
-    if (surf.planes && surf.planeCount && surf.depth > 0.05) {
+    // the contact only changes with the hold, the spot on it and the sole's tilt (quantised: cached)
+    const key = this.fKey[s];
+    const qx = Math.round(this.lq.x / 0.002);
+    const qy = Math.round(this.lq.y / 0.002);
+    const qa = Math.round(uL.x / 0.02);
+    const qb = Math.round(uL.y / 0.02);
+    const qc = Math.round(uL.z / 0.02);
+    if (key.geom !== info.geom || key.x !== qx || key.y !== qy || key.a !== qa || key.b !== qb || key.c !== qc) {
+      soleContact(surf, uL, qx * 0.002, qy * 0.002, 1, 0, 0.034, key.p, key.n);
+      key.geom = info.geom;
+      key.x = qx;
+      key.y = qy;
+      key.a = qa;
+      key.b = qb;
+      key.c = qc;
+    }
+    c.copy(key.p);
+    n.copy(key.n);
+    const onFace = !!surf.planes && surf.planeCount > 0 && surf.depth > 0.05;
+    if (onFace) {
       // a volume: the sole goes flat on the face under the foot (the instep along its normal)
       this.fN[s].copy(n).transformDirection(M);
       fg.up.copy(this.fN[s]);
@@ -4887,11 +4914,20 @@ export class ClimberModel extends THREE.Group {
       fg.dir.normalize();
       uL.copy(n);
     } else this.fN[s].copy(this.fUp[s]);
-    // the toe point sits ≈ 8 mm above the sole: then slide along the sole toward the surface it is
-    // bolted to until the tip just clears it
-    c.addScaledVector(uL, 0.008);
+    // the toe point sits ≈ 6 mm above the sole: then slide along the sole toward the surface it is
+    // bolted to until the tip just clears it (into a jug's bucket); a leg at full stretch stands on
+    // its toe tip right at the edge instead (the IK points that foot, pivoting about the toe)
+    c.addScaledVector(uL, 0.006);
     const dL = this.lq.copy(fg.dir).transformDirection(inv);
-    if (dL.z < -0.15) c.addScaledVector(dL, clampN((0.014 - c.z) / dL.z, -0.008, 0.07));
+    if (dL.z < -0.15 && !onFace) {
+      let k = clampN((0.014 - c.z) / dL.z, -0.008, 0.045);
+      if (k > 0) {
+        this.v0.copy(c).applyMatrix4(M).addScaledVector(fg.dir, -0.168).addScaledVector(fg.up, 0.066);
+        const ratio = this.v0.distanceTo(Hp) / (THIGH + SHIN);
+        k *= sstep(0.99, 0.93, ratio);
+      }
+      c.addScaledVector(dL, k);
+    }
     const T = this.fSiteW[s].copy(c).applyMatrix4(M);
     // set down: in from just above and out from the hold over the first moments on it
     const gt = this.fGrabT[s];

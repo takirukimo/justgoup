@@ -1251,6 +1251,7 @@ export class HoldSet {
     out.dy = srcY !== undefined ? h.y - srcY : 0;
     out.shape = h.shape;
     out.fingers = h.fingers;
+    out.edgeDepthMm = h.edgeDepthMm;
     out.geom = g ?? null;
     out.hasMatrix = false;
     if (g && out.matrix) {

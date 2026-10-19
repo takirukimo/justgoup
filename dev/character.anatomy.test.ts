@@ -17,7 +17,7 @@ import { BetaBot } from '../src/game/bot';
 import { RopeSystem } from '../src/game/rope';
 import { BONE, ClimberModel } from '../src/render/climber';
 import { HoldSet } from '../src/render/holds';
-import { holdSurface } from '../src/render/grip';
+import { convexHeight, fingerPoint, holdSurface, signedDist, type HandSite } from '../src/render/grip';
 import { WallFrame } from '../src/render/wall-frame';
 import { measureRig, segDist, PEN_BAD, FLOOR_BAD, type Measure } from './character-probe';
 
@@ -57,7 +57,7 @@ interface Tally {
    * Hands / feet on holds (limb-frames, calm phases): the closest skin point (finger chain / palm, shoe
    * toe → heel) to the drawn hold's surface; > HOVER_BAD reads as hovering beside / above it.
    */
-  touch: Record<'hand' | 'foot', { n: number; hover: number; sum: number; worst: number; what: string }>;
+  touch: Record<'hand' | 'foot', { n: number; hover: number; reach: number; sum: number; worst: number; what: string; inside: number }>;
 }
 
 const fresh = (): Tally => ({
@@ -86,7 +86,7 @@ const fresh = (): Tally => ({
   headArmOverhead: 0,
   headArmWorst: 0,
   headJerkFrames: 0,
-  touch: { hand: { n: 0, hover: 0, sum: 0, worst: 0, what: '' }, foot: { n: 0, hover: 0, sum: 0, worst: 0, what: '' } },
+  touch: { hand: { n: 0, hover: 0, reach: 0, sum: 0, worst: 0, what: '', inside: 0 }, foot: { n: 0, hover: 0, reach: 0, sum: 0, worst: 0, what: '', inside: 0 } },
 });
 
 /** A hand / foot whose skin stays this far (m) from the hold it is on reads as hovering. */
@@ -109,29 +109,69 @@ function touchGap(model: ClimberModel, set: HoldSet, id: string, li: number): nu
     const s = li;
     const tipIds = s ? [BONE.tipR, BONE.tipR1, BONE.tipR2, BONE.tipR3] : [BONE.tipL, BONE.tipL1, BONE.tipL2, BONE.tipL3];
     const fIds = s ? [BONE.fingR, BONE.fingR1, BONE.fingR2, BONE.fingR3] : [BONE.fingL, BONE.fingL1, BONE.fingL2, BONE.fingL3];
-    for (const b of [...tipIds, ...fIds]) {
-      samples.push([B[b].position.clone(), 0.009]);
-      samples.push([new THREE.Vector3(0, 0.028, 0).applyQuaternion(B[b].quaternion).add(B[b].position), 0.008]);
+    // the finger capsules' axes (mid and end of each segment)
+    for (const b of fIds) samples.push([new THREE.Vector3(0, 0.017, 0).applyQuaternion(B[b].quaternion).add(B[b].position), 0.0088]);
+    for (const b of tipIds) {
+      samples.push([new THREE.Vector3(0, 0.014, 0).applyQuaternion(B[b].quaternion).add(B[b].position), 0.008]);
+      samples.push([new THREE.Vector3(0, 0.026, 0).applyQuaternion(B[b].quaternion).add(B[b].position), 0.0076]);
     }
-    samples.push([model.rig.joints.grip[s].clone(), 0.012]);
-    samples.push([model.rig.joints.wrist[s].clone().lerp(model.rig.joints.grip[s], 0.5), 0.016]);
+    // the palm's centre (the knuckle bumps are on the back)
+    samples.push([new THREE.Vector3(0, 0.03, -0.004).applyQuaternion(model.rig.bones[s ? BONE.handR : BONE.handL].quaternion).add(model.rig.joints.wrist[s]), 0.012]);
   } else {
     const s = li - 2;
-    const J = model.rig.joints;
-    // the sole from the toe back toward the heel
-    for (let k = 0; k <= 4; k++) samples.push([J.toe[s].clone().lerp(J.ankle[s], k * 0.18), 0.012 + k * 0.006]);
-  }
-  let best = Infinity;
-  const P = surf.pts;
-  for (let i = 0; i < surf.count; i++) {
-    _hp.set(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]).applyMatrix4(_hm);
-    for (const [q, r] of samples) {
-      const d = _hq.subVectors(_hp, q).length() - r;
-      if (d < best) best = d;
+    // the sole (shoe-local: +y heel → toe, −z down) from the toe tip back to the heel, and the toe box
+    const fb = B[s ? BONE.footR : BONE.footL];
+    for (const [y, z] of [[0.17, -0.062], [0.14, -0.07], [0.1, -0.07], [0.05, -0.068], [0.0, -0.066], [-0.05, -0.058], [0.16, -0.045], [0.12, -0.03]] as const) {
+      samples.push([new THREE.Vector3(0, y, z).applyQuaternion(fb.quaternion).add(fb.position), 0.004]);
     }
   }
+  let best = Infinity;
+  if (surf.planes && surf.planeCount && surf.depth > 0.05) {
+    // a volume: its faces (the vertices are only its corners): height over the face under each sample
+    const inv = _hm.clone().invert();
+    const n = new THREE.Vector3();
+    for (const [q, r] of samples) {
+      _hp.copy(q).applyMatrix4(inv);
+      const z = convexHeight(surf, _hp.x, _hp.y, n);
+      if (z <= 0) continue;
+      const d = (_hp.z - z) * n.z - r;
+      if (d < best) best = d;
+    }
+    return Math.max(0, best === Infinity ? 0 : best);
+  }
+  const P = surf.pts;
+  const Nn = surf.nrm;
+  // per sample: its nearest surface point; inside when it sits behind that point's normal
+  const near = samples.map(() => ({ d: Infinity, i: -1 }));
+  const pw: THREE.Vector3[] = [];
+  for (let i = 0; i < surf.count; i++) {
+    _hp.set(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]).applyMatrix4(_hm);
+    pw.push(_hp.clone());
+    samples.forEach(([q, r], k) => {
+      const d = _hq.subVectors(_hp, q).length() - r;
+      if (d < best) best = d;
+      if (d < near[k].d) near[k] = { d, i };
+    });
+  }
+  let inside = 0;
+  const nw = new THREE.Vector3();
+  const names = ['p0', 'p1', 'p2', 'p3', 'd0', 't0', 'd1', 't1', 'd2', 't2', 'd3', 't3', 'palm'];
+  samples.forEach(([q, r], k) => {
+    const i = near[k].i;
+    if (i < 0) return;
+    nw.set(Nn[i * 3], Nn[i * 3 + 1], Nn[i * 3 + 2]).transformDirection(_hm);
+    const sd = _hq.subVectors(q, pw[i]).dot(nw) - r;
+    if (sd < inside) {
+      inside = sd;
+      touchWhat = li < 2 ? names[k] ?? `s${k}` : `sole${k}`;
+    }
+  });
+  touchInside = -inside;
   return Math.max(0, best);
 }
+/** Deepest skin sample behind the hold surface in the last touchGap() (m). */
+let touchInside = 0;
+let touchWhat = '';
 
 /** An elbow / knee moving this much more than its limb's ends in one 60 Hz frame reads as a pop. */
 const JUMP_BAD = 0.03;
@@ -416,11 +456,62 @@ function run(b: BoulderDef, T: Tally, opts: { secs: number; fallAt?: number; tag
         if (!L.holdId || L.smearing || L.dragging || L.busy) continue;
         const mode = L.footMode;
         if (li >= 2 && mode && mode !== 'edge' && mode !== 'drop') continue;
+        touchInside = 0;
         const gap = touchGap(model, set, L.holdId, li);
         const tt = T.touch[li < 2 ? 'hand' : 'foot'];
         tt.n++;
+        if (touchInside > 0.006) {
+          tt.inside++;
+          if (li < 2) {
+            const hh = set.holds.get(L.holdId);
+            const key = `in:${hh?.type}${hh?.shape ? '/' + hh.shape : ''}:${touchWhat}`;
+            T.pairs[key] = (T.pairs[key] ?? 0) + 1;
+            // why: the solved hand turned away from its placement (wrist range), or not on it
+            const mm = model as unknown as { siteDir: THREE.Vector3[]; siteUp: THREE.Vector3[]; siteP: THREE.Vector3[]; siteOn: boolean[] };
+            const hb = model.rig.bones[li ? BONE.handR : BONE.handL];
+            const hy = new THREE.Vector3(0, 1, 0).applyQuaternion(hb.quaternion);
+            const hz = new THREE.Vector3(0, 0, 1).applyQuaternion(hb.quaternion);
+            const turn = Math.max(hy.angleTo(mm.siteDir[li]), hz.angleTo(mm.siteUp[li]));
+            const off = model.rig.joints.grip[li].distanceTo(mm.siteP[li]);
+            let why = !mm.siteOn[li] ? 'nosite' : turn > 0.05 ? 'turned' : off > 0.003 ? 'offset' : 'placed';
+            if (why === 'placed') {
+              // does the planned placement itself go into the plastic?
+              const site = (model as unknown as { site: HandSite[] }).site[li];
+              const surf = holdSurface(set.geoms.get(L.holdId)!, hh!.type);
+              const hx = new THREE.Vector3().crossVectors(site.dir, site.up);
+              const q = new THREE.Vector3();
+              const w = new THREE.Vector3();
+              let worst = 0;
+              for (let f = 0; f < 4; f++)
+                for (const [sg, t] of [[2, 0.8], [1, 0.5], [1, 1]] as const) {
+                  fingerPoint(f, li ? 1 : -1, site.a[f], site.b[f], sg, t, q);
+                  w.copy(site.p).addScaledVector(hx, q.x - site.local.x).addScaledVector(site.dir, q.y - site.local.y).addScaledVector(site.up, q.z - site.local.z);
+                  worst = Math.min(worst, signedDist(surf, w));
+                }
+              why = worst < -0.006 ? 'placed:site-pen' : 'placed:site-ok';
+            }
+            T.pairs[`why:${why}`] = (T.pairs[`why:${why}`] ?? 0) + 1;
+          }
+        }
         tt.sum += gap;
-        if (gap > HOVER_BAD) tt.hover++;
+        if (gap > HOVER_BAD) {
+          tt.hover++;
+          {
+            // hovering because the IK could not get the limb there (out of the body's joint range)?
+            const goal = (model as unknown as { goal: { feet: { target: THREE.Vector3 }[]; hands: { target: THREE.Vector3 }[] } }).goal;
+            const tgt = li < 2 ? goal.hands[li].target : goal.feet[li - 2].target;
+            const got = li < 2 ? model.rig.joints.grip[li] : model.rig.joints.toe[li - 2];
+            if (tgt.distanceTo(got) > 0.02) tt.reach++;
+          }
+          if (process.env.TOUCHLOG && T.penLog.length < +process.env.TOUCHLOG && li >= 2) {
+            const goal = (model as unknown as { goal: { feet: { target: THREE.Vector3 }[]; hands: { target: THREE.Vector3 }[] } }).goal;
+            const tgt = li < 2 ? goal.hands[li].target : goal.feet[li - 2].target;
+            const J = model.rig.joints;
+            const got = li < 2 ? J.grip[li] : J.toe[li - 2];
+            const fsk = (model as unknown as { fSiteK: number[] }).fSiteK;
+            T.penLog.push(`hover ${(gap * 100).toFixed(1)}cm ${ids[li]} ${set.holds.get(L.holdId)?.type} mode=${mode ?? '-'} fb=${model.rig.fallback[li]} miss=${(tgt.distanceTo(got) * 100).toFixed(1)}cm siteK=${li >= 2 ? fsk[li - 2].toFixed(2) : '-'} pos-anchor=${Math.hypot(L.pos.x - L.anchor.x, L.pos.y - L.anchor.y).toFixed(2)} dy=${(L.pos.y - L.anchor.y).toFixed(2)} ${where}`);
+          }
+        }
         if (gap > tt.worst) tt.worst = gap;
         if (gap > tt.worst - 1e-9 && gap > 0) tt.what = `${ids[li]} on ${set.holds.get(L.holdId)?.type}${set.holds.get(L.holdId)?.shape ? '/' + set.holds.get(L.holdId)?.shape : ''} @ ${where}`;
       }
@@ -478,7 +569,7 @@ function report(name: string, T: Tally): void {
       (['hand', 'foot'] as const)
         .map((k) => {
           const t = T.touch[k];
-          return `${k}s on holds: hover>${HOVER_BAD * 100}cm ${pct(t.hover, t.n)} of ${t.n}, mean gap ${((t.sum / Math.max(1, t.n)) * 1000).toFixed(1)} mm, worst ${(t.worst * 100).toFixed(1)} cm ${t.what}`;
+          return `${k}s on holds: hover>${HOVER_BAD * 100}cm ${pct(t.hover, t.n)} of ${t.n} (out of reach ${pct(t.reach, t.n)}), into the hold>6mm ${pct(t.inside, t.n)}, mean gap ${((t.sum / Math.max(1, t.n)) * 1000).toFixed(1)} mm, worst ${(t.worst * 100).toFixed(1)} cm ${t.what}`;
         })
         .join('\n') +
       '\n' +
