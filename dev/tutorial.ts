@@ -10,7 +10,7 @@
 //                              game dt = frame dt × n (headless QA runs at 1–2 fps; ts=2 halves them)
 //
 // QA globals (dev/tutorial.check.mjs): __ready, __flow, __result, __status(), __plan(), __skip(),
-// __sim, __ctl, __renderer.
+// __sim, __ctl, __renderer, __missPoint(limb), __lanePoint(limb).
 
 import { GameRenderer } from '../src/render/renderer';
 import { LimbControls } from '../src/input/limb-controls';
@@ -24,6 +24,7 @@ import type { SimEvent } from '../src/core/contracts';
 import type { LimbId, QualityLevel, RunInfo } from '../src/core/types';
 import { runIntro, runTutorial, TUTORIAL_SIM_OPTIONS, tutorialStatus, type TutorialStatus } from '../src/tutorial/tutorial';
 import { Clock } from '../src/tutorial/scope';
+import { chalkBagAt, inChalkZone, inShakeLane, SHAKE_LANE, shakeLanePoint, spineUp } from '../src/input/release';
 
 const qs = new URLSearchParams(location.search);
 const flow = qs.get('flow') ?? 'both';
@@ -180,6 +181,69 @@ interface Plan {
   drag: Pt | null;
   /** Hold the sim would grab if the finger lifted now. */
   candidate: string | null;
+  /** Shake-out / chalk beats: the live drag target is in the beat's release zone, clear of holds. */
+  inZone?: boolean;
+}
+
+/** Screen point (page px) of a wall-local point. */
+function toPage(p: { x: number; y: number }): Pt {
+  const rect = canvas.getBoundingClientRect();
+  const q = renderer.wallToScreen(p, 0);
+  return { x: q.x + rect.left, y: q.y + rect.top };
+}
+
+/**
+ * QA: where a hand released on blank wall MISSES (no hold to grab, not the shake-out lane or the
+ * chalk bag, within reach): up and out to its own side. Page px, or null.
+ */
+function missPoint(limb: LimbId): Pt | null {
+  if (!sim) return null;
+  const st = sim.getState();
+  const L = st.limbs[limb];
+  const up = spineUp(st.pelvis, st.chest, { x: 0, y: 1 });
+  const bag = chalkBagAt(st.pelvis, up, { x: 0, y: 0 });
+  const side = limb === 'LH' || limb === 'LF' ? -1 : 1;
+  const reach = sim.maxReach(limb);
+  for (const ang of [20, 35, 5, 50, -10, 65]) {
+    for (const f of [0.75, 0.6, 0.9, 0.45]) {
+      const a = (ang * Math.PI) / 180;
+      const p = { x: L.anchor.x + side * Math.cos(a) * reach * f, y: L.anchor.y + Math.sin(a) * reach * f };
+      if (sim.snapCandidate(limb, p) || inChalkZone(bag, p.x, p.y)) continue;
+      if ((limb === 'LH' || limb === 'RH') && inShakeLane(limb === 'LH' ? 0 : 1, L.anchor, up, p.x, p.y)) continue;
+      return toPage(p);
+    }
+  }
+  return null;
+}
+
+/**
+ * QA: is the live drag target of `limb` where a scripted mistake wants it? 'miss': blank wall (no
+ * hold, not the shake-out lane, not the chalk bag); 'lane': the shake-out lane, clear of holds.
+ */
+function zoneOk(limb: LimbId, kind: 'miss' | 'lane'): boolean {
+  if (!sim || controls.dragging !== limb) return false;
+  const st = sim.getState();
+  const t = (controls as unknown as { target: { x: number; y: number } }).target;
+  const up = spineUp(st.pelvis, st.chest, { x: 0, y: 1 });
+  if (sim.snapCandidate(limb, t)) return false;
+  const hand = limb === 'LH' || limb === 'RH';
+  const lane = hand && inShakeLane(limb === 'LH' ? 0 : 1, st.limbs[limb].anchor, up, t.x, t.y);
+  if (kind === 'lane') return lane;
+  return !lane && !inChalkZone(chalkBagAt(st.pelvis, up, { x: 0, y: 0 }), t.x, t.y);
+}
+
+/** QA: a spot of a hand's shake-out lane clear of holds (page px), or null. */
+function lanePoint(limb: LimbId): Pt | null {
+  if (!sim || (limb !== 'LH' && limb !== 'RH')) return null;
+  const st = sim.getState();
+  const up = spineUp(st.pelvis, st.chest, { x: 0, y: 1 });
+  for (const f of [0.3, 0.45, 0.2, 0.6]) {
+    for (const g of [0.4, 0.7, 0.2]) {
+      const p = shakeLanePoint(limb === 'LH' ? 0 : 1, st.limbs[limb].anchor, up, SHAKE_LANE.down0 + (SHAKE_LANE.down1 - SHAKE_LANE.down0) * f, SHAKE_LANE.out0 + (SHAKE_LANE.out1 - SHAKE_LANE.out0) * g, { x: 0, y: 0 });
+      if (!sim.snapCandidate(limb, p)) return toPage(p);
+    }
+  }
+  return null;
 }
 
 function plan(): Plan | null {
@@ -210,6 +274,20 @@ function plan(): Plan | null {
     };
   }
   const limb = s.lesson.limb;
+  if ((s.beat === 'shake-out' || s.beat === 'chalk') && (limb === 'LH' || limb === 'RH')) {
+    // Phase B beats: let the hand go in its zone (the lane by the side / the chalk bag), not on a hold
+    const dragging = controls.dragging === limb;
+    const up = spineUp(st.pelvis, st.chest, { x: 0, y: 1 });
+    const goal = s.target ?? (s.beat === 'chalk' ? chalkBagAt(st.pelvis, up, { x: 0, y: 0 }) : st.limbs[limb].pos);
+    const zoneOk = (p: Pt): boolean =>
+      !sim!.snapCandidate(limb, p) &&
+      (s.beat === 'chalk' ? inChalkZone(chalkBagAt(st.pelvis, up, { x: 0, y: 0 }), p.x, p.y) : inShakeLane(limb === 'LH' ? 0 : 1, st.limbs[limb].anchor, up, p.x, p.y));
+    return {
+      status: s, limb, handle: hp(limb), from: scr(st.limbs[limb].pos, st.limbs[limb].depth), to: scr(goal), holdId: '',
+      drag: dragging ? scr(target) : null, candidate: dragging ? sim.snapCandidate(limb, target)?.id ?? null : null,
+      inZone: dragging && zoneOk(target),
+    };
+  }
   const pair: LimbId = limb === 'LH' ? 'RH' : limb === 'RH' ? 'LH' : limb === 'LF' ? 'RF' : 'LF';
   const c = contactPoint(h, LIMB_INDEX[limb], st.limbs[pair].holdId === h.id, { x: 0, y: 0 });
   const dragging = controls.dragging === limb;
@@ -226,6 +304,9 @@ declare global {
     __result: () => string | null;
     __status: () => TutorialStatus;
     __plan: () => Plan | null;
+    __missPoint: (limb: LimbId) => Pt | null;
+    __lanePoint: (limb: LimbId) => Pt | null;
+    __zoneOk: (limb: LimbId, kind: 'miss' | 'lane') => boolean;
     __skip: () => void;
     __sim: ClimberSim | null;
     __ctl: LimbControls;
@@ -238,6 +319,9 @@ window.__flow = () => stage;
 window.__result = () => result;
 window.__status = tutorialStatus;
 window.__plan = plan;
+window.__missPoint = missPoint;
+window.__lanePoint = lanePoint;
+window.__zoneOk = zoneOk;
 window.__skip = () => skip();
 window.__ctl = controls;
 window.__renderer = renderer;

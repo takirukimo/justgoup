@@ -135,7 +135,9 @@ if (!only || only === 'tutorial') {
   const seenText = new Set();
   const stepsSeen = new Set();
   const shotsTaken = new Set();
-  let missDone = false;
+  /** Scripted mistakes on the first lesson: a release on blank wall, then one down in the shake-out lane. */
+  const mistakes = ['miss', 'lane'];
+  const beatsSeen = new Set();
   let lines = 0;
   const deadline = Date.now() + 40 * 60 * 1000;
 
@@ -143,6 +145,8 @@ if (!only || only === 'tutorial') {
    * Drag the active lesson's handle onto its target like a careful player: touch the handle, move
    * toward the hold, then keep correcting with the live drag target (the camera pans during drags)
    * and hold still until the sim's snap candidate is the target hold, then lift the finger.
+   * Shake-out / chalk beats aim at the beat's release zone instead and let go once inside it.
+   * `mistake`: 'miss' lets go on blank wall, 'lane' down by the side (a shake-out).
    */
   async function performLesson(stepIdx, mistake) {
     const p = await plan(); // fresh: the camera may have moved since the last look
@@ -167,13 +171,24 @@ if (!only || only === 'tutorial') {
       await frames(page, 1);
     };
     if (mistake) {
-      // release a hand on blank wall: Steini should coach the miss
-      await moveBy(70, 110);
+      // 'miss': let go on blank wall (no hold, not the shake-out lane, not the chalk bag) → Steini
+      // coaches the miss; 'lane': let go down by the side → a shake-out, which Steini names
+      for (let k = 0; k < 12; k++) {
+        if (k && (await page.evaluate(([l, m]) => window.__zoneOk(l, m), [p.limb, mistake]))) break;
+        const goal = await page.evaluate(([l, m]) => (m === 'lane' ? window.__lanePoint(l) : window.__missPoint(l)), [p.limb, mistake]);
+        const r = await plan();
+        if (!goal || !r || !r.drag) break;
+        const ex = goal.x - r.drag.x;
+        const ey = goal.y - r.drag.y;
+        if (Math.hypot(ex, ey) <= 3) break;
+        await moveBy(ex, ey, k ? 2 : 5);
+      }
       await frames(page, 2);
       await touch(cdp, 'touchEnd', []);
       return;
     }
     const isHip = p.limb === 'HIP';
+    const isZone = p.status.beat === 'shake-out' || p.status.beat === 'chalk';
     await moveBy((p.to.x - p.from.x) * (isHip ? 1.2 : 1), (p.to.y - p.from.y) * (isHip ? 1.2 : 1));
     let snapped = false;
     for (let k = 0; k < 40; k++) {
@@ -192,6 +207,22 @@ if (!only || only === 'tutorial') {
         if (k > 16) break;
         continue;
       }
+      if (isZone) {
+        // in the zone (and clear of holds) on two looks in a row (the body has settled): let go
+        if (r.inZone) {
+          await frames(page, 2);
+          const again = await plan();
+          if (again && again.inZone) {
+            snapped = true;
+            break;
+          }
+          continue;
+        }
+        const ex = r.to.x - r.drag.x;
+        const ey = r.to.y - r.drag.y;
+        if (Math.hypot(ex, ey) > 3) await moveBy(ex, ey, 2);
+        continue;
+      }
       if (r.candidate === p.holdId) {
         snapped = true;
         await frames(page, 1);
@@ -202,7 +233,7 @@ if (!only || only === 'tutorial') {
       if (Math.hypot(ex, ey) > 3) await moveBy(ex, ey, 2);
     }
     await touch(cdp, 'touchEnd', []);
-    if (!isHip && !snapped) log(`  (released ${p.limb} before the ring lit up)`);
+    if (!isHip && !snapped) log(`  (released ${p.limb} ${isZone ? 'outside the ' + p.status.beat + ' zone' : 'before the ring lit up'})`);
   }
 
   while (Date.now() < deadline) {
@@ -224,26 +255,43 @@ if (!only || only === 'tutorial') {
     const st = await page.evaluate(() => window.__status());
     if (st.phase === 'lesson' && st.step >= 0) {
       stepsSeen.add(st.step);
+      if (st.beat) beatsSeen.add(st.beat);
       const p = await plan();
-      const onHold = await page.evaluate(
-        ([limb, holdId]) => limb !== 'HIP' && window.__sim.getState().limbs[limb].holdId === holdId,
-        [p?.limb, p?.holdId],
+      const zoneBeat = st.beat === 'shake-out' || st.beat === 'chalk';
+      // a beat waits for its zone; a move is pending while the limb isn't on the hold (and not busy in a beat)
+      const ready = await page.evaluate(
+        ([limb, holdId, zone, hasTarget]) => {
+          if (limb === 'HIP') return true;
+          const L = window.__sim.getState().limbs[limb];
+          if (zone) return hasTarget && !L.shakingOut && !L.chalking && !L.busy;
+          return L.holdId !== holdId;
+        },
+        [p?.limb, p?.holdId, zoneBeat, !!st.target],
       );
-      if (p && p.handle && !onHold) {
+      if (p && p.handle && ready) {
         if (!shotsTaken.has(`before-${st.step}-${st.beat}`)) {
           shotsTaken.add(`before-${st.step}-${st.beat}`);
           await frames(page, 2);
           await shot(page, `tut-step${String(st.step + 1).padStart(2, '0')}-a-${st.beat ?? st.lesson.teach}-${st.lesson.limb}`);
         }
-        const mistake = st.step === 0 && !missDone;
-        if (mistake) missDone = true;
+        const mistake = st.step === 0 && !st.beat ? mistakes.shift() ?? null : null;
         await performLesson(st.step, mistake);
         await frames(page, 3);
         if (mistake) {
-          await frames(page, 2);
-          const mb = await bubble(page);
-          ok(!!mb && /Let go right on the hold|Missed!/.test(mb.text), `miss coached: "${mb?.text}"`);
-          await shot(page, 'tut-step01-miss');
+          // the coaching line types out over a few frames
+          let mb = null;
+          const want = mistake === 'miss' ? /Let go right on the hold|Missed!/ : /That’s a shake-out: the arm hangs/;
+          for (let k = 0; k < 40 && !(mb && want.test(mb.text)); k++) {
+            await frames(page, 1);
+            mb = await bubble(page);
+          }
+          ok(!!mb && want.test(mb.text), `${mistake === 'miss' ? 'miss' : 'shake-out lane drop'} coached: "${mb?.text}"`);
+          await shot(page, `tut-step01-${mistake}`);
+        }
+        if (zoneBeat && !shotsTaken.has(`zone-${st.beat}`)) {
+          shotsTaken.add(`zone-${st.beat}`);
+          await frames(page, 6);
+          await shot(page, `tut-beat-${st.beat}`);
         }
         continue;
       }
@@ -254,6 +302,11 @@ if (!only || only === 'tutorial') {
   ok(result === 'done', `tutorial result: ${result}`);
   const total = await page.evaluate(() => window.__status().total);
   ok(stepsSeen.size >= total - 1, `lessons visited: ${stepsSeen.size}/${total}`);
+  ok(beatsSeen.has('shake-out') && beatsSeen.has('chalk'), `Phase B beats: ${[...beatsSeen].join(', ') || 'none'}`);
+  const tr = await page.evaluate(() => window.__trace.join('\n'));
+  ok(/"shake-out-start"/.test(tr), 'a shake-out happened');
+  ok(/"chalk-done"/.test(tr), 'a chalk dip happened');
+  ok(!/SAY.*(Let it hang free|Not quite\. The chalk bag)/.test(tr), 'the beats needed no correction');
   ok(await page.evaluate(() => window.__sim.getState().phase === 'topped'), 'climber topped out');
   await frames(page, 3);
   await shot(page, 'tut-zz-end');
