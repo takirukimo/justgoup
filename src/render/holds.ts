@@ -996,6 +996,72 @@ export function routeHoldLook(hex: string): RouteHoldLook {
   return { color, roughness: 0.48, edgeColor, edgeStrength: 0.3, edgePower: 2.8, lift: 0.07 };
 }
 
+// ───────────────────────────── contact AO across folds ─────────────────────────────
+
+interface AoVert {
+  x: number;
+  y: number;
+  u: number;
+  v: number;
+}
+
+const AO_CORNERS: readonly (readonly [number, number])[] = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+/** A fold sharper than this (degrees) counts as a lip / inside corner for the contact AO. */
+const AO_FOLD_MIN = 2;
+
+/** Fade length (m along the surface) of a hold's contact AO past a convex fold of `deltaDeg`. */
+function aoLipFade(deltaDeg: number): number {
+  // the rigid hold's plane leaves the turned-away panel by d·sin(Δ): gone once that is ~1.5 cm
+  return Math.max(0.02, 0.015 / Math.max(1e-3, Math.sin((deltaDeg * Math.PI) / 180)));
+}
+
+/** Contact AO strength at surface height y for a hold whose home (own panel) is at homeY. */
+export function aoFade(spans: readonly { y1: number; angle: number }[], homeY: number, y: number): number {
+  let a = 1;
+  for (let i = 0; i + 1 < spans.length; i++) {
+    const yb = spans[i].y1;
+    const delta = spans[i].angle - spans[i + 1].angle; // > 0: the upper panel turns away (a lip)
+    if (delta < AO_FOLD_MIN) continue;
+    if (homeY >= yb === y >= yb) continue;
+    a *= Math.max(0, 1 - Math.abs(y - yb) / aoLipFade(delta));
+  }
+  return a;
+}
+
+/** Surface heights inside (lo, hi) where a hold's AO patch must be cut: folds + lip-fade ends. */
+export function aoCuts(spans: readonly { y1: number; angle: number }[], homeY: number, lo: number, hi: number): number[] {
+  const out: number[] = [];
+  const add = (y: number) => {
+    if (y > lo + 1e-5 && y < hi - 1e-5 && !out.some((c) => Math.abs(c - y) < 1e-5)) out.push(y);
+  };
+  for (let i = 0; i + 1 < spans.length; i++) {
+    const yb = spans[i].y1;
+    const delta = spans[i].angle - spans[i + 1].angle;
+    if (Math.abs(delta) < AO_FOLD_MIN / 4) continue;
+    add(yb);
+    if (delta >= AO_FOLD_MIN) add(yb + (homeY >= yb ? -1 : 1) * aoLipFade(delta));
+  }
+  return out.sort((p, q) => p - q);
+}
+
+/** Clip a convex polygon to the half plane dir·(y − c) ≥ 0 (dir = 1 keeps above c, −1 below). */
+function clipY(poly: readonly AoVert[], c: number, dir: 1 | -1): AoVert[] {
+  const out: AoVert[] = [];
+  const n = poly.length;
+  for (let i = 0; i < n; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % n];
+    const da = dir * (a.y - c);
+    const db = dir * (b.y - c);
+    if (da >= 0) out.push(a);
+    if (da >= 0 !== db >= 0) {
+      const t = da / (da - db);
+      out.push({ x: a.x + (b.x - a.x) * t, y: c, u: a.u + (b.u - a.u) * t, v: a.v + (b.v - a.v) * t });
+    }
+  }
+  return out;
+}
+
 // ───────────────────────────── per-boulder hold set ─────────────────────────────
 
 export interface HoldSetOptions {
@@ -1043,6 +1109,8 @@ export class HoldSet {
     this.decoMat = createSurfaceMaterial({ roughness: 0.74, normalMap: speckleNormal(), normalScale: 0.35, normalRepeat: 22, envMapIntensity: 0.32 });
     this.aoMat = new THREE.MeshBasicMaterial({
       color: 0x000000,
+      // per-vertex alpha: the patch fades out past a roof lip (buildAo)
+      vertexColors: true,
       map: softBlobTexture(),
       transparent: true,
       opacity: 0.9,
@@ -1177,42 +1245,76 @@ export class HoldSet {
     trimHoldCache();
   }
 
+  /**
+   * Contact AO under every hold / volume: a soft dark patch on the wall around its footprint.
+   * The patch is laid out in wall-surface coordinates and cut at every panel fold it crosses, so
+   * each piece lies flat on its own panel (no flat quad sticking out into the air past a roof lip,
+   * none buried in the next panel at an inside corner). Past a CONVEX fold (a lip: the next panel
+   * turns away) the hold, which is rigid on its own panel, stands off the surface: the patch fades
+   * out within a few cm of the lip there. Into a concave fold (an inside corner) it wraps on.
+   */
   private buildAo(holds: readonly HoldDef[]): void {
-    const n = holds.length;
-    if (!n) return;
-    const pos = new Float32Array(n * 4 * 3);
-    const uv = new Float32Array(n * 4 * 2);
+    if (!holds.length) return;
+    const pos: number[] = [];
+    const uv: number[] = [];
+    const col: number[] = [];
     const idx: number[] = [];
-    const q = new THREE.Quaternion();
-    const c = new THREE.Vector3();
-    const ax = new THREE.Vector3();
-    const ay = new THREE.Vector3();
-    let k = 0;
+    const spans = this.frame.spans();
+    const p = new THREE.Vector3();
+    const n = new THREE.Vector3();
     for (const h of holds) {
       const g = this.geoms.get(h.id);
       if (!g || this.mounts.has(h.id)) continue;
-      q.setFromAxisAngle(Z, h.angle + Math.PI / 2).premultiply(this.frame.quaternionAt(h.y, _pq));
+      const th = h.angle + Math.PI / 2;
+      const cs = Math.cos(th);
+      const sn = Math.sin(th);
       const spread = h.type === 'volume' ? 1.08 : 1.3;
       const pad = h.type === 'volume' ? 0.035 : 0.018;
-      ax.set(1, 0, 0).applyQuaternion(q).multiplyScalar(g.halfX * spread + pad);
-      ay.set(0, 1, 0).applyQuaternion(q).multiplyScalar(g.halfY * spread + pad);
-      this.frame.toWorldXYZ(h.x, h.y, 0, c).addScaledVector(this.frame.normalAt(h.y, _n, false), 0.0012);
-      const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
-      for (let i = 0; i < 4; i++) {
-        const [sx, sy] = corners[i];
-        pos[(k * 4 + i) * 3] = c.x + ax.x * sx + ay.x * sy;
-        pos[(k * 4 + i) * 3 + 1] = c.y + ax.y * sx + ay.y * sy;
-        pos[(k * 4 + i) * 3 + 2] = c.z + ax.z * sx + ay.z * sy;
-        uv[(k * 4 + i) * 2] = (sx + 1) / 2;
-        uv[(k * 4 + i) * 2 + 1] = (sy + 1) / 2;
+      const ex = g.halfX * spread + pad;
+      const ey = g.halfY * spread + pad;
+      // corners in wall-surface coordinates (x, y) with their patch uv
+      const poly: AoVert[] = [];
+      for (const [sx, sy] of AO_CORNERS) {
+        poly.push({ x: h.x + cs * ex * sx - sn * ey * sy, y: h.y + sn * ex * sx + cs * ey * sy, u: (sx + 1) / 2, v: (sy + 1) / 2 });
       }
-      const b = k * 4;
-      idx.push(b, b + 1, b + 2, b, b + 2, b + 3);
-      k++;
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const v of poly) {
+        lo = Math.min(lo, v.y);
+        hi = Math.max(hi, v.y);
+      }
+      // cut lines: folds inside the patch, plus the end of the fade past each convex fold
+      const cuts = aoCuts(spans, h.y, lo, hi);
+      const fade = (y: number) => aoFade(spans, h.y, y);
+      const bands = cuts.length ? cuts.length + 1 : 1;
+      for (let bi = 0; bi < bands; bi++) {
+        const b0 = bi === 0 ? -Infinity : cuts[bi - 1];
+        const b1 = bi === bands - 1 ? Infinity : cuts[bi];
+        let piece = poly;
+        if (b0 > -Infinity) piece = clipY(piece, b0, 1);
+        if (b1 < Infinity) piece = clipY(piece, b1, -1);
+        if (piece.length < 3) continue;
+        // the fade is linear between cut lines, so the corners carry it exactly
+        const alphas = piece.map((v) => fade(v.y));
+        if (!alphas.some((a) => a > 0.002)) continue;
+        const midY = (Math.max(b0, lo) + Math.min(b1, hi)) / 2;
+        // the piece lies on one panel: its sharp normal lifts it off the plywood
+        this.frame.normalAt(midY, n, false);
+        const base = pos.length / 3;
+        piece.forEach((v, i) => {
+          this.frame.toWorldXYZ(v.x, v.y, 0, p).addScaledVector(n, 0.0012);
+          pos.push(p.x, p.y, p.z);
+          uv.push(v.u, v.v);
+          col.push(0, 0, 0, alphas[i]);
+        });
+        for (let i = 1; i + 1 < piece.length; i++) idx.push(base, base + i, base + i + 1);
+      }
     }
+    if (!idx.length) return;
     const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 4));
     g.setIndex(idx);
     this.aoMesh = new THREE.Mesh(g, this.aoMat);
     this.aoMesh.renderOrder = 1;
