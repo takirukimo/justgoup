@@ -227,6 +227,77 @@ d = await draft();
 check(d.holds.length > 8 && d.holds.every((h) => h.role !== 'deco'), `sample loaded (${d.holds.length} holds, no deco)`);
 await shot('s12-sample', 3500);
 
+// folded wall (a multi-angle sample): taps, drags and pinch zoom pick through the renderer's ray
+// cast, so they land where the finger is on every panel
+await page.evaluate(() => {
+  const d = window.__ed.editor.getDraft();
+  d.profile = [
+    { y0: 0, angle: 0 },
+    { y0: 1.8, angle: 30 },
+    { y0: 3.0, angle: 60 },
+  ];
+  d.holds = d.holds.filter((h) => h.y < 2.9 || h.role === 'top');
+  window.__ed.editor.open(d);
+  window.__ed.renderer.setCameraMode('editor', { instant: true });
+});
+await wait(2500);
+check(await page.evaluate(() => (window.__ed.renderer.getBoulder()?.profile?.length ?? 0) === 3), 'the editor shows the folded wall');
+await shot('s13-folded', 1500);
+await page.evaluate(() => window.__ed.editor['select'](null));
+d = await draft();
+const n0 = d.holds.length;
+// a free spot on the 60° panel and one on the 30° panel
+for (const [x, y] of [[1.35, 3.55], [-1.2, 2.45]]) {
+  const sp = await screenOf(x, y);
+  await page.touchscreen.tap(sp.x, sp.y);
+  await wait(500);
+  const nd = await draft();
+  const h = nd.holds.find((q) => !d.holds.some((o) => o.id === q.id));
+  check(!!h && Math.hypot(h.x - x, h.y - y) < 0.12, `a tap on the folded wall places the hold under the finger (${x}, ${y}) → ${h ? `(${h.x.toFixed(2)}, ${h.y.toFixed(2)})` : 'none'}`);
+  d = nd;
+  await page.evaluate(() => window.__ed.editor['select'](null));
+  await wait(300);
+}
+check(d.holds.length === n0 + 2, `two holds placed on the folded panels (${n0} → ${d.holds.length})`);
+// pinch zoom about a point up on the steep panel: that wall point ends up under the fingers
+const anchorWall = { x: 0.6, y: 3.4 };
+const mid = await screenOf(anchorWall.x, anchorWall.y);
+await ptr([
+  ['pointerdown', 1, mid.x - 40, mid.y],
+  ['pointerdown', 2, mid.x + 40, mid.y],
+  ['pointermove', 1, mid.x - 70, mid.y],
+  ['pointermove', 2, mid.x + 70, mid.y],
+  ['pointermove', 1, mid.x - 100, mid.y],
+  ['pointermove', 2, mid.x + 100, mid.y],
+  ['pointerup', 1, mid.x - 100, mid.y],
+  ['pointerup', 2, mid.x + 100, mid.y],
+]);
+await wait(2500); // the editor camera glides to its new framing
+const under = await page.evaluate(([x, y]) => window.__ed.renderer.screenToWall(x, y), [mid.x, mid.y]);
+const drift = under ? Math.hypot(under.x - anchorWall.x, under.y - anchorWall.y) : 9;
+check(drift < 0.15, `pinch zoom on the steep panel keeps that wall point under the fingers (drift ${(drift * 100).toFixed(0)} cm)`);
+await shot('s14-folded-zoom', 800);
+await ptr([['pointerdown', 1, 60, 300], ['pointerup', 1, 60, 300], ['pointerdown', 1, 62, 302], ['pointerup', 1, 62, 302]]);
+await wait(1200);
+// the angle slider turns the folded wall into one flat panel; undo brings the folds back
+await tapSel('.ed-tool-angle');
+await page.evaluate(() => {
+  const i = document.querySelector('.ed-angle-in');
+  i.value = '20';
+  i.dispatchEvent(new Event('input', { bubbles: true }));
+  i.dispatchEvent(new Event('change', { bubbles: true }));
+});
+await wait(800);
+d = await draft();
+check(!d.profile && d.wallAngle === 20, `the angle slider makes one flat panel (profile ${d.profile ? d.profile.length : 'none'}, ${d.wallAngle}°)`);
+await tapSel('.ed-tool-angle');
+await tapSel('.ed-hist .ed-hbtn');
+await wait(600);
+d = await draft();
+check(d.profile?.length === 3, 'undo restores the folded wall');
+await wait(1500);
+check(await page.evaluate(() => (window.__ed.renderer.getBoulder()?.profile?.length ?? 0) === 3), 'the 3D wall folds again after the undo');
+
 // close
 await tapSel('.ed-x');
 check(await page.evaluate(() => !window.__ed.editor.isOpen && window.__ed.events.includes('close') && !document.querySelector('.ed')), 'close removes the panel and emits editor:close');
