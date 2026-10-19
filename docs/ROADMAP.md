@@ -28,6 +28,12 @@ Backups: branch `backup/v0.1-playtest` (exactly the build that was played, with 
   - Steini (instructor): a CHIRAL SPORTS tee plus "INSTRUCTOR" (small, on the back under the wordmark
     or on the sleeve/chest).
   - Chalk bag: carries the CHIRAL mark.
+- **Gym, sign and wall — DECIDED (2026-10-19):** the gym is called CHIRAL SPORTS (no "HQ"). The
+  backlit sign is the official lockup lit in CHIRAL pink. The climbing wall itself carries no CHIRAL
+  SPORTS lettering; a subtle tone-on-tone mark is fine. Pads and banners keep the wordmark.
+- **Start screen — DECIDED (2026-10-19):** the owner's key art (`assets/art/steibock-key-art.webp`,
+  a climber in the black CHIRAL SPORTS tee) full-bleed, with only the CHIRAL mark, STEIBOCK · BY
+  CHIRAL SPORTS and TAP TO START.
 - **Imports — DECIDED:** photo-to-route first. **ASK FIRST** before building the CHIRAL training board
   (our own steep board in the spirit of MoonBoard/Kilter). Do not import MoonBoard/Kilter data: it is
   proprietary and has no public API.
