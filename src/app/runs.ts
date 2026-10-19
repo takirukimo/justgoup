@@ -7,7 +7,7 @@
 //   CommunityRun   a player-set problem; attempts and sends are recorded on the backend
 //   TestRun        the editor's test climb; resolves whether the problem was sent
 
-import type { BackendAPI, ResultsProps } from '../core/contracts';
+import type { BackendAPI, GenerateOptions, ResultsProps } from '../core/contracts';
 import { bus, type AppEvents } from '../core/events';
 import { hashString, Rng } from '../core/rng';
 import type { BoulderDef, CommunityProblem, LeaderboardMode, Profile, ScoreEntry } from '../core/types';
@@ -153,10 +153,15 @@ export class SendTrainRun extends BaseRun {
     this.bestAtStart = this.profile.best.boulder;
   }
 
-  private optsFor(i: number): { seed: number; grade: number; colorIndex: number } {
+  /**
+   * Problem `i` of this run. `run` hands the generator the run identity so consecutive problems rotate
+   * archetypes (game/archetypes.ts runStyle: never the same style twice in a row, early problems skip
+   * the hardest styles).
+   */
+  private optsFor(i: number): GenerateOptions {
     const rng = new Rng(hashString(`send-train:${this.seed}:${i}`));
     const grade = runGradeFor(i, rng);
-    return { seed: rng.int(1, 0x7ffffffe), grade, colorIndex: rng.int(0, ROUTE_COLORS.length - 1) };
+    return { seed: rng.int(1, 0x7ffffffe), grade, colorIndex: rng.int(0, ROUTE_COLORS.length - 1), run: { seed: this.seed, index: i } };
   }
 
   async play(): Promise<void> {
