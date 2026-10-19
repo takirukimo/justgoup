@@ -330,7 +330,7 @@ export class GameRenderer implements RendererAPI {
     const p = this.preset;
     // thin-hold cue tiers (research §4.4): the glint is the first thing to go on weak GPUs
     HOLD_CUE.uCueGlint.value = p.level === 'low' ? 0.9 : p.level === 'medium' ? 1.2 : 1.4;
-    HOLD_CUE.uCueRim.value = p.level === 'low' ? 0.45 : 0.55;
+    HOLD_CUE.uCueRim.value = p.level === 'low' ? 0.75 : 0.9;
     const shadows = p.shadowMapSize > 0;
     this.gl.shadowMap.enabled = shadows;
     this.key.castShadow = shadows;
@@ -616,7 +616,7 @@ export class GameRenderer implements RendererAPI {
   private updateHoldCue(dt: number): void {
     const st = this.state;
     const live = !!st && this.climberVisible && st.phase === 'climbing' && this.rig.mode === 'follow';
-    const target = live ? (this.pure ? 1.35 : 1) : 0;
+    const target = live ? (this.pure ? 1.5 : 1) : 0;
     this.cueAmt += (target - this.cueAmt) * (1 - Math.exp(-dt / 0.25));
     if (Math.abs(this.cueAmt - target) < 1e-3) this.cueAmt = target;
     HOLD_CUE.uCueAmt.value = this.cueAmt;

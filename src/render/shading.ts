@@ -30,7 +30,7 @@ import * as THREE from 'three';
 export const HOLD_CUE = {
   uCueC: { value: [new THREE.Vector4(0, -50, 0, 0), new THREE.Vector4(0, -50, 0, 0), new THREE.Vector4(0, -50, 0, 0), new THREE.Vector4(0, -50, 0, 0)] },
   uCueAmt: { value: 0 },
-  uCueRim: { value: 0.55 },
+  uCueRim: { value: 0.9 },
   uCueGlint: { value: 1.4 },
   uCurvGain: { value: new THREE.Vector2(0.35, 0.25) },
 };
@@ -167,12 +167,20 @@ const FRAG_CURV = /* glsl */ `
 				vec3 N = normalize(nonPerturbedNormal);
 				vec3 V = normalize(vViewPosition);
 				vec3 G = normalize(vGripV);
+				float ndv = clamp(dot(N, V), 0.0, 1.0);
 				float upF = max(dot(N, G), 0.0);
-				float fres = pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 4.0);
-				float glint = pow(max(dot(N, normalize(V + G)), 0.0), 48.0) * ridge * upF;
+				// rim from the grip side (TF2 style): the hold's grip-side contour catches the light
+				float rimT = pow(1.0 - ndv, 2.0) * smoothstep(0.0, 0.7, upF);
+				// the usable lip: a tight convex roll turned toward the grip side
+				float lip = ridge * smoothstep(0.05, 0.5, upF);
+				// a soft glint on that lip whose half-vector uses the grip direction
+				float glint = pow(max(dot(N, normalize(V + G)), 0.0), 10.0) * lip;
 				// warm off-white, a touch of the hold's own colour: light catching an edge, not paint
 				vec3 cueCol = mix(vec3(1.0, 0.95, 0.88), diffuseColor.rgb, 0.2);
-				outgoingLight += cueCol * (uCueAmt * reach) * (uCueRim * fres * upF * (0.35 + 0.65 * ridge) + uCueGlint * glint) * (1.0 - surfMetal);
+				float k = uCueAmt * reach * (1.0 - surfMetal);
+				outgoingLight += cueCol * k * (uCueRim * (rimT * 1.2 + lip * 0.5) + uCueGlint * glint);
+				// and the hold itself steps forward (its own colour, more on thin, curved holds)
+				outgoingLight += diffuseColor.rgb * k * 0.3 * (0.4 + 0.6 * ridge);
 			}
 		}
 	#endif

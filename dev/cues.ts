@@ -4,7 +4,7 @@
 //   ?pump=0.9        both forearms' pump (pumpL / pumpR per hand)      ?fric=0.1 both hands' friction (fricL / fricR)
 //   ?stress=1.2      hand stress (stressL / stressR; feet: stressF)    ?shake=0.6 per-foot Elvis leg + body shake
 //   ?tension=0.9     overall tension (breathing rate, held breath)      ?t=3 seconds to run before the capture
-//   ?cam=follow|hands|feet|holds   ?q=low|medium|high   ?wall=10 (deg)   ?hud=0
+//   ?cam=follow|hands|feet|holds   ?q=low|medium|high   ?wall=10 (deg)   ?hud=0   ?cueamp=4 (force the cue)
 // window.__cues exposes { renderer, sim } for QA scripts; document.title reports the forced state.
 
 import * as THREE from 'three';
@@ -88,7 +88,7 @@ async function main(): Promise<void> {
   sim.reset();
   sim.start();
   r.setCameraMode('follow', { instant: true });
-  (window as unknown as { __cues: unknown }).__cues = { renderer: r, sim };
+  (window as unknown as { __cues: unknown }).__cues = { renderer: r, sim, HOLD_CUE };
 
   const pumpL = num('pumpL', num('pump', 0));
   const pumpR = num('pumpR', num('pump', 0));
@@ -124,14 +124,19 @@ async function main(): Promise<void> {
   const dt = 1 / 60;
   const until = num('t', 2.5);
   let t = 0;
-  const step = (): void => {
+  let k = 0;
+  /** One sim step; the renderer draws every `every`-th step (with the time it covered). */
+  const step = (every = 1): void => {
     sim.step(dt);
     r.updateClimber(force(sim.getState()), dt);
-    if (qs.get('cue') === '0') HOLD_CUE.uCueAmt.value = 0;
-    r.frame(dt);
     t += dt;
+    if (++k % every) return;
+    if (qs.get('cue') === '0') HOLD_CUE.uCueAmt.value = 0;
+    else if (qs.has('cueamp')) HOLD_CUE.uCueAmt.value = num('cueamp', 1);
+    r.frame(dt * every);
   };
-  while (t < until) step();
+  // warm up (headless GPUs are slow: draw a frame every 10 steps)
+  while (t < until) step(10);
 
   const cam = qs.get('cam') ?? 'follow';
   if (cam !== 'follow') {
@@ -153,6 +158,7 @@ async function main(): Promise<void> {
   const info = `pure ${pure} cue ${HOLD_CUE.uCueAmt.value.toFixed(2)} | pump ${pumpL}/${pumpR} fric ${fricL}/${fricR} stress ${stressL ?? '-'}/${stressR ?? '-'} shake ${shake ?? '-'} tension ${tension ?? st.tension.toFixed(2)} | ${q}`;
   document.title = info;
   hudEl.textContent = info;
+  (window as unknown as { __cuesReady: boolean }).__cuesReady = true;
   const tick = (): void => {
     step();
     requestAnimationFrame(tick);
