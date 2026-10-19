@@ -82,7 +82,7 @@ const TIP_DEFS: readonly Tip[] = [
   T('Feet can go above your hips. Heel or toe hook it, then pull your hips in.', 'feet', 'balance'),
   T('Two footholds a foot apart in a roof? Jam heel and toe between them: a cam.', 'feet', 'steep'),
   T('Feet locked in a roof? Let go, hang like a bat, shake out, then sit up.', 'pump', 'steep'),
-  T('No feet, one good jug? Hook your leg over that arm and sit on it: a figure 4.', 'dyno', 'arms'),
+  T('No feet? Hook a leg over the arm on your jug and sit: a figure 4.', 'dyno', 'arms'),
 ] as const;
 
 /** Every tip, in a stable order. */
