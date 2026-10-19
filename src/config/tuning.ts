@@ -381,10 +381,13 @@ export const SIM = {
   chalkTime: 1.0,
   /**
    * Chalk wear per second on the wall and per hand move; friction = 1 − smoothstep(wear) (1 = fresh
-   * chalk, 0 = sweaty). Lead: fresh → sweaty over ≈5 hand moves at a lead pace (≈35 s) [40];
-   * bouldering: noticeable (friction ≈0.65) only after ≈50 s and 10 moves.
+   * chalk, 0 = sweaty). Lead: fresh → sweaty over ≈5 hand moves at a lead pace (≈35 s) [40].
+   * Bouldering (owner DECISION, v0.2 playtest): a boulder attempt is 27–39 s on chalk from the start
+   * (research [40], "boulderers chalk before each 30–40 s attempt"), so hands never get greasy in any
+   * noticeable way there — no wear at all, friction stays 1 and no chalk dip is needed (the gesture stays
+   * harmless and cosmetic). ClimberSim.chalkMatters tells the app which model a climb uses.
    */
-  sweatBoulder: { perSecond: 1 / 250, perMove: 0.02 },
+  sweatBoulder: { perSecond: 0, perMove: 0 },
   sweatLead: { perSecond: 1 / 70, perMove: 0.1 },
 
   // ── Shake-out ──

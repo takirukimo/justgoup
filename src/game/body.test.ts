@@ -439,27 +439,82 @@ describe('chalk & sweat (research §2.7, §6.5)', () => {
     }
   };
 
-  it('fades within ≈5 moves on lead, but only slowly when bouldering', () => {
+  it('fades within ≈5 moves on lead; bouldering keeps fresh chalk (owner decision: no chalking needed)', () => {
     const lead = new ClimberSim(makeBoulder(holds(), { mode: 'rope', height: 15, width: 4.4, quickdraws: [{ id: 'q0', x: 0.9, y: 2.2 }] }));
     const boulder = new ClimberSim(makeBoulder(holds()));
+    expect(lead.chalkMatters).toBe(true);
+    expect(boulder.chalkMatters).toBe(false);
     for (const sim of [lead, boulder]) {
       sim.start();
       expect(sim.getState().limbs.RH.friction).toBe(1);
       shuffle(sim, 6);
     }
-    // lead: fresh → sweaty within ≈5 moves (≈35 s); bouldering: barely noticeable after 6 moves / ≈40 s
+    // lead: fresh → sweaty within ≈5 moves (≈35 s); bouldering: not noticeable at all
     expect(lead.getState().limbs.RH.friction!).toBeLessThan(0.1);
-    expect(boulder.getState().limbs.RH.friction!).toBeGreaterThan(0.75);
-    // the hand that didn't move wore less (each hand move costs chalk)
-    expect(boulder.getState().limbs.LH.friction!).toBeGreaterThan(boulder.getState().limbs.RH.friction!);
-    // time alone wears it too (bouldering: noticeable after ≈50–60 s)
-    run(boulder, 30);
-    expect(boulder.getState().limbs.LH.friction!).toBeLessThan(0.85);
-    expect(boulder.getState().limbs.LH.friction!).toBeGreaterThan(0.4);
+    expect(boulder.getState().limbs.RH.friction!).toBeGreaterThan(0.999);
+    // lead: the hand that didn't move wore less (each hand move costs chalk)
+    expect(lead.getState().limbs.LH.friction!).toBeGreaterThan(lead.getState().limbs.RH.friction!);
+    // bouldering: a long session on the wall (2 more minutes) still needs no chalk
+    run(boulder, 120);
+    expect(boulder.getState().limbs.LH.friction!).toBeGreaterThan(0.999);
+    expect(boulder.getState().limbs.RH.friction!).toBeGreaterThan(0.999);
+    // the grip model can be chosen per climb (a boulder-style test of the lead model and back)
+    const leadOnBoulder = new ClimberSim(makeBoulder(holds()), { grip: 'lead' });
+    expect(leadOnBoulder.chalkMatters).toBe(true);
+    expect(new ClimberSim(makeBoulder(holds(), { mode: 'rope', height: 15, width: 4.4 }), { grip: 'boulder' }).chalkMatters).toBe(false);
+  });
+
+  it('a chalk dip while bouldering is harmless: refused when the other limbs cannot hold well, cosmetic otherwise', () => {
+    // a good stance: the dip happens (cosmetic, friction already 1)
+    const good = new ClimberSim(makeBoulder(holds()));
+    good.start();
+    run(good, 1);
+    expect(good.chalkUp('RH')).toBe(true);
+    const ev = run(good, SIM.chalkTime + 0.3);
+    expect(ev.some((e) => e.type === 'slip' || e.type === 'fall')).toBe(false);
+    expect(good.getState().limbs.RH.holdId).toBe('s2');
+    expect(good.getState().limbs.RH.friction!).toBeGreaterThan(0.999);
+    // a stance that would not hold on one hand (poor crimps, feet off on an overhang): refused, the hand stays on
+    const bad = new ClimberSim(
+      makeBoulder([hold('s1', -0.2, 1.9, 'crimp', 0.035, 'start'), hold('s2', 0.2, 1.9, 'crimp', 0.035, 'start'), hold('t', 0, 4.1, 'jug', 0.12, 'top')], { wallAngle: 30 }),
+      { invincible: true },
+    );
+    bad.start();
+    run(bad, 1);
+    expect(bad.chalkUp('RH')).toBe(false);
+    expect(bad.getState().limbs.RH.holdId).toBe('s2');
+    // lead keeps the old rule: the dip is the climber's risk
+    const leadBad = new ClimberSim(
+      makeBoulder([hold('s1', -0.2, 1.9, 'crimp', 0.035, 'start'), hold('s2', 0.2, 1.9, 'crimp', 0.035, 'start'), hold('t', 0, 4.1, 'jug', 0.12, 'top')], { wallAngle: 30 }),
+      { invincible: true, grip: 'lead' },
+    );
+    leadBad.start();
+    run(leadBad, 1);
+    expect(leadBad.chalkUp('RH')).toBe(true);
+  });
+
+  it('the natural chalk-up before a boulder: both hands dip in the preview (idle), nothing slips, the clock does not run', () => {
+    const sim = new ClimberSim(makeBoulder(holds()));
+    expect(sim.getState().phase).toBe('idle');
+    expect(sim.chalkUp('RH')).toBe(true);
+    const ev = run(sim, SIM.chalkTime + 0.2);
+    expect(sim.chalkUp('LH')).toBe(true);
+    run(sim, SIM.chalkTime + 0.2, ev);
+    const s = sim.getState();
+    expect(s.phase).toBe('idle');
+    expect(s.time).toBe(0);
+    expect(s.limbs.LH.holdId).toBe('s1');
+    expect(s.limbs.RH.holdId).toBe('s2');
+    expect(ev.filter((e) => e.type === 'chalk-done').length).toBe(2);
+    expect(ev.some((e) => e.type === 'slip' || e.type === 'fall')).toBe(false);
+    expect(sim.getStats().chalkUps).toBe(0);
+    sim.start();
+    sim.step(0);
+    expect(sim.getState().phase).toBe('climbing');
   });
 
   it('sweaty hands lose most on slopers, least on jugs', () => {
-    const sim = new ClimberSim(makeBoulder(holds()), { sweat: 4 });
+    const sim = new ClimberSim(makeBoulder(holds()), { sweat: 4, grip: 'lead' });
     sim.start();
     run(sim, 0.5);
     const c0 = { L: sim.getState().limbs.LH.capacity, R: sim.getState().limbs.RH.capacity };
@@ -474,8 +529,10 @@ describe('chalk & sweat (research §2.7, §6.5)', () => {
   });
 
   it('chalkUp: the hand leaves for ≈1 s (busy, the other limbs hold), returns to its hold with fresh chalk', () => {
-    const sim = new ClimberSim(makeBoulder(holds()), { sweat: 4 });
-    expect(sim.chalkUp('RH')).toBe(false); // not before the climb starts
+    const sim = new ClimberSim(makeBoulder(holds()), { sweat: 4, grip: 'lead' });
+    sim.forceFall();
+    expect(sim.chalkUp('RH')).toBe(false); // not while falling
+    sim.reset();
     sim.start();
     run(sim, 40);
     expect(sim.getState().limbs.RH.friction!).toBeLessThan(0.5);

@@ -62,10 +62,12 @@
  * unbroken high-force grips: occlusion); free hands recover with a half-time (×1.3 shaking out), a
  * slow residual lowers CF on long climbs. The spent forearm's hand slips — no global pump meter;
  * ClimberState.pump is the max of LimbSnapshot.pump. 'pump-warning' when a forearm crosses SIM.pumpWarn.
- * Chalk: per-hand friction (1 fresh … 0 sweaty) wears with time on the wall and every hand move
- * (fast on lead, slow when bouldering) and costs capacity (slopers most, jugs least). chalkUp(hand),
- * or a hand dropped at the hips, dips it into the bag for SIM.chalkTime (busy; 'chalk-start' /
- * 'chalk-done' + 'return'). Shake-out: shakeOut(hand), or a hand dropped down beside the body while
+ * Chalk: on lead per-hand friction (1 fresh … 0 sweaty) wears with time on the wall and every hand move
+ * and costs capacity (slopers most, jugs least); in every boulder mode it doesn't wear (owner decision:
+ * nobody chalks up mid-boulder; chalkMatters / ClimberSimOptions.grip). chalkUp(hand), or a hand dropped
+ * at the hips, dips it into the bag for SIM.chalkTime (busy; 'chalk-start' / 'chalk-done' + 'return'):
+ * on a boulder a harmless cosmetic gesture (refused unless the other limbs hold well), and allowed in
+ * the preview ('idle') for the natural chalk-up before the start. Shake-out: shakeOut(hand), or a hand dropped down beside the body while
  * the other hand holds well: it hangs by the side and recovers faster ('shake-out-start' / -end).
  *
  * ── Foot techniques ──────────────────────────────────────────────────────────────────
@@ -171,6 +173,13 @@ export interface ClimberSimOptions extends SimOptions {
   strength?: number;
   /** Sweat rate multiplier for chalk wear (1 = research rates, 1.5 ≈ a humid gym, 0 = chalk never wears). */
   sweat?: number;
+  /**
+   * Which chalk / grip model the climb uses: 'lead' — chalk wears with time and hand moves and a dip
+   * restores it (SIM.sweatLead); 'boulder' — no meaningful wear (SIM.sweatBoulder: friction stays 1; a
+   * chalk dip is a harmless, cosmetic gesture). Default: 'lead' on rope routes, 'boulder' otherwise
+   * (Send Train, Daily, Community, tutorial, editor test climbs). Read back as ClimberSim.chalkMatters.
+   */
+  grip?: 'boulder' | 'lead';
 }
 
 interface LimbRt {
@@ -467,6 +476,13 @@ export class ClimberSim implements ClimberSimAPI {
   private readonly state: ClimberState;
   private readonly stats: SimStats = { slips: 0, maxTension: 0, shakeTime: 0, moves: 0, maxHeight: 0, chalkUps: 0, shakeOuts: 0, maxPump: 0 };
 
+  /**
+   * Optional extra (not in ClimberSimAPI): does chalk matter on this climb? True on lead (the hands sweat,
+   * LimbSnapshot.friction fades, a chalk dip restores it); false in every boulder mode, where friction
+   * stays 1 and a chalk dip is a harmless cosmetic gesture — the app hides the CHALK HUD controls then.
+   */
+  readonly chalkMatters: boolean;
+
   // Phase B body model
   private readonly strength: number;
   private readonly sweatT: number;
@@ -500,9 +516,11 @@ export class ClimberSim implements ClimberSimAPI {
     this.invincible = !!opts.invincible;
     this.strength = clamp(Number.isFinite(opts.strength) ? opts.strength! : 1, 0.4, 3);
     const sweat = Math.max(0, Number.isFinite(opts.sweat) ? opts.sweat! : 1);
-    const rates = boulder.mode === 'rope' ? SIM.sweatLead : SIM.sweatBoulder;
+    const lead = opts.grip ? opts.grip === 'lead' : boulder.mode === 'rope';
+    const rates = lead ? SIM.sweatLead : SIM.sweatBoulder;
     this.sweatT = rates.perSecond * sweat;
     this.sweatM = rates.perMove * sweat;
+    this.chalkMatters = this.sweatT > 0 || this.sweatM > 0;
     this.forearms = [new Forearm(this.strength), new Forearm(this.strength)];
     this.holdById = new Map(boulder.holds.map((h) => [h.id, h] as const));
     this.handHolds = boulder.holds.filter(usableByHand);
@@ -785,10 +803,14 @@ export class ClimberSim implements ClimberSimAPI {
    * the other limbs hold the climber), then returns to its hold with fresh chalk (friction 1).
    * Events: 'release' (if it held a hold), 'chalk-start', later 'chalk-done' + 'return'. Refused while
    * the other hand isn't on a hold, during a flight, or when the hand is busy / dragged.
+   * Also allowed before the climb starts (phase 'idle', the preview / countdown): the natural chalk-up
+   * before a boulder, purely cosmetic (no clock, nothing can slip). Where chalk doesn't matter (every
+   * boulder mode, chalkMatters false) a dip is harmless: it is only started when the other limbs hold the
+   * climber comfortably (the shake-out rule), else refused and the hand stays.
    */
   chalkUp(hand: 'LH' | 'RH'): boolean {
     const i = LIMB_INDEX[hand];
-    if (i > 1 || this.phase !== 'climbing' || this.flight) return false;
+    if (i > 1 || (this.phase !== 'climbing' && this.phase !== 'idle') || this.flight) return false;
     const L = this.limbs[i];
     if (L.busy || L.dragging) return false;
     const held = L.hold;
@@ -877,6 +899,11 @@ export class ClimberSim implements ClimberSimAPI {
   private canShakeOut(i: number): boolean {
     const o = this.limbs[1 - i];
     if (!o.hold || o.dragging || o.busy) return false;
+    return this.canHoldWithout(i);
+  }
+
+  /** Does the stance without limb i (it may already be off) hold well (worst stress ≤ SIM.shakeOutMaxStress)? */
+  private canHoldWithout(i: number): boolean {
     this.buildContacts();
     const saved = this.contacts[i];
     this.contacts[i] = null;
@@ -912,14 +939,16 @@ export class ClimberSim implements ClimberSimAPI {
   private startChalk(i: number, out: SimEvent[], returnAfter = true): boolean {
     const L = this.limbs[i];
     const o = this.limbs[1 - i];
-    if (!o.hold || o.dragging || o.busy || this.phase !== 'climbing') return false;
+    if (!o.hold || o.dragging || o.busy || (this.phase !== 'climbing' && this.phase !== 'idle')) return false;
+    // bouldering: chalk is cosmetic, so a dip never costs the climber the problem
+    if (!this.chalkMatters && this.phase === 'climbing' && !this.canHoldWithout(i)) return false;
     if (L.shakeOut) this.endShakeOut(i);
     L.busy = true;
     L.busyKind = 'chalk';
     L.busyT = SIM.chalkTime;
     L.busyDraw = null;
     if (!returnAfter) L.prevHold = null;
-    this.stats.chalkUps++;
+    if (this.phase === 'climbing') this.stats.chalkUps++;
     out.push({ type: 'chalk-start', limb: LIMB_IDS[i] });
     // hold still while the hand is in the bag: the other three limbs keep the current position
     this.posture.px = this.P.x;
