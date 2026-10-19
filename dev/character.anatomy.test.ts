@@ -15,7 +15,7 @@ import { generateBoulder, generateRopeRoute } from '../src/game/generator';
 import { ClimberSim } from '../src/game/climber-sim';
 import { BetaBot } from '../src/game/bot';
 import { RopeSystem } from '../src/game/rope';
-import { ClimberModel } from '../src/render/climber';
+import { BONE, ClimberModel } from '../src/render/climber';
 import { WallFrame } from '../src/render/wall-frame';
 import { measureRig, PEN_BAD, FLOOR_BAD, type Measure } from './character-probe';
 
@@ -184,6 +184,35 @@ function run(b: BoulderDef, T: Tally, opts: { secs: number; fallAt?: number; tag
     if (m.pen > PEN_BAD) {
       T.penFrames++;
       ph.pen++;
+      if (/head/.test(m.what) && process.env.HEADLOG) {
+        // which head sphere (neck-bone frame: y up the head, z toward the face) and how the arm sits
+        const nb = model.rig.bones[BONE.neck];
+        const qi = nb.quaternion.clone().invert();
+        let k = 0;
+        let best = { pen: 0, j: -1, loc: new THREE.Vector3(), r: 0 };
+        const headN = model.rig.headProxyCount;
+        const heads: { p: THREE.Vector3; r: number }[] = [];
+        model.rig.forEachProxy((a, _b, ra) => {
+          if (k >= 4 && k < 4 + headN) heads.push({ p: a.clone(), r: ra });
+          k++;
+        });
+        const side = /L$/.test(m.what) ? 0 : 1;
+        const J = model.rig.joints;
+        for (let j = 0; j < heads.length; j++) {
+          for (const [a, b, ra] of [[J.shoulder[side], J.elbow[side], 0.05], [J.elbow[side], J.wrist[side], 0.04]] as const) {
+            const ab = b.clone().sub(a);
+            const t = Math.max(0, Math.min(1, heads[j].p.clone().sub(a).dot(ab) / ab.lengthSq()));
+            const d = heads[j].p.distanceTo(a.clone().addScaledVector(ab, t));
+            const pen = heads[j].r + ra - d;
+            if (pen > best.pen) best = { pen, j, loc: heads[j].p.clone().sub(nb.position).applyQuaternion(qi), r: heads[j].r };
+          }
+        }
+        const sh = J.shoulder[side];
+        const hw = J.wrist[side].clone().sub(sh);
+        const key = `headsph${best.j} (${best.loc.x.toFixed(2)},${best.loc.y.toFixed(2)},${best.loc.z.toFixed(2)} r${best.r.toFixed(2)})`;
+        T.pairs[key] = (T.pairs[key] ?? 0) + 1;
+        if (T.penLog.length < 40 && i % 30 === 0) T.penLog.push(`${(m.pen * 100).toFixed(1)}cm ${m.what} ${key} wrist-shoulder ${hw.x.toFixed(2)},${hw.y.toFixed(2)},${hw.z.toFixed(2)} ${where}`);
+      }
       if (/shin|thigh/.test(m.what) && !/belly|chest|head|fore|upper/.test(m.what)) {
         // leg ↔ leg: are the feet crossed (left foot right of the right foot, along the body's right)?
         const lf = st.limbs.LF.pos;
