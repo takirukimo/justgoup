@@ -3327,6 +3327,8 @@ export class ClimberModel extends THREE.Group {
    */
   private hipPush = 0;
   private armPush = 0;
+  /** Landed under an overhang: the climber steps back from the wall until the head clears it. */
+  private landBack = 0;
   // ── Phase B techniques (LimbSnapshot.chalking / shakingOut / flying / pump / footMode) ──
   /** Per hand: seconds into the chalk-up (−1 = not chalking) and the blend toward the bag. */
   private chalkT = [-1, -1];
@@ -3475,6 +3477,7 @@ export class ClimberModel extends THREE.Group {
       if (this.phase === null) snap = true;
       else if (ph === 'idle') enteringIdle = true;
       if (ph === 'falling' || ph === 'idle') this.celebrateT = -1;
+      if (ph !== 'landed') this.landBack = 0;
       // the send celebration plays automatically on topping out (celebrate() can also trigger it)
       if (ph === 'topped' && this.celebrateT < 0) this.celebrateT = 0;
       this.phase = ph;
@@ -3601,6 +3604,10 @@ export class ClimberModel extends THREE.Group {
       // never sit lower than a deep squat on the pad (the legs would fold through it)
       this.rawP.y = Math.max(this.rawP.y, pad + 0.46);
       this.rawP.y = this.rawP.y + (Math.max(this.rawP.y, standY) - this.rawP.y) * st;
+      // standing up under an overhang: step back from the wall until the head (horns, cap) clears it
+      const def = this.rig.headWallDeficit;
+      if (def > 0) this.landBack += (Math.min(0.7, this.landBack + def * 1.2) - this.landBack) * (snap ? 1 : dampK(4, d));
+      this.rawP.addScaledVector(this.Nh, this.landBack);
       // relaxed weight shift once standing
       this.rawP.addScaledVector(frame.right, Math.sin(this.time * 0.85) * 0.018 * st);
       this.rawP.y -= (0.5 + 0.5 * Math.sin(this.time * 1.7)) * 0.006 * st;
@@ -3809,7 +3816,7 @@ export class ClimberModel extends THREE.Group {
     } else if (ph === 'landed') {
       const st = this.sStand;
       // crouch: hands toward the knees/pad (sim) → stand: hanging relaxed at the sides
-      this.v1.copy(S).addScaledVector(WORLD_UP, -0.525).addScaledVector(this.goal.chestRight, side * 0.06).addScaledVector(this.Nh, -0.045);
+      this.v1.copy(S).addScaledVector(WORLD_UP, -0.52).addScaledVector(this.goal.chestRight, side * 0.1).addScaledVector(this.Nh, -0.045);
       this.v1.addScaledVector(this.Nh, Math.sin(t * 0.8 + s * 1.7) * 0.012 * st);
       // little shake-out of the forearms once standing (pumped climbers do this)
       const shakeOut = st > 0.95 ? sstep(0, 0.2, Math.sin(this.phaseT * 0.9 + s) - 0.75) : 0;
