@@ -9,10 +9,13 @@ import type {
   HeadId,
   HoldDef,
   HoldRole,
+  HoldShape,
   HoldType,
   LeaderboardMode,
   QuickdrawDef,
+  RouteStyle,
   ScoreEntry,
+  WallPanel,
 } from '../core/types';
 import { HEADS } from '../config/skins';
 import { cleanRemoteName, isProfane, randomClimberName, sanitizeName } from './names';
@@ -29,12 +32,18 @@ export const LIMITS = {
   quickdrawsMax: 60,
   /** Serialized BoulderDef budget (matches the `octet_length(data::text) < 60000` check). */
   boulderBytesMax: 60_000,
+  /** Multi-angle walls (Phase B): panels per wall and their angle range (90 = a flat roof). */
+  panelsMax: 8,
+  panelAngleMin: -20,
+  panelAngleMax: 90,
 } as const;
 
 export const HEAD_IDS: readonly HeadId[] = HEADS.map((h) => h.id);
 export const LEADERBOARD_MODES: readonly LeaderboardMode[] = ['boulder', 'rope', 'daily'];
 const HOLD_TYPES: readonly HoldType[] = ['jug', 'edge', 'crimp', 'sloper', 'pinch', 'pocket', 'foot', 'volume'];
 const HOLD_ROLES: readonly HoldRole[] = ['start', 'hand', 'foot', 'top', 'deco'];
+const HOLD_SHAPES: readonly HoldShape[] = ['bucket', 'horn', 'rail', 'micro', 'chip', 'macro', 'dual-tex', 'wood'];
+const ROUTE_STYLES: readonly RouteStyle[] = ['vertical', 'slab', 'overhang', 'cave', 'traverse', 'dyno', 'compression', 'mixed', 'zigzag', 'diagonal'];
 const DAILY_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 const HEX_RE = /^#[0-9a-fA-F]{6}$/;
 const ID_RE = /^[A-Za-z0-9_.:\-]{1,64}$/;
@@ -156,7 +165,7 @@ function parseHold(raw: unknown): HoldDef | null {
   if (typeof raw.type !== 'string' || !(HOLD_TYPES as readonly string[]).includes(raw.type)) return null;
   if (typeof raw.role !== 'string' || !(HOLD_ROLES as readonly string[]).includes(raw.role)) return null;
   if (Math.abs(x) > 50 || y < -1 || y > 50) return null;
-  return {
+  const h: HoldDef = {
     id: raw.id,
     x,
     y,
@@ -167,6 +176,34 @@ function parseHold(raw: unknown): HoldDef | null {
     color: typeof raw.color === 'string' && HEX_RE.test(raw.color) ? raw.color : '#EDEDED',
     seed: clampInt(raw.seed, 0, 0x7fffffff, 1),
   };
+  // optional hold variety (Phase B): what the sim's grip model and the renderer's shapes read
+  const depth = num(raw.edgeDepthMm);
+  if (depth !== null) h.edgeDepthMm = clamp(depth, 2, 80);
+  const lip = num(raw.lipAngle);
+  if (lip !== null) h.lipAngle = clamp(lip, -60, 60);
+  if (raw.fingers === 1 || raw.fingers === 2 || raw.fingers === 3 || raw.fingers === 4) h.fingers = raw.fingers;
+  if (typeof raw.shape === 'string' && (HOLD_SHAPES as readonly string[]).includes(raw.shape)) h.shape = raw.shape as HoldShape;
+  if (typeof raw.onVolume === 'string' && PART_ID_RE.test(raw.onVolume)) h.onVolume = raw.onVolume;
+  return h;
+}
+
+/**
+ * A multi-angle wall (BoulderDef.profile): 2…LIMITS.panelsMax panels starting at 0, rising y0 inside
+ * the wall, angles in range. Anything else is not a profile (the wall stays flat).
+ */
+function parseProfile(raw: unknown, height: number): WallPanel[] | null {
+  if (!Array.isArray(raw) || raw.length < 2 || raw.length > LIMITS.panelsMax) return null;
+  const out: WallPanel[] = [];
+  for (const p of raw) {
+    if (!isObj(p)) return null;
+    const y0 = num(p.y0);
+    const angle = num(p.angle);
+    if (y0 === null || angle === null || y0 < 0 || y0 >= height) return null;
+    if (out.length && y0 <= out[out.length - 1].y0) return null;
+    out.push({ y0, angle: clamp(angle, LIMITS.panelAngleMin, LIMITS.panelAngleMax) });
+  }
+  if (out[0].y0 !== 0) return null;
+  return out;
 }
 
 function parseQuickdraw(raw: unknown): QuickdrawDef | null {
@@ -224,6 +261,16 @@ export function parseBoulder(raw: unknown, opts: ParseBoulderOptions = {}): Boul
     }
     out.quickdraws = qd;
   }
+  // multi-angle wall: its panels, and wallAngle = the steepest one (labels, grading), as everywhere
+  const profile = parseProfile(raw.profile, height);
+  if (profile) {
+    out.profile = profile;
+    out.wallAngle = Math.max(...profile.map((p) => p.angle));
+  }
+  if (typeof raw.style === 'string' && (ROUTE_STYLES as readonly string[]).includes(raw.style)) out.style = raw.style as RouteStyle;
+  // a hold stays mounted on a route volume only if that volume is in the problem
+  const volumes = new Set(holds.filter((h) => h.type === 'volume').map((h) => h.id));
+  for (const h of holds) if (h.onVolume && (h.type === 'volume' || !volumes.has(h.onVolume))) delete h.onVolume;
   const author = cleanRemoteName(raw.author);
   if (author) out.author = author;
   const t = num(raw.createdAt);

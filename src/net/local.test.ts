@@ -258,3 +258,48 @@ describe('community problems', () => {
     expect(g.sends).toBe(ghost.sends + 1);
   });
 });
+
+describe('parseBoulder (Phase B walls + holds)', () => {
+  const base = {
+    id: 'b1',
+    name: 'Fold',
+    grade: 3,
+    mode: 'boulder',
+    wallAngle: 70,
+    width: 4.6,
+    height: 4.5,
+    color: '#F2C230',
+    seed: 7,
+    style: 'cave',
+    holds: [
+      { id: 's', x: 0, y: 1.5, type: 'jug', size: 0.1, angle: -1.57, role: 'start', color: '#F2C230', seed: 1, shape: 'bucket' },
+      { id: 'v', x: 0.5, y: 2.2, type: 'volume', size: 0.3, angle: -1.57, role: 'hand', color: '#F2C230', seed: 2 },
+      { id: 'm', x: 0.5, y: 2.3, type: 'pinch', size: 0.06, angle: 0, role: 'hand', color: '#F2C230', seed: 3, onVolume: 'v', edgeDepthMm: 30, lipAngle: 10, fingers: 2 },
+      { id: 't', x: 0.2, y: 3.9, type: 'jug', size: 0.11, angle: -1.57, role: 'top', color: '#F2C230', seed: 4, onVolume: 'nope' },
+    ],
+    profile: [
+      { y0: 0, angle: 5 },
+      { y0: 1.7, angle: 40 },
+      { y0: 3.2, angle: 70 },
+    ],
+  };
+
+  it('keeps a multi-angle wall, its style and the hold variety (a published folded sample stays folded)', () => {
+    const b = parseBoulder(base, { requireClimbable: true })!;
+    expect(b.profile).toEqual(base.profile);
+    expect(b.wallAngle).toBe(70); // steepest panel, beyond the flat-wall clamp
+    expect(b.style).toBe('cave');
+    expect(b.holds[0].shape).toBe('bucket');
+    expect(b.holds[2]).toMatchObject({ onVolume: 'v', edgeDepthMm: 30, lipAngle: 10, fingers: 2 });
+    expect(b.holds[3].onVolume).toBeUndefined(); // no such volume
+  });
+
+  it('drops a malformed profile (the wall stays flat, clamped)', () => {
+    for (const profile of [[{ y0: 0, angle: 5 }], [{ y0: 1, angle: 5 }, { y0: 2, angle: 30 }], [{ y0: 0, angle: 5 }, { y0: 0, angle: 30 }], [{ y0: 0, angle: 5 }, { y0: 9, angle: 30 }], 'x']) {
+      const b = parseBoulder({ ...base, profile, style: 'bogus' })!;
+      expect(b.profile).toBeUndefined();
+      expect(b.style).toBeUndefined();
+      expect(b.wallAngle).toBe(45);
+    }
+  });
+});
