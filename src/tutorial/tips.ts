@@ -57,7 +57,7 @@ const TIP_DEFS: readonly Tip[] = [
   T('Weight over the foot you want to stand on. Then stand.', 'balance', 'hips'),
   T('Tension gauge past the notch? Stop. Fix your feet. Then move.', 'balance', 'pump'),
   T('On slabs, trust your feet and keep your heels low.', 'feet', 'balance', 'slab'),
-  T('Chalk up, calm down, send.', 'mind'),
+  T('Deep breath, calm down, send.', 'mind'),
   T('Stuck? Try the move with the other hand first. Beta is a puzzle.', 'reading', 'mind'),
   T('Out of ideas? HINT shows my next move, but every hint costs points.', 'reading', 'mind'),
   T('The crash pad is soft. Your ego is not. Fall anyway, learn faster.', 'mind'),

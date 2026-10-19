@@ -1242,6 +1242,12 @@ if (want('lead')) {
 
 // ───────────────────────────── Settings → Start over (last: it wipes the profile) ─────────────────────────────
 if (want('startover')) {
+  // the step before (lead) ends on the modes screen: back to the title first
+  if ((await screen()) !== 'title') {
+    await tap('.btn-back', 'back');
+    await waitScreen('title', 60000);
+    await veilClear();
+  }
   await tapText('SETTINGS');
   await waitScreen('settings');
   await page.waitForTimeout(900);
