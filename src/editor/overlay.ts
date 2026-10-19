@@ -14,6 +14,8 @@ export interface Projector {
   toScreen(p: Vec2, depth?: number): { x: number; y: number; visible: boolean };
   /** CSS px per wall meter (uniform for the straight-on editor camera). */
   ppm(): number;
+  /** Height above the wall a hold is drawn at (a hold bolted onto a volume sits on its face). */
+  depth?(h: HoldDef): number;
 }
 
 export interface OverlayGhost {
@@ -27,6 +29,8 @@ export interface OverlayGhost {
   showTnuts: boolean;
   /** Draw the footprint ring (hover preview, or a refused spot). */
   ring: boolean;
+  /** Height above the wall (a spot on a volume's face). */
+  depth?: number;
 }
 
 export interface OverlayState {
@@ -176,7 +180,7 @@ export class EditorOverlay {
     for (const h of b.holds) {
       const t = this.tags.get(h.id);
       if (!t) continue;
-      const sp = proj.toScreen(h);
+      const sp = proj.toScreen(h, proj.depth?.(h) ?? 0);
       const r = footprint(h) * ppm;
       const mini = t.role === 'foot' && ppm < 150;
       const x = sp.x + r * 0.78 + (mini ? 3 : 6);
@@ -266,7 +270,7 @@ export class EditorOverlay {
     for (const h of b.holds) {
       const c = this.flags.get(h.id);
       if (!c) continue;
-      const sp = proj.toScreen(h);
+      const sp = proj.toScreen(h, proj.depth?.(h) ?? 0);
       c.setAttribute('cx', f1(sp.x));
       c.setAttribute('cy', f1(sp.y));
       c.setAttribute('r', f1(Math.max(9, footprint(h) * ppm + 5)));
@@ -305,7 +309,7 @@ export class EditorOverlay {
     for (const g of this.betaEls) {
       const h = b.holds.find((x) => x.id === g.dataset.id);
       if (!h) continue;
-      const sp = proj.toScreen(h);
+      const sp = proj.toScreen(h, proj.depth?.(h) ?? 0);
       const r = footprint(h) * ppm;
       g.setAttribute('transform', `translate(${f1(sp.x - r * 0.8 - 5)} ${f1(sp.y + r * 0.8 + 6)})`);
     }
@@ -320,7 +324,7 @@ export class EditorOverlay {
       return;
     }
     if (this.gizmo.style.display === 'none') this.gizmo.style.display = '';
-    const sp = proj.toScreen(h);
+    const sp = proj.toScreen(h, proj.depth?.(h) ?? 0);
     // the renderer draws the selection ring (≈ hold radius × 1.12 + 3.5 cm, min 15 px, outer hairline ×1.2)
     const R = Math.max((footprint(h) * 1.12 + 0.035) * ppm, 15) * 1.22;
     this.dash = (this.dash + dt * 14) % 1000;
@@ -346,7 +350,7 @@ export class EditorOverlay {
       return;
     }
     if (this.ghost.style.display === 'none') this.ghost.style.display = '';
-    const sp = proj.toScreen(g.p);
+    const sp = proj.toScreen(g.p, g.depth ?? 0);
     const r = Math.max(8, g.r * ppm + 4);
     this.ghost.classList.toggle('bad', !g.ok);
     this.ghRing.style.display = g.ring ? '' : 'none';

@@ -4,13 +4,28 @@
 // Pure view: it renders EditorPanelState and reports intents through PanelActions.
 // Built from the UI design system (src/ui/dom.ts helpers, .btn / .seg / .range / .grade / .t-label).
 
-import type { HoldDef, HoldType } from '../core/types';
+import type { HoldDef } from '../core/types';
 import { ROUTE_COLORS } from '../config/brand';
 import { fontGrade, gradeColor, gradeLabel } from '../game/grades';
 import { button, el, label, setText, toggle } from '../ui/dom';
 import { icon } from '../ui/icons';
 import { glyph, holdGlyph, type EditorGlyph } from './glyphs';
-import { EDIT_ROLES, EDITOR, HOLD_TYPES, ROLE_LABEL, SIZE_RANGE, TYPE_LABEL, type DraftCheck, type EditRole } from './model';
+import { EDIT_ROLES, EDITOR, ROLE_LABEL, type DraftCheck, type EditRole } from './model';
+import {
+  depthRange,
+  derivedDepth,
+  derivedLip,
+  entryOf,
+  FINISH_LABEL,
+  finishesOf,
+  finishOf,
+  lipRange,
+  sizeRange,
+  sizeRing,
+  type Finish,
+} from './catalog';
+import { Palette } from './palette';
+import { drawThumb } from './thumbs';
 import { setWallGlyph, WallCard, wallGlyph, type WallCardActions, type WallCardState } from './wallcard';
 
 export type Drawer = 'color' | 'wall' | 'more';
@@ -30,7 +45,8 @@ export interface EditorPanelState {
   canTest: boolean;
   canPublish: boolean;
   published: boolean;
-  type: HoldType;
+  /** Catalogue entry a tap on the wall sets. */
+  entry: string;
   role: EditRole;
   color: string;
   /** Steepest panel angle (BoulderDef.wallAngle). */
@@ -41,8 +57,8 @@ export interface EditorPanelState {
   drawer: Drawer | null;
   sampleGrade: number;
   generating: boolean;
-  /** Selected hold and its 1-based index in the draft. */
-  selection: { hold: HoldDef; index: number } | null;
+  /** Selected hold and its 1-based index in the draft (+ the volume it is on, the holds on it). */
+  selection: { hold: HoldDef; index: number; volumeName?: string; mounts?: number } | null;
 }
 
 export interface PanelActions extends WallCardActions {
@@ -55,7 +71,11 @@ export interface PanelActions extends WallCardActions {
   publish(): void;
   toggleCheck(): void;
   toggleBeta(): void;
-  pickType(t: HoldType): void;
+  pickEntry(id: string): void;
+  setDepth(delta: number): void;
+  setLip(delta: number): void;
+  setFingers(n: 1 | 2 | 3 | 4): void;
+  setFinish(f: Finish): void;
   pickRole(r: EditRole): void;
   pickColor(hex: string): void;
   toggleSnap(): void;
@@ -150,7 +170,15 @@ export class EditorPanel {
   private toolMore: HTMLButtonElement;
   private roles: HTMLElement;
   private roleBtns = new Map<EditRole, HTMLButtonElement>();
-  private tiles = new Map<HoldType, HTMLButtonElement>();
+  private palette: Palette;
+  private inspThumb: HTMLCanvasElement;
+  private inspShapeBtn: HTMLButtonElement;
+  private det: HTMLElement;
+  private detDepth: { box: HTMLElement; v: HTMLElement; minus: HTMLButtonElement; plus: HTMLButtonElement; k: HTMLElement };
+  private detLip: { box: HTMLElement; v: HTMLElement; minus: HTMLButtonElement; plus: HTMLButtonElement; k: HTMLElement };
+  private detFingers: { box: HTMLElement; btns: HTMLButtonElement[] };
+  private detFinish: { box: HTMLElement; btns: Map<Finish, HTMLButtonElement> };
+  private inspNote: HTMLElement;
 
   private last: Partial<Record<string, string>> = {};
   private nameFocused = false;
@@ -218,7 +246,8 @@ export class EditorPanel {
     this.toasts.setAttribute('aria-live', 'polite');
 
     // ── inspector ──
-    this.inspIc = el('span', 'ed-insp-ic');
+    this.inspThumb = el('canvas', 'ed-insp-thumb');
+    this.inspIc = el('span', 'ed-insp-ic', this.inspThumb);
     this.inspKick = label('', 'ed-insp-k');
     this.inspName = el('b', 'ed-insp-name');
     this.inspRole = el('span', 'ed-insp-role');
@@ -245,10 +274,42 @@ export class EditorPanel {
         gbtn('rotL', 'Rotate left 15°', 'ed-ibtn', () => a.rotate(1)),
         el('div', 'ed-size', el('div', 'ed-size-h', label('SIZE'), this.sizeVal), this.sizeIn),
         gbtn('rotR', 'Rotate right 15°', 'ed-ibtn', () => a.rotate(-1)),
-        gbtn('shape', 'New shape', 'ed-ibtn', () => a.reshape()),
+        (this.inspShapeBtn = gbtn('shape', 'New shape', 'ed-ibtn', () => a.reshape())),
         gbtn('clear', 'Delete hold', 'ed-ibtn ed-del', () => a.deleteSelected(), 'danger'),
       ),
     );
+
+    // ── product details (edge depth, lip, pocket fingers, finish) ──
+    const stepper = (cls: string, k: string, aria: string, onStep: (d: number) => void) => {
+      const v = el('span', 'ed-det-v t-num');
+      const minus = gbtn('minus', `${aria} down`, 'ed-det-btn', () => onStep(-1));
+      const plus = gbtn('plus', `${aria} up`, 'ed-det-btn', () => onStep(1));
+      const kk = label(k, 'ed-det-k');
+      const box = el('div', `ed-det ${cls}`, kk, el('div', 'ed-det-row', minus, v, plus));
+      return { box, v, minus, plus, k: kk };
+    };
+    this.detDepth = stepper('ed-det-depth', 'EDGE DEPTH', 'Edge depth', (d) => a.setDepth(d * 2));
+    this.detLip = stepper('ed-det-lip', 'LIP', 'Lip angle', (d) => a.setLip(d * 5));
+    const fBtns = ([1, 2, 3, 4] as const).map((n) => {
+      const b = el('button', 'ed-det-f', String(n));
+      b.type = 'button';
+      b.setAttribute('aria-label', `${n} finger${n === 1 ? '' : 's'}`);
+      b.addEventListener('click', () => a.setFingers(n));
+      return b;
+    });
+    this.detFingers = { box: el('div', 'ed-det ed-det-fingers', label('FINGERS', 'ed-det-k'), el('div', 'ed-det-fs', ...fBtns)), btns: fBtns };
+    const finBtns = new Map<Finish, HTMLButtonElement>();
+    for (const f of ['plain', 'dual', 'wood'] as const) {
+      const b = el('button', `ed-det-fin fin-${f}`, FINISH_LABEL[f]);
+      b.type = 'button';
+      b.setAttribute('aria-label', `${FINISH_LABEL[f]} finish`);
+      b.addEventListener('click', () => a.setFinish(f));
+      finBtns.set(f, b);
+    }
+    this.detFinish = { box: el('div', 'ed-det-finish', ...finBtns.values()), btns: finBtns };
+    this.det = el('div', 'ed-insp-det', el('div', 'ed-det-steps', this.detFingers.box, this.detDepth.box, this.detLip.box), this.detFinish.box);
+    this.inspNote = el('p', 'ed-insp-note');
+    this.insp.append(this.det, this.inspNote);
 
     // ── drawers ──
     const sw = el('div', 'ed-swatches');
@@ -341,15 +402,8 @@ export class EditorPanel {
       this.roles.appendChild(b);
     }
 
-    const palette = el('div', 'ed-palette');
-    for (const t of HOLD_TYPES) {
-      const b = el('button', 'ed-tile', holdGlyph(t), el('span', 'ed-tile-l', t === 'foot' ? 'FOOT' : TYPE_LABEL[t].toUpperCase()));
-      b.type = 'button';
-      b.setAttribute('aria-label', TYPE_LABEL[t]);
-      b.addEventListener('click', () => a.pickType(t));
-      this.tiles.set(t, b);
-      palette.appendChild(b);
-    }
+    this.palette = new Palette((id) => a.pickEntry(id));
+    const palette = this.palette.el;
 
     this.tray = el('footer', 'ed-tray', tools, this.roles, palette);
     this.bottom = el('div', 'ed-bottom', float, this.tray);
@@ -389,6 +443,7 @@ export class EditorPanel {
 
     // tray: tools
     setVar(this.el, '--route', s.color);
+    if (this.last.color !== s.color) this.last.inspThumb = '';
     if (this.changed('color', s.color)) {
       setText(this.toolColorTx, colorName(s.color).toUpperCase());
       toggle(this.el, 'route-dark', luminance(s.color) < 0.05);
@@ -409,17 +464,14 @@ export class EditorPanel {
     // role + palette (reflect the selection while one exists)
     const sel = s.selection?.hold ?? null;
     const role: EditRole = sel ? (sel.role === 'deco' ? 'hand' : sel.role) : s.role;
-    const type = sel ? sel.type : s.type;
+    const entry = sel ? entryOf(sel).id : s.entry;
     const ri = EDIT_ROLES.indexOf(role);
     setVar(this.roles, '--idx', String(ri));
     for (const [r, b] of this.roleBtns) {
       toggle(b, 'on', r === role);
       b.disabled = !!sel && sel.type === 'foot' && r !== 'foot';
     }
-    for (const [t, b] of this.tiles) {
-      toggle(b, 'on', t === type);
-      b.setAttribute('aria-pressed', String(t === type));
-    }
+    this.palette.render(entry, s.color);
     toggle(this.tray, 'is-editing', !!sel);
     // editing the wall: the hold tools step aside so the wall shows above the drawer
     toggle(this.tray, 'wall-mode', s.drawer === 'wall');
@@ -438,16 +490,22 @@ export class EditorPanel {
     toggle(this.sampleBtn, 'is-busy', s.generating);
     setText(this.sampleBtn.querySelector('.btn-lbl') as HTMLElement, s.generating ? 'SETTING…' : 'LOAD');
 
-    if (sel && s.selection) this.renderInspector(sel, s.selection.index);
+    if (sel && s.selection) this.renderInspector(sel, s.selection.index, s.selection);
   }
 
   /** Inspector values only (cheap; called during gestures). */
-  renderInspector(h: HoldDef, index: number): void {
-    if (this.changed('inspType', h.type)) {
-      this.inspIc.replaceChildren(holdGlyph(h.type));
-      setText(this.inspName, TYPE_LABEL[h.type].toUpperCase());
+  renderInspector(h: HoldDef, index: number, sel?: EditorPanelState['selection']): void {
+    const e = entryOf(h);
+    const tk = `${e.id}|${h.shape ?? ''}|${h.seed}|${h.edgeDepthMm ?? ''}|${h.lipAngle ?? ''}|${h.fingers ?? ''}|${this.last.color ?? ''}`;
+    if (this.changed('inspThumb', tk)) {
+      // the selected product itself (its shape, depth, lip, fingers, finish) in the route colour
+      const ok = drawThumb(this.inspThumb, { type: h.type, shape: h.shape, fingers: h.fingers, edgeDepthMm: h.edgeDepthMm, lipAngle: h.lipAngle, seed: h.seed, size: sizeRange(h).def }, { w: 40, h: 40, color: this.last.color ?? '#d54051' });
+      if (!ok) this.inspIc.replaceChildren(holdGlyph(h.type));
     }
-    setText(this.inspKick, `SELECTED · HOLD ${String(index).padStart(2, '0')}`);
+    const finish = finishOf(h);
+    const name = h.type === 'volume' || !finishesOf(h) || finish === 'plain' || e.shape ? e.name : `${FINISH_LABEL[finish] === 'WOOD' ? 'Wood' : 'Dual-tex'} ${e.name.toLowerCase()}`;
+    setText(this.inspName, name.toUpperCase());
+    setText(this.inspKick, `${h.onVolume ? 'ON VOLUME' : 'SELECTED'} · HOLD ${String(index).padStart(2, '0')} · ${sizeRing(h)}`);
     const role = h.role === 'deco' ? 'hand' : h.role;
     if (this.changed('inspRole', role)) {
       setText(this.inspRole, ROLE_LABEL[role].toUpperCase());
@@ -456,12 +514,58 @@ export class EditorPanel {
     const deg = Math.round(((h.angle + Math.PI / 2) * 180) / Math.PI);
     const norm = ((((deg + 180) % 360) + 360) % 360) - 180;
     setText(this.inspXY, `X ${h.x.toFixed(2)}  Y ${h.y.toFixed(2)}  ${norm > 0 ? '+' : ''}${norm}°`);
-    const range = SIZE_RANGE[h.type];
+    const range = sizeRange(h);
     const t = (h.size - range.min) / (range.max - range.min);
     const v = String(Math.round(Math.max(0, Math.min(1, t)) * 1000));
     if (document.activeElement !== this.sizeIn && this.sizeIn.value !== v) this.sizeIn.value = v;
     setVar(this.sizeIn, '--v', `${Math.max(0, Math.min(1, t)) * 100}%`);
     setText(this.sizeVal, `${Math.round(h.size * 200)} CM`);
+    this.inspShapeBtn.hidden = h.type === 'volume';
+
+    // details
+    const dr = depthRange(h);
+    const lr = lipRange(h);
+    const fins = finishesOf(h);
+    const pocket = h.type === 'pocket';
+    this.detDepth.box.hidden = !dr;
+    if (dr) {
+      const d = h.edgeDepthMm ?? Math.round(derivedDepth(h) ?? dr.min);
+      setText(this.detDepth.v, `${Math.round(d)} MM`);
+      setText(this.detDepth.k, pocket ? 'DEPTH' : 'EDGE DEPTH');
+      this.detDepth.minus.disabled = d <= dr.min;
+      this.detDepth.plus.disabled = d >= dr.max;
+    }
+    this.detLip.box.hidden = !lr;
+    if (lr) {
+      const l = Math.round(h.lipAngle ?? derivedLip(h));
+      setText(this.detLip.v, `${l > 0 ? '+' : l < 0 ? '−' : ''}${Math.abs(l)}°`);
+      setText(this.detLip.k, h.type === 'sloper' ? 'SLOPE' : l >= 0 ? 'LIP · INCUT' : 'LIP · SLOPEY');
+      this.detLip.minus.disabled = l <= lr.min;
+      this.detLip.plus.disabled = l >= lr.max;
+    }
+    this.detFingers.box.hidden = !pocket;
+    if (pocket) {
+      const f = h.fingers ?? 3;
+      this.detFingers.btns.forEach((b, i) => {
+        toggle(b, 'on', i + 1 === f);
+        b.setAttribute('aria-pressed', String(i + 1 === f));
+      });
+    }
+    this.detFinish.box.hidden = !fins;
+    if (fins) {
+      for (const [f, b] of this.detFinish.btns) {
+        toggle(b, 'on', f === finish);
+        b.setAttribute('aria-pressed', String(f === finish));
+      }
+    }
+    toggle(this.det, 'empty', !dr && !lr && !pocket && !fins);
+    let note = '';
+    if (h.type === 'volume') {
+      const n = sel?.mounts ?? 0;
+      note = n ? `${n} hold${n === 1 ? '' : 's'} bolted on · they move, turn and scale with it` : 'Pick a hold below, then tap a face to bolt it on';
+    } else if (h.onVolume) note = `Bolted onto the ${(sel?.volumeName ?? 'volume').toLowerCase()} · drag it off to put it back on the wall`;
+    setText(this.inspNote, note);
+    this.inspNote.hidden = !note;
   }
 
   private renderStatus(s: EditorPanelState): void {

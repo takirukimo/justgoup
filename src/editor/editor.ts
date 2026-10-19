@@ -11,7 +11,7 @@ import './editor.css';
 
 import type { BetaMove, EditorAPI, RendererAPI, UIAPI } from '../core/contracts';
 import { bus } from '../core/events';
-import type { BoulderDef, HoldDef, HoldType, Vec2 } from '../core/types';
+import type { BoulderDef, HoldDef, Vec2 } from '../core/types';
 import { clamp, lerp } from '../core/math';
 import { gradeLabel } from '../game/grades';
 import { Analyzer, type SolveResult } from './analyzer';
@@ -19,6 +19,21 @@ import { EditorOverlay, type OverlayGhost, type OverlayState, type Projector } f
 import { EditorPanel, type Drawer, type EditorPanelState, type PanelActions, type StatusKind } from './panel';
 import { EditorView, type ZoomAnchor } from './view';
 import type { WallCardState } from './wallcard';
+import { exactVolumeShape } from './shapes';
+import {
+  depthRange,
+  derivedDepth,
+  derivedLip,
+  entryById,
+  entryOf,
+  isVolumeEntry,
+  lipRange,
+  seedForVariant,
+  shapeForFinish,
+  sizeRange,
+  type CatalogEntry,
+  type Finish,
+} from './catalog';
 import {
   mainPanel,
   matchPreset,
@@ -40,6 +55,7 @@ import {
 } from './walls';
 import {
   clampToBounds,
+  clearanceAt,
   cleanName,
   cloneDraft,
   createDraft,
@@ -51,17 +67,24 @@ import {
   footprint,
   History,
   holdBounds,
+  inBounds,
   loadStoredDraft,
   makeHold,
+  mountsOf,
   normalizeDraft,
   pruneStartFeet,
+  removeHold,
   ROLE_LABEL,
   saveStoredDraft,
-  SIZE_RANGE,
-  TYPE_LABEL,
+  setVolumeShapes,
+  transformVolume,
   validateDraft,
+  insideDistance,
+  volumeAt,
+  volumeShape,
   type DraftCheck,
   type EditRole,
+  type Proto,
 } from './model';
 
 interface Ptr {
@@ -157,7 +180,10 @@ export class BoulderEditor implements EditorAPI {
   private pendingResult: boolean | null = null;
   private loaded = false;
 
-  private tool: { type: HoldType; role: EditRole; lastHandType: HoldType } = { type: 'jug', role: 'start', lastHandType: 'jug' };
+  /** What a tap on the wall sets: a catalogue entry (hold or volume) in a role. */
+  private tool: { entry: string; role: EditRole; lastHandEntry: string } = { entry: 'jug', role: 'start', lastHandEntry: 'jug' };
+  /** The first hold bolted onto a volume explains itself once. */
+  private mountTold = false;
   private snap = true;
   private selectedId: string | null = null;
   private drawer: Drawer | null = null;
@@ -220,6 +246,7 @@ export class BoulderEditor implements EditorAPI {
   private readonly projector: Projector = {
     toScreen: (p, depth) => this.renderer.wallToScreen(p, depth),
     ppm: () => this.ppmCache,
+    depth: (h) => this.liftOf(h),
   };
 
   constructor(
@@ -232,6 +259,8 @@ export class BoulderEditor implements EditorAPI {
     this.sampleGrade = prefs.sampleGrade;
     // zoom anchors are picked through the renderer's ray cast (works across a folded wall's panels)
     this.view.setPicker((x, y) => this.renderer.screenToWall(x, y));
+    // holds bolt onto volumes exactly where the renderer seats them (its own volume geometry)
+    setVolumeShapes(exactVolumeShape);
   }
 
   get isOpen(): boolean {
@@ -422,7 +451,7 @@ export class BoulderEditor implements EditorAPI {
     this.refreshDerived();
     const starts = this.check.counts.start;
     this.tool.role = starts === 0 ? 'start' : this.check.counts.top === 0 && starts > 0 && this.check.counts.hands >= 3 ? 'top' : 'hand';
-    if (this.tool.type === 'foot') this.tool.role = 'foot';
+    if (this.toolEntry().type === 'foot') this.tool.role = 'foot';
   }
 
   /** open() while already open with a different draft. */
@@ -480,7 +509,7 @@ export class BoulderEditor implements EditorAPI {
       canTest: this.check.ok && !this.generating,
       canPublish: this.check.ok && this.passed === this.hash && this.published !== this.hash,
       published: this.published === this.hash,
-      type: this.tool.type,
+      entry: this.tool.entry,
       role: this.tool.role,
       color: this.draft.color,
       angle: this.draft.wallAngle,
@@ -489,7 +518,17 @@ export class BoulderEditor implements EditorAPI {
       drawer: this.drawer,
       sampleGrade: this.sampleGrade,
       generating: this.generating,
-      selection: sel ? { hold: sel, index: this.draft.holds.indexOf(sel) + 1 } : null,
+      selection: sel ? this.selectionInfo(sel) : null,
+    };
+  }
+
+  private selectionInfo(sel: HoldDef): NonNullable<EditorPanelState['selection']> {
+    const vol = sel.onVolume ? this.draft.holds.find((v) => v.id === sel.onVolume) : undefined;
+    return {
+      hold: sel,
+      index: this.draft.holds.indexOf(sel) + 1,
+      volumeName: vol ? entryOf(vol).name : undefined,
+      mounts: sel.type === 'volume' ? mountsOf(this.draft, sel.id).length : undefined,
     };
   }
 
@@ -515,9 +554,60 @@ export class BoulderEditor implements EditorAPI {
     this.render();
   }
 
-  private placeAt(sx: number, sy: number): string | null {
+  private toolEntry(): CatalogEntry {
+    return entryById(this.tool.entry) ?? entryById('jug')!;
+  }
+
+  /** A fresh hold of the tool's product (a volume's geometry is fixed by its entry). */
+  private toolProto(): Proto & { seed: number } {
+    const e = this.toolEntry();
+    return {
+      type: e.type,
+      size: sizeRange(e).def,
+      shape: e.shape,
+      fingers: e.fingers,
+      seed: e.type === 'volume' ? seedForVariant(e.variant) : 1 + Math.floor(Math.random() * 0x7ffffffe),
+      angle: -Math.PI / 2,
+    };
+  }
+
+  /**
+   * The wall point under a canvas pixel, seen through any volume in front of the wall: the renderer picks
+   * the wall behind; on a volume the point is corrected for the face's height (parallax), so a hold
+   * bolted onto a face lands under the finger. `vol` is the volume whose face is under the finger.
+   */
+  private pickFace(sx: number, sy: number): { p: Vec2; vol: HoldDef | null; lift: number } | null {
     const w = this.renderer.screenToWall(sx, sy);
-    if (!w) {
+    if (!w) return null;
+    let best: { p: Vec2; vol: HoldDef | null; lift: number } = { p: w, vol: null, lift: 0 };
+    const ppm = Math.max(1, this.ppmCache);
+    for (const v of this.draft.holds) {
+      if (v.type !== 'volume') continue;
+      if (Math.hypot(v.x - w.x, v.y - w.y) > footprint(v) + 0.5) continue;
+      const shape = volumeShape(v);
+      let p = { x: w.x, y: w.y };
+      let lift = 0;
+      for (let k = 0; k < 4; k++) {
+        lift = shape.lift(p);
+        const sp = this.renderer.wallToScreen(p, lift);
+        p = { x: p.x + (sx - sp.x) / ppm, y: p.y - (sy - sp.y) / ppm };
+      }
+      lift = shape.lift(p);
+      if (lift > 0.002 && lift > best.lift) best = { p, vol: v, lift };
+    }
+    return best;
+  }
+
+  /** Height above the wall a hold's tags and rings are drawn at (a bolted-on hold sits on its volume). */
+  private liftOf(h: HoldDef): number {
+    if (!h.onVolume) return 0;
+    const v = this.draft.holds.find((o) => o.id === h.onVolume);
+    return v ? volumeShape(v).lift(h) : 0;
+  }
+
+  private placeAt(sx: number, sy: number, face?: { p: Vec2; vol: HoldDef | null } | null): string | null {
+    const f = face ?? this.pickFace(sx, sy);
+    if (!f) {
       this.toast('Tap on the wall to set a hold');
       return null;
     }
@@ -525,30 +615,39 @@ export class BoulderEditor implements EditorAPI {
       this.toast(`Hold limit reached · ${EDITOR.maxHolds}`, 'bad');
       return null;
     }
-    const type = this.tool.type;
-    let role: EditRole = type === 'foot' ? 'foot' : this.tool.role;
-    if (role === 'start' && this.check.counts.start >= EDITOR.maxStarts) {
+    const e = this.toolEntry();
+    let role: EditRole = e.type === 'foot' ? 'foot' : this.tool.role;
+    // volumes are features for the feet (and hands, when HAND is picked), never a start or the top
+    if (e.type === 'volume') role = role === 'hand' ? 'hand' : 'foot';
+    else if (role === 'start' && this.check.counts.start >= EDITOR.maxStarts) {
       role = 'hand';
       this.tool.role = 'hand';
       this.toast('Two start holds max · set as hand');
     }
-    const proto = { type, size: SIZE_RANGE[type].def };
-    const spot = findSpot(this.draft, w, proto, { snap: this.snap, searchRadius: this.snap ? 0.16 : 0.14 });
+    const proto = this.toolProto();
+    const onFace = !!f.vol && e.type !== 'volume';
+    const spot = findSpot(this.draft, f.p, proto, { snap: this.snap && !onFace, searchRadius: onFace ? 0.1 : this.snap ? 0.16 : 0.14 });
     if (!spot) {
-      this.overlay?.ripple(w, footprint(proto), true);
-      this.toast('No room here · too close to another hold', 'bad');
+      this.overlay?.ripple(f.p, footprint(proto), true);
+      this.toast(onFace ? 'No room on this face · try another spot' : 'No room here · too close to another hold', 'bad');
       return null;
     }
     this.history.checkpoint(this.draft);
     if (role === 'top') this.demoteTops(null);
-    const h = makeHold(type, role, spot, this.draft.color);
+    const h = makeHold(e.type, role, spot, this.draft.color, proto.size, { shape: e.shape, fingers: e.fingers, seed: proto.seed, onVolume: spot.onVolume });
     this.draft.holds.push(h);
     // smart role advance: after the starts and the top come the hands
-    if (role === 'start' && this.check.counts.start + 1 >= EDITOR.maxStarts) this.tool.role = 'hand';
-    if (role === 'top') this.tool.role = 'hand';
+    if (e.type !== 'volume') {
+      if (role === 'start' && this.check.counts.start + 1 >= EDITOR.maxStarts) this.tool.role = 'hand';
+      if (role === 'top') this.tool.role = 'hand';
+    }
     this.overlay?.ripple(spot, footprint(h));
     bus.emit('ui:tap');
     this.commit();
+    if (spot.onVolume && !this.mountTold) {
+      this.mountTold = true;
+      this.toast('Bolted onto the volume · it moves with it');
+    }
     return h.id;
   }
 
@@ -640,32 +739,59 @@ export class BoulderEditor implements EditorAPI {
     }
   }
 
-  private setTypeOf(h: HoldDef, type: HoldType): void {
-    if (h.type === type) return;
-    const from = SIZE_RANGE[h.type];
-    const to = SIZE_RANGE[type];
+  /** Turn a hold into another catalogue product (a volume into another volume shape, a jug into a horn…). */
+  private setEntryOf(h: HoldDef, e: CatalogEntry): void {
+    const cur = entryOf(h);
+    if (cur.id === e.id) return;
+    if (h.onVolume && e.type === 'volume') {
+      this.toast('Volumes go on the wall · pick a hold to bolt on', 'bad');
+      return;
+    }
+    if (h.type === 'volume' && e.type !== 'volume' && mountsOf(this.draft, h.id).length) {
+      this.toast('Take the holds off this volume first', 'bad');
+      return;
+    }
+    const from = sizeRange(h);
+    const to = sizeRange(e);
     const t = clamp((h.size - from.min) / (from.max - from.min), 0, 1);
-    const next = { type, size: r3(lerp(to.min, to.max, t)) };
+    const seed = e.type === 'volume' ? seedForVariant(e.variant) : h.seed;
+    const next: Proto = { id: h.id, type: e.type, shape: e.shape, fingers: e.fingers, seed, angle: h.angle, onVolume: h.onVolume, size: r3(lerp(to.min, to.max, t)) };
     let pos: Vec2 = { x: h.x, y: h.y };
+    let onVolume = h.onVolume;
     if (!fits(this.draft, pos, next, h.id)) {
-      const spot = findSpot(this.draft, pos, next, { snap: this.snap, ignoreId: h.id, searchRadius: 0.25 });
+      const spot = findSpot(this.draft, pos, next, { snap: this.snap && !h.onVolume, ignoreId: h.id, searchRadius: 0.25 });
       if (!spot) {
         // keep the spot, shrink until it fits
-        let s = next.size;
-        while (s > to.min && !fits(this.draft, pos, { type, size: s }, h.id)) s = r3(s - 0.004);
-        if (!fits(this.draft, pos, { type, size: s }, h.id)) {
-          this.toast(`No room for a ${TYPE_LABEL[type].toLowerCase()} here`, 'bad');
+        let sz = next.size;
+        while (sz > to.min && !fits(this.draft, pos, { ...next, size: sz }, h.id)) sz = r3(sz - 0.004);
+        if (!fits(this.draft, pos, { ...next, size: sz }, h.id)) {
+          this.toast(`No room for a ${e.name.toLowerCase()} here`, 'bad');
           return;
         }
-        next.size = s;
-      } else pos = spot;
+        next.size = sz;
+      } else {
+        pos = spot;
+        onVolume = spot.onVolume;
+      }
     }
     this.history.checkpoint(this.draft);
-    h.type = type;
-    h.size = next.size;
-    h.x = pos.x;
-    h.y = pos.y;
-    if (type === 'foot') h.role = 'foot';
+    if (h.type === 'volume' && e.type === 'volume') transformVolume(this.draft, h.id, { x: pos.x, y: pos.y, size: next.size });
+    else {
+      h.x = pos.x;
+      h.y = pos.y;
+      h.size = next.size;
+    }
+    h.type = e.type;
+    h.seed = seed;
+    if (e.shape) h.shape = e.shape;
+    else delete h.shape;
+    if (e.type === 'pocket') h.fingers = e.fingers ?? h.fingers ?? 3;
+    else delete h.fingers;
+    if (!depthRange(h)) delete h.edgeDepthMm;
+    if (!lipRange(h)) delete h.lipAngle;
+    if (onVolume) h.onVolume = onVolume;
+    else delete h.onVolume;
+    if (e.type === 'foot') h.role = 'foot';
     this.commit();
   }
 
@@ -673,48 +799,103 @@ export class BoulderEditor implements EditorAPI {
     const h = this.selected();
     if (!h) return;
     this.history.checkpoint(this.draft);
-    this.draft.holds = this.draft.holds.filter((o) => o !== h);
+    const gone = removeHold(this.draft, h.id);
     this.overlay?.ripple(h, footprint(h), true);
     this.selectedId = null;
     bus.emit('ui:tap');
     this.commit();
+    if (gone.length > 1) this.toast(`Volume removed with its ${gone.length - 1} hold${gone.length === 2 ? '' : 's'} · undo to restore`);
+  }
+
+  /** Turn the selected hold (a volume turns with its holds). */
+  private turnTo(h: HoldDef, angle: number): void {
+    if (h.type === 'volume') transformVolume(this.draft, h.id, { angle });
+    else h.angle = angle;
   }
 
   private rotateSelected(dir: -1 | 1): void {
     const h = this.selected();
     if (!h) return;
     this.history.checkpoint(this.draft);
-    h.angle = this.snap ? snapAngle(h.angle + dir * EDITOR.rotateStep) : wrapAngle(h.angle + dir * EDITOR.rotateStep);
+    this.turnTo(h, this.snap ? snapAngle(h.angle + dir * EDITOR.rotateStep) : wrapAngle(h.angle + dir * EDITOR.rotateStep));
     this.commit();
   }
 
   private reshapeSelected(): void {
     const h = this.selected();
-    if (!h) return;
+    // a volume's shape is its catalogue entry (the VOLUMES palette)
+    if (!h || h.type === 'volume') return;
     this.history.checkpoint(this.draft);
     const v0 = Math.abs(h.seed) % 6;
-    let s = h.seed;
-    for (let k = 0; k < 12 && Math.abs(s) % 6 === v0; k++) s = 1 + Math.floor(Math.random() * 0x7ffffffe);
-    h.seed = s;
+    let sd = h.seed;
+    for (let k = 0; k < 12 && Math.abs(sd) % 6 === v0; k++) sd = 1 + Math.floor(Math.random() * 0x7ffffffe);
+    h.seed = sd;
     this.commit();
   }
 
-  /** Largest size (≤ want) that keeps the hold on the wall and clear of its neighbours. */
+  /** Product details (inspector steppers): edge depth (mm), lip angle (°), pocket fingers, finish. */
+  private setDetail(kind: 'depth' | 'lip', delta: number): void {
+    const h = this.selected();
+    if (!h) return;
+    if (kind === 'depth') {
+      const r = depthRange(h);
+      if (!r) return;
+      const cur = h.edgeDepthMm ?? Math.round(derivedDepth(h) ?? r.min);
+      const next = clamp(Math.round(cur + delta), r.min, r.max);
+      if (next === h.edgeDepthMm) return;
+      this.history.checkpoint(this.draft);
+      h.edgeDepthMm = next;
+    } else {
+      const r = lipRange(h);
+      if (!r) return;
+      const cur = h.lipAngle ?? derivedLip(h);
+      const next = clamp(Math.round(cur + delta), r.min, r.max);
+      if (next === h.lipAngle) return;
+      this.history.checkpoint(this.draft);
+      h.lipAngle = next;
+    }
+    this.commit();
+  }
+
+  private setFingers(n: 1 | 2 | 3 | 4): void {
+    const h = this.selected();
+    if (!h || h.type !== 'pocket' || (h.fingers ?? 3) === n) return;
+    this.history.checkpoint(this.draft);
+    h.fingers = n;
+    this.commit();
+  }
+
+  private setFinish(f: Finish): void {
+    const h = this.selected();
+    if (!h) return;
+    const shape = shapeForFinish(h, f);
+    if ((h.shape ?? undefined) === shape) return;
+    this.history.checkpoint(this.draft);
+    if (shape) h.shape = shape;
+    else delete h.shape;
+    this.commit();
+  }
+
+  /** Largest size (≤ want) that keeps the hold on the wall (or its volume) and clear of its neighbours. */
   private fitSize(h: HoldDef, want: number): number {
-    const range = SIZE_RANGE[h.type];
-    let s = clamp(want, range.min, range.max);
-    const k = footprint({ type: h.type, size: 1 });
-    for (const o of this.draft.holds) {
-      if (o.id === h.id) continue;
-      const room = Math.hypot(o.x - h.x, o.y - h.y) - footprint(o) - EDITOR.clearance;
-      s = Math.min(s, room / k);
+    const range = sizeRange(h);
+    const skip = new Set<string>([h.id, ...(h.type === 'volume' ? mountsOf(this.draft, h.id).map((m) => m.id) : [])]);
+    const ok = (sz: number): boolean => {
+      const q = { ...h, size: sz };
+      if (h.onVolume) return fits(this.draft, h, q, h.id);
+      return inBounds(h, holdBounds(this.draft, q), 6e-4) && clearanceAt(this.draft.holds, h, q, skip) >= EDITOR.clearance;
+    };
+    const s = clamp(want, range.min, range.max);
+    if (ok(s)) return r3(s);
+    let lo = Math.min(range.min, h.size);
+    let hi = s;
+    if (!ok(lo)) return r3(Math.min(h.size, s));
+    for (let i = 0; i < 16; i++) {
+      const mid = (lo + hi) / 2;
+      if (ok(mid)) lo = mid;
+      else hi = mid;
     }
-    for (let i = 0; i < 12 && s > range.min; i++) {
-      const bd = holdBounds(this.draft, { type: h.type, size: s });
-      if (h.x >= bd.x0 && h.x <= bd.x1 && h.y >= bd.y0 && h.y <= bd.y1) break;
-      s -= (range.max - range.min) / 24;
-    }
-    return r3(Math.max(Math.min(range.min, h.size), s));
+    return Math.floor(lo * 1000) / 1000;
   }
 
   private undo(): void {
@@ -764,20 +945,27 @@ export class BoulderEditor implements EditorAPI {
         if (this.betaOn) this.toast('Beta: numbered moves from Steini’s reader');
         this.render();
       },
-      pickType: (t) => {
+      pickEntry: (id) => {
+        const e = entryById(id);
+        if (!e) return;
         const sel = this.selected();
         if (sel) {
-          this.setTypeOf(sel, t);
+          this.setEntryOf(sel, e);
           return;
         }
-        if (t === 'foot') this.tool.role = 'foot';
+        if (e.type === 'foot') this.tool.role = 'foot';
         else {
-          if (this.tool.type === 'foot' && this.tool.role === 'foot') this.tool.role = this.check.counts.start === 0 ? 'start' : 'hand';
-          this.tool.lastHandType = t;
+          if (this.toolEntry().type === 'foot' && this.tool.role === 'foot') this.tool.role = this.check.counts.start === 0 ? 'start' : 'hand';
+          this.tool.lastHandEntry = e.id;
         }
-        this.tool.type = t;
+        this.tool.entry = e.id;
+        if (isVolumeEntry(e) && e.type === 'volume') this.toastOnce('vol', 'Tap the wall to set it · then bolt holds onto its faces');
         this.render();
       },
+      setDepth: (d) => this.setDetail('depth', d),
+      setLip: (d) => this.setDetail('lip', d),
+      setFingers: (n) => this.setFingers(n),
+      setFinish: (f) => this.setFinish(f),
       pickRole: (r) => {
         const sel = this.selected();
         if (sel) {
@@ -785,7 +973,7 @@ export class BoulderEditor implements EditorAPI {
           return;
         }
         this.tool.role = r;
-        if (r !== 'foot' && this.tool.type === 'foot') this.tool.type = this.tool.lastHandType === 'foot' ? 'jug' : this.tool.lastHandType;
+        if (r !== 'foot' && this.toolEntry().type === 'foot') this.tool.entry = entryById(this.tool.lastHandEntry)?.type === 'foot' ? 'jug' : this.tool.lastHandEntry;
         this.render();
       },
       pickColor: (hex) => {
@@ -881,11 +1069,14 @@ export class BoulderEditor implements EditorAPI {
         const h = this.selected();
         if (!h) return;
         if (this.continuous !== 'size') this.beginContinuous('size');
-        const range = SIZE_RANGE[h.type];
-        h.size = this.fitSize(h, lerp(range.min, range.max, t));
+        const range = sizeRange(h);
+        const size = this.fitSize(h, lerp(range.min, range.max, t));
+        // a volume grows with the holds on it (they keep their place on its faces)
+        if (h.type === 'volume') transformVolume(this.draft, h.id, { size });
+        else h.size = size;
         this.holdsDirty = true;
         this.overlayDirty = true;
-        this.panel?.renderInspector(h, this.draft.holds.indexOf(h) + 1);
+        this.panel?.renderInspector(h, this.draft.holds.indexOf(h) + 1, this.selectionInfo(h));
       },
       sizeCommit: () => this.endContinuous(false),
       rotate: (dir) => this.rotateSelected(dir),
@@ -1072,7 +1263,7 @@ export class BoulderEditor implements EditorAPI {
     this.betaOn = false;
     this.refreshDerived();
     this.tool.role = this.check.counts.start === 0 ? 'start' : 'hand';
-    if (this.tool.type === 'foot') this.tool.type = 'jug';
+    if (this.toolEntry().type === 'foot') this.tool.entry = 'jug';
     this.view.reset();
     this.pushView();
     this.commit({ wall: true });
@@ -1239,8 +1430,10 @@ export class BoulderEditor implements EditorAPI {
     const slop = mouse ? 4 : 10;
     let best: HoldDef | null = null;
     let bs = Infinity;
+    // holds first (one bolted onto a volume is drawn on its face), then the volume under the finger
     for (const h of this.draft.holds) {
-      const sp = this.renderer.wallToScreen(h);
+      if (h.type === 'volume') continue;
+      const sp = this.renderer.wallToScreen(h, this.liftOf(h));
       const r = Math.max(footprint(h) * ppm, mouse ? 10 : 18) + slop;
       const d = Math.hypot(sp.x - x, sp.y - y);
       if (d > r) continue;
@@ -1250,7 +1443,23 @@ export class BoulderEditor implements EditorAPI {
         best = h;
       }
     }
-    return best;
+    if (best) return best;
+    const f = this.pickFace(x, y);
+    if (f?.vol) return f.vol;
+    // the rim of a volume (a finger's width past its outline)
+    const w = f?.p ?? null;
+    if (!w) return null;
+    let bv: HoldDef | null = null;
+    let bd = (slop + 6) / Math.max(1, ppm);
+    for (const v of this.draft.holds) {
+      if (v.type !== 'volume') continue;
+      const d = -insideDistance(volumeShape(v).outline, w);
+      if (d < bd) {
+        bd = d;
+        bv = v;
+      }
+    }
+    return bv;
   }
 
   private readonly onDown = (e: PointerEvent): void => {
@@ -1337,7 +1546,8 @@ export class BoulderEditor implements EditorAPI {
         if (Math.hypot(p.x - ptr.x0, p.y - ptr.y0) < slop) return;
         const h = g.holdId ? this.draft.holds.find((x) => x.id === g.holdId) : null;
         if (h) {
-          const w = this.renderer.screenToWall(ptr.x0, ptr.y0) ?? { x: h.x, y: h.y };
+          // a volume is dragged by the wall behind it; a hold by the point under the finger (on a face)
+          const w = (h.type === 'volume' ? this.renderer.screenToWall(ptr.x0, ptr.y0) : this.pickFace(ptr.x0, ptr.y0)?.p) ?? { x: h.x, y: h.y };
           this.history.checkpoint(this.draft);
           this.selectedId = h.id;
           this.closeDrawer();
@@ -1353,20 +1563,29 @@ export class BoulderEditor implements EditorAPI {
       case 'drag': {
         if (g.id !== e.pointerId) return;
         const h = this.draft.holds.find((x) => x.id === g.holdId);
-        const w = this.renderer.screenToWall(p.x, p.y);
+        const vol = h?.type === 'volume';
+        const w = vol ? this.renderer.screenToWall(p.x, p.y) : this.pickFace(p.x, p.y)?.p;
         if (!h || !w) return;
         const raw = { x: w.x + g.offset.x, y: w.y + g.offset.y };
+        // a hold dragged onto a volume's face bolts onto it (free on the face); off it, back to the T-nuts
         const spot = findSpot(this.draft, raw, h, { snap: this.snap, ignoreId: h.id, searchRadius: this.snap ? 0.16 : 0.1 });
-        if (spot && (spot.x !== h.x || spot.y !== h.y)) {
-          h.x = spot.x;
-          h.y = spot.y;
+        if (spot && (spot.x !== h.x || spot.y !== h.y || (spot.onVolume ?? '') !== (h.onVolume ?? ''))) {
+          if (vol) transformVolume(this.draft, h.id, { x: spot.x, y: spot.y });
+          else {
+            h.x = spot.x;
+            h.y = spot.y;
+            if (spot.onVolume) h.onVolume = spot.onVolume;
+            else delete h.onVolume;
+          }
           g.changed = true;
           this.holdsDirty = true;
-          this.panel?.renderInspector(h, this.draft.holds.indexOf(h) + 1);
+          this.panel?.renderInspector(h, this.draft.holds.indexOf(h) + 1, this.selectionInfo(h));
         }
-        const clamped = clampToBounds(raw, holdBounds(this.draft, h));
+        const onFace = !!spot?.onVolume;
+        const depth = onFace ? this.liftOf(h) : 0;
+        const clamped = clampToBounds(raw, holdBounds(this.draft, { ...h, onVolume: undefined }));
         this.ghost = spot
-          ? { p: spot, r: footprint(h), ok: true, raw: this.snap ? clamped : null, showTnuts: this.snap, ring: false }
+          ? { p: spot, r: footprint(h), ok: true, raw: this.snap && !onFace ? clamped : null, showTnuts: this.snap && !onFace, ring: false, depth }
           : { p: clamped, r: footprint(h), ok: false, raw: null, showTnuts: this.snap, ring: true };
         this.overlayDirty = true;
         return;
@@ -1387,14 +1606,14 @@ export class BoulderEditor implements EditorAPI {
         // Measured in the wall plane (through the renderer's pick), so a panel seen at an angle
         // on a folded wall turns the hold the way the finger goes; on screen when off the wall.
         const w = this.renderer.screenToWall(p.x, p.y);
-        const c = this.renderer.wallToScreen(h);
+        const c = this.renderer.wallToScreen(h, this.liftOf(h));
         const raw = w && Math.hypot(w.x - h.x, w.y - h.y) > 0.01 ? Math.atan2(w.y - h.y, w.x - h.x) + Math.PI : Math.atan2(-(p.y - c.y), p.x - c.x) + Math.PI;
         const a = this.snap ? snapAngle(raw) : wrapAngle(raw);
         if (a !== h.angle) {
-          h.angle = a;
+          this.turnTo(h, a);
           g.changed = true;
           this.holdsDirty = true;
-          this.panel?.renderInspector(h, this.draft.holds.indexOf(h) + 1);
+          this.panel?.renderInspector(h, this.draft.holds.indexOf(h) + 1, this.selectionInfo(h));
         }
         return;
       }
@@ -1420,11 +1639,14 @@ export class BoulderEditor implements EditorAPI {
         const a = this.snap ? snapAngle(rawA) : wrapAngle(rawA);
         const size = this.fitSize(h, g.size0 * Math.pow(d / g.d0, 0.85));
         if (a !== h.angle || size !== h.size) {
-          h.angle = a;
-          h.size = size;
+          if (h.type === 'volume') transformVolume(this.draft, h.id, { angle: a, size });
+          else {
+            h.angle = a;
+            h.size = size;
+          }
           g.changed = true;
           this.holdsDirty = true;
-          this.panel?.renderInspector(h, this.draft.holds.indexOf(h) + 1);
+          this.panel?.renderInspector(h, this.draft.holds.indexOf(h) + 1, this.selectionInfo(h));
         }
         return;
       }
@@ -1529,6 +1751,17 @@ export class BoulderEditor implements EditorAPI {
       const h = this.draft.holds.find((x) => x.id === holdId);
       this.lastTap = null;
       if (!h) return;
+      // a hold tool on a volume's face bolts a hold onto it (a volume tool selects the volume)
+      if (h.type === 'volume' && this.toolEntry().type !== 'volume' && (!this.selectedId || this.selectedId === h.id)) {
+        const f = this.pickFace(ptr.x, ptr.y);
+        const placed = f && f.vol?.id === h.id ? this.placeAt(ptr.x, ptr.y, f) : null;
+        if (placed) {
+          this.lastTap = { t: now, x: ptr.x, y: ptr.y, placedId: placed, version: this.version };
+          return;
+        }
+        if (this.selectedId !== h.id) this.select(h.id);
+        return;
+      }
       if (this.selectedId === h.id) this.cycleRole(h);
       else this.select(h.id);
       return;
@@ -1551,17 +1784,23 @@ export class BoulderEditor implements EditorAPI {
       return;
     }
     const hit = this.hitHold(x, y, true);
-    const w = hit ? null : this.renderer.screenToWall(x, y);
-    if (!w) {
+    const e = this.toolEntry();
+    // a hold tool over a volume previews the spot on its face
+    const f = hit && !(hit.type === 'volume' && e.type !== 'volume') ? null : this.pickFace(x, y);
+    if (!f) {
       this.hover = null;
       if (this.ghost) this.overlayDirty = true;
       this.ghost = null;
       return;
     }
     this.hover = { x, y };
-    const proto = { type: this.tool.type, size: SIZE_RANGE[this.tool.type].def };
-    const spot = findSpot(this.draft, w, proto, { snap: this.snap, searchRadius: this.snap ? 0.16 : 0.14 });
-    this.ghost = { p: spot ?? w, r: footprint(proto), ok: !!spot, raw: this.snap ? w : null, showTnuts: this.snap, ring: true };
+    const proto = this.toolProto();
+    proto.seed = e.type === 'volume' ? seedForVariant(e.variant, () => 0.5) : proto.seed;
+    const onFace = !!f.vol && e.type !== 'volume';
+    const spot = findSpot(this.draft, f.p, proto, { snap: this.snap && !onFace, searchRadius: onFace ? 0.1 : this.snap ? 0.16 : 0.14 });
+    const p = spot ?? f.p;
+    const depth = spot?.onVolume ? volumeShape(this.draft.holds.find((v) => v.id === spot.onVolume)!).lift(p) : 0;
+    this.ghost = { p, r: footprint(proto), ok: !!spot, raw: this.snap && !onFace ? f.p : null, showTnuts: this.snap && !onFace, ring: true, depth };
     this.overlayDirty = true;
   }
 
@@ -1647,8 +1886,8 @@ export class BoulderEditor implements EditorAPI {
     }
     const n = Number(e.key);
     if (Number.isInteger(n) && n >= 1 && n <= 8) {
-      const types: HoldType[] = ['jug', 'edge', 'crimp', 'sloper', 'pinch', 'pocket', 'foot', 'volume'];
-      this.act.pickType(types[n - 1]);
+      const keys = ['jug', 'edge', 'crimp', 'sloper', 'pinch', 'pocket', 'foot', 'v-pyramid'];
+      this.act.pickEntry(keys[n - 1]);
     }
   };
 
@@ -1656,6 +1895,14 @@ export class BoulderEditor implements EditorAPI {
 
   private toast(text: string, tone: 'info' | 'good' | 'bad' = 'info'): void {
     this.panel?.toast(text, tone);
+  }
+
+  private told = new Set<string>();
+  /** A tip shown once per session. */
+  private toastOnce(key: string, text: string): void {
+    if (this.told.has(key)) return;
+    this.told.add(key);
+    this.toast(text);
   }
 
   private showPendingResult(): void {

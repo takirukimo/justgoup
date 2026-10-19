@@ -1,14 +1,18 @@
-// Pure editor model: draft creation + sanitising, T-nut snapping, wall bounds + overlap rules,
-// validation, content hashing (test → publish gating), undo history and draft persistence.
+// Pure editor model: draft creation + sanitising, T-nut snapping, footprints (capsules fitted to each
+// product), holds bolted onto volumes, wall bounds + overlap rules, validation, content hashing
+// (test → publish gating), undo history and draft persistence.
 // No DOM, no three.js — unit-tested in model.test.ts and shared with the solver worker.
 
 import type { BoulderDef, HoldDef, HoldRole, HoldShape, HoldType, RouteStyle, Vec2, WallPanel } from '../core/types';
 import { makeProfile } from '../game/wall-profile';
 import { cleanWall, setWall, WALL } from './walls';
+import { extentOf, sizeRange, SIZE_RANGE } from './catalog';
 import { GAME } from '../config/tuning';
 import { ROUTE_COLORS } from '../config/brand';
 import { hashString, Rng, uid } from '../core/rng';
 import { clamp, DEG } from '../core/math';
+
+export { SIZE_RANGE, sizeRange } from './catalog';
 
 /** Roles a setter can assign (deco belongs to other routes and is never authored). */
 export type EditRole = Exclude<HoldRole, 'deco'>;
@@ -28,6 +32,8 @@ export const EDITOR = {
   clearance: 0.012,
   /** Validation only flags footprints that overlap by more than this fraction of the smaller one. */
   overlapTolerance: 0.3,
+  /** A bolted-on hold may sit this far (m) past its volume's outline before it is flagged. */
+  mountTolerance: 0.03,
   /** Hold centres stay above the crash pads. */
   floorY: 0.3,
   maxStarts: 2,
@@ -39,30 +45,6 @@ export const EDITOR = {
   minRise: 0.6,
   storageKey: 'jgu.editor.draft',
 } as const;
-
-/** Size slider range per hold type (characteristic radius, m). Mirrors the generator's sizes, a little wider. */
-export const SIZE_RANGE: Readonly<Record<HoldType, { min: number; max: number; def: number }>> = {
-  jug: { min: 0.07, max: 0.13, def: 0.1 },
-  edge: { min: 0.045, max: 0.09, def: 0.065 },
-  crimp: { min: 0.025, max: 0.05, def: 0.038 },
-  sloper: { min: 0.07, max: 0.13, def: 0.1 },
-  pinch: { min: 0.045, max: 0.09, def: 0.065 },
-  pocket: { min: 0.035, max: 0.07, def: 0.05 },
-  foot: { min: 0.018, max: 0.04, def: 0.028 },
-  volume: { min: 0.2, max: 0.45, def: 0.32 },
-};
-
-/** Footprint radius ÷ size per type (edges and crimps are long and thin). */
-const FOOTPRINT: Readonly<Record<HoldType, number>> = {
-  jug: 1.1,
-  edge: 1.35,
-  crimp: 1.45,
-  sloper: 1.05,
-  pinch: 1.25,
-  pocket: 1.1,
-  foot: 1.25,
-  volume: 1,
-};
 
 export const TYPE_LABEL: Readonly<Record<HoldType, string>> = {
   jug: 'Jug',
@@ -96,10 +78,6 @@ const isHex = (c: unknown): c is string => typeof c === 'string' && /^#[0-9a-fA-
 
 /** Hands may use start / hand / top holds that are not foot chips (same rule as the sim). */
 export const handUsable = (h: HoldDef): boolean => (h.role === 'start' || h.role === 'hand' || h.role === 'top') && h.type !== 'foot';
-
-export function footprint(h: { type: HoldType; size: number }): number {
-  return h.size * FOOTPRINT[h.type];
-}
 
 // ───────────────────────────── drafts ─────────────────────────────
 
@@ -143,6 +121,7 @@ export function normalizeDraft(input: BoulderDef): BoulderDef {
   const wall = cleanWall({ panels: prof ?? [{ y0: 0, angle: clamp(Math.round(finite(input.wallAngle, EDITOR.angleDefault)), EDITOR.angleMin, EDITOR.angleMax) }], length: H0 });
   const H = wall.length;
   const seen = new Set<string>();
+  const renamed = new Map<string, string>();
   const holds: HoldDef[] = [];
   for (const raw of Array.isArray(input.holds) ? input.holds : []) {
     if (!raw || raw.role === 'deco' || !isType(raw.type) || !isRole(raw.role)) continue;
@@ -153,8 +132,9 @@ export function normalizeDraft(input: BoulderDef): BoulderDef {
     let id = typeof raw.id === 'string' && raw.id ? raw.id.slice(0, 40) : uid('h');
     while (seen.has(id)) id = uid('h');
     seen.add(id);
-    const range = SIZE_RANGE[raw.type];
+    const range = sizeRange({ type: raw.type, shape: typeof raw.shape === 'string' && HOLD_SHAPES.includes(raw.shape) ? raw.shape : undefined });
     const role: EditRole = raw.type === 'foot' && raw.role !== 'foot' ? 'foot' : raw.role;
+    if (typeof raw.id === 'string' && raw.id && raw.id !== id) renamed.set(raw.id.slice(0, 40), id);
     const h: HoldDef = {
       id,
       x: r3(x),
@@ -167,8 +147,16 @@ export function normalizeDraft(input: BoulderDef): BoulderDef {
       seed: Math.floor(Math.abs(finite(raw.seed, randomSeed()))) || 1,
     };
     keepVariety(raw, h);
+    if (typeof raw.onVolume === 'string' && raw.onVolume && raw.type !== 'volume') h.onVolume = raw.onVolume.slice(0, 40);
     holds.push(h);
     if (holds.length >= EDITOR.maxHolds) break;
+  }
+  // holds bolted onto volumes keep their volume (followed through renamed duplicate ids), when it is here
+  for (const h of holds) {
+    if (!h.onVolume) continue;
+    const vid = renamed.get(h.onVolume) ?? h.onVolume;
+    if (holds.some((v) => v.id === vid && v.type === 'volume')) h.onVolume = vid;
+    else delete h.onVolume;
   }
   const out: BoulderDef = {
     id: typeof input.id === 'string' && input.id ? input.id.slice(0, 60) : base.id,
@@ -197,10 +185,7 @@ const ROUTE_STYLES: readonly RouteStyle[] = ['vertical', 'slab', 'overhang', 'ca
 const HOLD_SHAPES: readonly HoldShape[] = ['bucket', 'horn', 'rail', 'micro', 'chip', 'macro', 'dual-tex', 'wood'];
 const MAX_PANELS = 8;
 
-/**
- * Copy the optional hold-variety fields (Phase B) from untrusted input, sanitised. Holds bolted onto
- * volumes (onVolume) are not editable yet: they come in as ordinary wall holds.
- */
+/** Copy the optional hold-variety fields (Phase B) from untrusted input, sanitised. */
 function keepVariety(raw: HoldDef, h: HoldDef): void {
   if (Number.isFinite(raw.edgeDepthMm)) h.edgeDepthMm = r3(clamp(raw.edgeDepthMm as number, 2, 80));
   if (Number.isFinite(raw.lipAngle)) h.lipAngle = r3(clamp(raw.lipAngle as number, -60, 60));
@@ -239,6 +224,12 @@ export function cleanName(s: string): string {
 export function draftFromSample(b: BoulderDef): BoulderDef {
   const d = normalizeDraft({ ...b, id: uid('u-') });
   d.grade = clamp(Math.round(b.grade), 0, 12);
+  // a generated hold sitting inside a route volume's base (no onVolume) would be buried in it: bolt it on
+  for (const h of d.holds) {
+    if (h.onVolume || h.type === 'volume') continue;
+    const v = volumeAt(d, h);
+    if (v && insideDistance(volumeShape(v).outline, h) > 0.02) h.onVolume = v.id;
+  }
   return d;
 }
 
@@ -250,20 +241,34 @@ export function cloneDraft(b: BoulderDef): BoulderDef {
   return c;
 }
 
-/** New hold of `type` / `role` at `p` with type defaults (classic orientation: body below). */
-export function makeHold(type: HoldType, role: EditRole, p: Vec2, color: string, size?: number): HoldDef {
-  const range = SIZE_RANGE[type];
-  return {
+/**
+ * New hold of `type` / `role` at `p` with its product's defaults (classic orientation: body below).
+ * `extra` carries the product (shape, fingers, seed for a volume's geometry) and a volume to bolt onto.
+ */
+export function makeHold(
+  type: HoldType,
+  role: EditRole,
+  p: Vec2,
+  color: string,
+  size?: number,
+  extra: Partial<Pick<HoldDef, 'shape' | 'fingers' | 'seed' | 'onVolume' | 'angle'>> = {},
+): HoldDef {
+  const range = sizeRange({ type, shape: extra.shape });
+  const h: HoldDef = {
     id: uid('h'),
     x: r3(p.x),
     y: r3(p.y),
     type,
     size: r3(clamp(size ?? range.def, range.min, range.max)),
-    angle: -Math.PI / 2,
+    angle: extra.angle ?? -Math.PI / 2,
     role: type === 'foot' ? 'foot' : role,
     color,
-    seed: randomSeed(),
+    seed: extra.seed ?? randomSeed(),
   };
+  if (extra.shape) h.shape = extra.shape;
+  if (extra.fingers) h.fingers = extra.fingers;
+  if (extra.onVolume && type !== 'volume') h.onVolume = extra.onVolume;
+  return h;
 }
 
 /** Stable content hash: what the climb is (holds, wall, colour) — not its name, id or grade. */
@@ -286,6 +291,81 @@ export function draftHash(b: BoulderDef): string {
 }
 
 // ───────────────────────────── geometry rules ─────────────────────────────
+//
+// Footprints are capsules fitted to each product's real geometry (catalog.ts extentOf): a rail is long
+// and thin, a pinch tall, a jug round. Holds bolted onto a volume (onVolume) live inside that volume's
+// outline on the wall (volumeShape) and only keep clear of their siblings; the volume and its holds move,
+// turn and scale together (transformVolume).
+
+/** What placement needs to know about a hold (a whole HoldDef works). */
+export type Proto = Pick<HoldDef, 'type' | 'size'> & Partial<Pick<HoldDef, 'id' | 'angle' | 'shape' | 'seed' | 'fingers' | 'onVolume'>>;
+
+/** A placed spot: the wall point, and the volume it is bolted onto (if any). */
+export type Spot = Vec2 & { onVolume?: string };
+
+interface Capsule {
+  ax: number;
+  ay: number;
+  bx: number;
+  by: number;
+  r: number;
+  /** Axis-aligned half extents (bounds). */
+  ex: number;
+  ey: number;
+}
+
+/** Footprint capsule of `h` centred on p (default: the hold's own position). */
+export function capsuleOf(h: Proto, p: Vec2 = h as unknown as Vec2): Capsule {
+  const e = extentOf({ type: h.type, shape: h.shape, seed: h.seed ?? 0, fingers: h.fingers });
+  const s = h.size;
+  const a = h.angle ?? -Math.PI / 2;
+  // hold-local x (along the grip side) and y (toward it) on the wall (render/holds.ts holdMatrix)
+  const long = e.hx >= e.hy;
+  const dx = long ? -Math.sin(a) : -Math.cos(a);
+  const dy = long ? Math.cos(a) : -Math.sin(a);
+  const half = Math.abs(e.hx - e.hy) * s;
+  // holds taper toward their ends: the capsule hugs the body a touch inside the max extents
+  const r = Math.min(e.hx, e.hy) * s * 0.92;
+  return { ax: p.x - dx * half, ay: p.y - dy * half, bx: p.x + dx * half, by: p.y + dy * half, r, ex: Math.abs(dx) * half + r, ey: Math.abs(dy) * half + r };
+}
+
+/** Outer footprint radius (m): rings, ripples, touch targets. */
+export function footprint(h: Proto): number {
+  const e = extentOf({ type: h.type, shape: h.shape, seed: h.seed ?? 0, fingers: h.fingers });
+  return Math.max(e.hx, e.hy) * h.size;
+}
+
+function segSegDist(c: Capsule, d: Capsule): number {
+  const pd = (px: number, py: number, ax: number, ay: number, bx: number, by: number): number => {
+    const ux = bx - ax;
+    const uy = by - ay;
+    const l2 = ux * ux + uy * uy;
+    const t = l2 < 1e-12 ? 0 : Math.max(0, Math.min(1, ((px - ax) * ux + (py - ay) * uy) / l2));
+    return Math.hypot(px - ax - ux * t, py - ay - uy * t);
+  };
+  // proper intersection of the two segments
+  const cross = (ox: number, oy: number, px: number, py: number, qx: number, qy: number): number => (px - ox) * (qy - oy) - (py - oy) * (qx - ox);
+  const d1 = cross(c.ax, c.ay, c.bx, c.by, d.ax, d.ay);
+  const d2 = cross(c.ax, c.ay, c.bx, c.by, d.bx, d.by);
+  const d3 = cross(d.ax, d.ay, d.bx, d.by, c.ax, c.ay);
+  const d4 = cross(d.ax, d.ay, d.bx, d.by, c.bx, c.by);
+  if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return 0;
+  return Math.min(pd(c.ax, c.ay, d.ax, d.ay, d.bx, d.by), pd(c.bx, c.by, d.ax, d.ay, d.bx, d.by), pd(d.ax, d.ay, c.ax, c.ay, c.bx, c.by), pd(d.bx, d.by, c.ax, c.ay, c.bx, c.by));
+}
+
+/** Edge-to-edge gap between two footprints (negative = overlapping). */
+export function capsuleGap(a: Proto, pa: Vec2, b: Proto, pb: Vec2): number {
+  const c = capsuleOf(a, pa);
+  const d = capsuleOf(b, pb);
+  return segSegDist(c, d) - c.r - d.r;
+}
+
+/** Round footprint radius ÷ size per type (the generator's spacing model; validation's lenient check). */
+const ROUND: Readonly<Record<HoldType, number>> = { jug: 1.1, edge: 1.35, crimp: 1.45, sloper: 1.05, pinch: 1.25, pocket: 1.1, foot: 1.25, volume: 1 };
+const roundRadius = (h: Proto): number => h.size * ROUND[h.type];
+
+/** A hold and the volume it is bolted onto never collide with each other. */
+const mountPair = (a: Proto, b: Proto): boolean => (!!a.onVolume && a.onVolume === b.id) || (!!b.onVolume && b.onVolume === a.id);
 
 export interface Bounds {
   x0: number;
@@ -294,15 +374,16 @@ export interface Bounds {
   y1: number;
 }
 
-/** Where the centre of a hold of this type/size may sit on the wall. */
-export function holdBounds(b: Pick<BoulderDef, 'width' | 'height'>, h: { type: HoldType; size: number }): Bounds {
-  const r = footprint(h);
-  const side = Math.max(0.05, r * 0.9 + 0.02);
+/** Where the centre of a hold may sit on the wall. */
+export function holdBounds(b: Pick<BoulderDef, 'width' | 'height'>, h: Proto): Bounds {
+  const c = capsuleOf(h, { x: 0, y: 0 });
+  const sideX = Math.max(0.05, c.ex * 0.9 + 0.02);
+  const sideY = Math.max(0.05, c.ey * 0.9 + 0.02);
   return {
-    x0: -b.width / 2 + side,
-    x1: b.width / 2 - side,
-    y0: Math.max(EDITOR.floorY, 0.26 + r * 0.6),
-    y1: b.height - side,
+    x0: -b.width / 2 + sideX,
+    x1: b.width / 2 - sideX,
+    y0: Math.max(EDITOR.floorY, 0.26 + c.ey * 0.6),
+    y1: b.height - sideY,
   };
 }
 
@@ -354,50 +435,222 @@ export function tnutsNear(p: Vec2, radius: number): Vec2[] {
   return out.map((o) => o.p);
 }
 
-/** Edge-to-edge clearance between a prospective hold and its nearest neighbour (Infinity if alone). */
-export function clearanceAt(holds: readonly HoldDef[], p: Vec2, h: { type: HoldType; size: number }, ignoreId?: string): number {
-  const r = footprint(h);
+/**
+ * Edge-to-edge clearance between a prospective hold at p and its nearest neighbour (Infinity if alone).
+ * Skips `ignore` (ids), the hold itself, and its mount partner (its volume / the volume's own holds).
+ */
+export function clearanceAt(holds: readonly HoldDef[], p: Vec2, h: Proto, ignore?: string | ReadonlySet<string>): number {
+  const c = capsuleOf(h, p);
   let g = Infinity;
   for (const o of holds) {
-    if (o.id === ignoreId) continue;
-    const d = Math.hypot(o.x - p.x, o.y - p.y) - r - footprint(o);
-    if (d < g) g = d;
+    if (o.id === h.id || (typeof ignore === 'string' ? o.id === ignore : ignore?.has(o.id))) continue;
+    if (mountPair(h, o)) continue;
+    const d = capsuleOf(o);
+    const gap = segSegDist(c, d) - c.r - d.r;
+    if (gap < g) g = gap;
   }
   return g;
 }
 
-export function fits(b: BoulderDef, p: Vec2, h: { type: HoldType; size: number }, ignoreId?: string): boolean {
-  return inBounds(p, holdBounds(b, h), 1e-6) && clearanceAt(b.holds, p, h, ignoreId) >= EDITOR.clearance;
+// ── volumes ──
+
+/** A volume's base on the wall, for bolting holds onto it. */
+export interface VolumeShape {
+  /** Convex outline of the volume's base (wall-local, m). */
+  outline: Vec2[];
+  /** Height of the volume's surface above the wall at wall point p (m; 0 off it). */
+  lift(p: Vec2): number;
+}
+
+let shapeProvider: ((vol: HoldDef) => VolumeShape | null) | null = null;
+
+/**
+ * Exact volume shapes (the editor installs the renderer's geometry, editor/shapes.ts). Without one (the
+ * analysis worker, tests) a volume is the ellipse of its extents.
+ */
+export function setVolumeShapes(fn: ((vol: HoldDef) => VolumeShape | null) | null): void {
+  shapeProvider = fn;
+}
+
+function ellipseShape(vol: HoldDef): VolumeShape {
+  const e = extentOf(vol);
+  const t = vol.angle + Math.PI / 2;
+  const c = Math.cos(t);
+  const s = Math.sin(t);
+  const rx = e.hx * vol.size;
+  const ry = e.hy * vol.size;
+  const outline: Vec2[] = [];
+  for (let k = 0; k < 16; k++) {
+    const a = (k / 16) * Math.PI * 2;
+    const lx = Math.cos(a) * rx;
+    const ly = Math.sin(a) * ry;
+    outline.push({ x: vol.x + lx * c - ly * s, y: vol.y + lx * s + ly * c });
+  }
+  return {
+    outline,
+    lift: (p) => {
+      const dx = p.x - vol.x;
+      const dy = p.y - vol.y;
+      const lx = dx * c + dy * s;
+      const ly = -dx * s + dy * c;
+      const q = (lx / rx) ** 2 + (ly / ry) ** 2;
+      return q >= 1 ? 0 : vol.size * 0.55 * (1 - q);
+    },
+  };
+}
+
+export function volumeShape(vol: HoldDef): VolumeShape {
+  return (shapeProvider && shapeProvider(vol)) || ellipseShape(vol);
+}
+
+/** Signed distance from p to the inside of a convex polygon's boundary (positive inside). */
+export function insideDistance(poly: readonly Vec2[], p: Vec2): number {
+  const n = poly.length;
+  if (n < 3) return -Infinity;
+  let area = 0;
+  for (let i = 0; i < n; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % n];
+    area += a.x * b.y - b.x * a.y;
+  }
+  const sgn = area >= 0 ? 1 : -1;
+  let d = Infinity;
+  for (let i = 0; i < n; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % n];
+    const ex = b.x - a.x;
+    const ey = b.y - a.y;
+    const l = Math.hypot(ex, ey) || 1;
+    // inward normal
+    const nx = (-ey / l) * sgn;
+    const ny = (ex / l) * sgn;
+    const di = (p.x - a.x) * nx + (p.y - a.y) * ny;
+    if (di < d) d = di;
+  }
+  return d;
+}
+
+/** Push p inside a convex polygon until it is `inset` from every edge (null when the polygon is too small). */
+function pushInside(poly: readonly Vec2[], p: Vec2, inset: number): Vec2 | null {
+  const n = poly.length;
+  let area = 0;
+  for (let i = 0; i < n; i++) area += poly[i].x * poly[(i + 1) % n].y - poly[(i + 1) % n].x * poly[i].y;
+  const sgn = area >= 0 ? 1 : -1;
+  const q = { x: p.x, y: p.y };
+  for (let it = 0; it < 6; it++) {
+    let moved = false;
+    for (let i = 0; i < n; i++) {
+      const a = poly[i];
+      const b = poly[(i + 1) % n];
+      const ex = b.x - a.x;
+      const ey = b.y - a.y;
+      const l = Math.hypot(ex, ey) || 1;
+      const nx = (-ey / l) * sgn;
+      const ny = (ex / l) * sgn;
+      const di = (q.x - a.x) * nx + (q.y - a.y) * ny;
+      if (di < inset) {
+        q.x += nx * (inset - di);
+        q.y += ny * (inset - di);
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  return insideDistance(poly, q) >= inset - 1e-4 ? q : null;
+}
+
+/** How far inside its volume's outline a mounted hold's centre stays (most of the hold on the face). */
+export function mountInset(h: Proto): number {
+  return clamp(capsuleOf(h, { x: 0, y: 0 }).r * 0.6 + 0.008, 0.012, 0.05);
+}
+
+/** The volume whose base contains wall point p (holds bolt onto it), skipping `skipId`. */
+export function volumeAt(b: BoulderDef, p: Vec2, skipId?: string): HoldDef | null {
+  let best: HoldDef | null = null;
+  let bd = -Infinity;
+  for (const v of b.holds) {
+    if (v.type !== 'volume' || v.id === skipId) continue;
+    const d = insideDistance(volumeShape(v).outline, p);
+    if (d >= 0 && d > bd) {
+      bd = d;
+      best = v;
+    }
+  }
+  return best;
+}
+
+/** Holds bolted onto volume `id`. */
+export const mountsOf = (b: BoulderDef, id: string): HoldDef[] => b.holds.filter((h) => h.onVolume === id);
+
+/** Is a hold at p, bolted onto `vol`, inside its face and clear of the other holds? */
+function mountFits(b: BoulderDef, vol: HoldDef, p: Vec2, h: Proto, ignore?: string): boolean {
+  const ph = { ...h, onVolume: vol.id };
+  if (insideDistance(volumeShape(vol).outline, p) < mountInset(ph) - 1e-4) return false;
+  return clearanceAt(b.holds, p, ph, ignore) >= EDITOR.clearance;
+}
+
+export function fits(b: BoulderDef, p: Vec2, h: Proto, ignoreId?: string): boolean {
+  if (h.onVolume && h.type !== 'volume') {
+    const vol = b.holds.find((v) => v.id === h.onVolume && v.type === 'volume');
+    if (vol) return mountFits(b, vol, p, h, ignoreId);
+  }
+  const wall = { ...h, onVolume: undefined };
+  // (spots are rounded to the mm: half a mm of rounding past a bound is fine)
+  return inBounds(p, holdBounds(b, wall), 6e-4) && clearanceAt(b.holds, p, wall, ignoreId) >= EDITOR.clearance;
 }
 
 /**
- * Best legal spot for a hold near `want`: the nearest free T-nut (snap) or the nearest free point
- * (free mode, pushed out of neighbours). null when nothing fits within `searchRadius`.
+ * Can volume `vol` sit at `to` with its holds (moved along with it)? The group keeps clear of every other
+ * hold; the volume's own holds are part of it.
+ */
+export function groupFits(b: BoulderDef, vol: HoldDef, to: Vec2): boolean {
+  const mounts = mountsOf(b, vol.id);
+  const skip = new Set<string>([vol.id, ...mounts.map((m) => m.id)]);
+  if (!inBounds(to, holdBounds(b, vol), 6e-4) || clearanceAt(b.holds, to, vol, skip) < EDITOR.clearance) return false;
+  const dx = to.x - vol.x;
+  const dy = to.y - vol.y;
+  for (const m of mounts) if (clearanceAt(b.holds, { x: m.x + dx, y: m.y + dy }, { ...m, onVolume: undefined }, skip) < EDITOR.clearance) return false;
+  return true;
+}
+
+/**
+ * Best legal spot for a hold near `want`. A (non-volume) hold wanted on a volume's face is bolted onto
+ * it (free placement on the face, clear of its siblings). Otherwise: the nearest free T-nut (snap) or
+ * the nearest free point (free mode, pushed out of neighbours); a volume brings its holds along.
+ * null when nothing fits within `searchRadius`.
  */
 export function findSpot(
   b: BoulderDef,
   want: Vec2,
-  h: { type: HoldType; size: number },
-  opts: { snap: boolean; ignoreId?: string; searchRadius?: number } = { snap: true },
-): Vec2 | null {
-  const bd = holdBounds(b, h);
+  h: Proto,
+  opts: { snap: boolean; ignoreId?: string; searchRadius?: number; mount?: boolean } = { snap: true },
+): Spot | null {
   const radius = opts.searchRadius ?? 0.3;
+  const ignore = opts.ignoreId ?? h.id;
+  if (h.type !== 'volume' && opts.mount !== false) {
+    const vol = volumeAt(b, want, h.id);
+    if (vol) return mountSpot(b, vol, want, h, radius, ignore);
+  }
+  const wall: Proto = { ...h, onVolume: undefined };
+  const group = h.type === 'volume' && h.id ? b.holds.find((v) => v.id === h.id) : undefined;
+  const ok = (p: Vec2): boolean => (group && mountsOf(b, group.id).length ? groupFits(b, { ...group, ...wall } as HoldDef, p) : fits(b, p, wall, ignore));
+  const bd = holdBounds(b, wall);
   if (opts.snap) {
     const c = clampToBounds(want, bd);
     for (const t of tnutsNear(c, radius + 0.15)) {
       if (Math.hypot(t.x - want.x, t.y - want.y) > radius + 0.15) continue;
-      if (fits(b, t, h, opts.ignoreId)) return t;
+      if (ok(t)) return t;
     }
     return null;
   }
   let p = clampToBounds(want, bd);
-  const r = footprint(h);
+  const skip = group ? new Set<string>([group.id, ...mountsOf(b, group.id).map((m) => m.id)]) : null;
   for (let iter = 0; iter < 8; iter++) {
     let worst: HoldDef | null = null;
     let wg: number = EDITOR.clearance;
     for (const o of b.holds) {
-      if (o.id === opts.ignoreId) continue;
-      const g = Math.hypot(o.x - p.x, o.y - p.y) - r - footprint(o);
+      if (o.id === ignore || skip?.has(o.id) || mountPair(wall, o)) continue;
+      const g = capsuleGap(wall, p, o, o);
       if (g < wg) {
         wg = g;
         worst = o;
@@ -412,12 +665,111 @@ export function findSpot(
       dy = want.y - worst.y;
       l = Math.hypot(dx, dy) || 1;
     }
-    const need = r + footprint(worst) + EDITOR.clearance + 0.002;
-    p = clampToBounds({ x: worst.x + (dx / l) * need, y: worst.y + (dy / l) * need }, bd);
+    const need = EDITOR.clearance + 0.002 - wg;
+    p = clampToBounds({ x: p.x + (dx / l) * need, y: p.y + (dy / l) * need }, bd);
   }
-  const out = { x: r3(p.x), y: r3(p.y) };
+  // to the mm, rounded into the bounds
+  const out = {
+    x: clamp(r3(p.x), Math.ceil(bd.x0 * 1000 - 1e-6) / 1000, Math.floor(bd.x1 * 1000 + 1e-6) / 1000),
+    y: clamp(r3(p.y), Math.ceil(bd.y0 * 1000 - 1e-6) / 1000, Math.floor(bd.y1 * 1000 + 1e-6) / 1000),
+  };
   if (Math.hypot(out.x - want.x, out.y - want.y) > radius) return null;
-  return fits(b, out, h, opts.ignoreId) ? out : null;
+  return ok(out) ? out : null;
+}
+
+/** A free spot on `vol`'s face near `want` for hold h (bolted onto it), or null. */
+function mountSpot(b: BoulderDef, vol: HoldDef, want: Vec2, h: Proto, radius: number, ignore?: string): Spot | null {
+  const shape = volumeShape(vol);
+  const ph: Proto = { ...h, onVolume: vol.id };
+  const inset = mountInset(ph);
+  let p = pushInside(shape.outline, want, inset);
+  if (!p) return null;
+  for (let iter = 0; iter < 8; iter++) {
+    let worst: HoldDef | null = null;
+    let wg: number = EDITOR.clearance;
+    for (const o of b.holds) {
+      if (o.id === ignore || o.id === h.id || mountPair(ph, o)) continue;
+      const g = capsuleGap(ph, p, o, o);
+      if (g < wg) {
+        wg = g;
+        worst = o;
+      }
+    }
+    if (!worst) break;
+    let dx = p.x - worst.x;
+    let dy = p.y - worst.y;
+    let l = Math.hypot(dx, dy);
+    if (l < 1e-6) {
+      dx = want.x - worst.x || 1;
+      dy = want.y - worst.y;
+      l = Math.hypot(dx, dy) || 1;
+    }
+    const need = EDITOR.clearance + 0.002 - wg;
+    const q = pushInside(shape.outline, { x: p.x + (dx / l) * need, y: p.y + (dy / l) * need }, inset);
+    if (!q) return null;
+    p = q;
+  }
+  const out = { x: r3(p.x), y: r3(p.y), onVolume: vol.id };
+  if (Math.hypot(out.x - want.x, out.y - want.y) <= radius && mountFits(b, vol, out, h, ignore)) return out;
+  // boxed in against the face's edge: the nearest free spot on rings around the finger
+  for (let r = 0.02; r <= radius + 1e-9; r += 0.02) {
+    let best: Spot | null = null;
+    let bd = Infinity;
+    for (let k = 0; k < 16; k++) {
+      const a = (k / 16) * Math.PI * 2;
+      const q = pushInside(shape.outline, { x: want.x + Math.cos(a) * r, y: want.y + Math.sin(a) * r }, inset);
+      if (!q) continue;
+      const c = { x: r3(q.x), y: r3(q.y), onVolume: vol.id };
+      const d = Math.hypot(c.x - want.x, c.y - want.y);
+      if (d < bd && d <= radius && mountFits(b, vol, c, h, ignore)) {
+        bd = d;
+        best = c;
+      }
+    }
+    if (best) return best;
+  }
+  return null;
+}
+
+/**
+ * Move / turn / scale volume `id` and every hold bolted onto it as one piece (the holds keep their place
+ * on the face). Mutates the draft; returns false when there is no such volume.
+ */
+export function transformVolume(b: BoulderDef, id: string, t: { x?: number; y?: number; angle?: number; size?: number }): boolean {
+  const vol = b.holds.find((h) => h.id === id && h.type === 'volume');
+  if (!vol) return false;
+  const x = t.x ?? vol.x;
+  const y = t.y ?? vol.y;
+  const da = (t.angle ?? vol.angle) - vol.angle;
+  const k = t.size !== undefined && vol.size > 0 ? t.size / vol.size : 1;
+  const c = Math.cos(da);
+  const s = Math.sin(da);
+  for (const m of mountsOf(b, id)) {
+    const ox = (m.x - vol.x) * k;
+    const oy = (m.y - vol.y) * k;
+    m.x = r3(x + ox * c - oy * s);
+    m.y = r3(y + ox * s + oy * c);
+    if (da) m.angle = wrapA(m.angle + da);
+  }
+  vol.x = r3(x);
+  vol.y = r3(y);
+  if (t.angle !== undefined) vol.angle = r3(t.angle);
+  if (t.size !== undefined) vol.size = r3(t.size);
+  return true;
+}
+
+const wrapA = (a: number): number => {
+  let r = a % (Math.PI * 2);
+  if (r > Math.PI) r -= Math.PI * 2;
+  if (r <= -Math.PI) r += Math.PI * 2;
+  return r3(r);
+};
+
+/** Remove a hold (a volume takes the holds bolted onto it along). Returns the removed holds. */
+export function removeHold(b: BoulderDef, id: string): HoldDef[] {
+  const gone = b.holds.filter((h) => h.id === id || h.onVolume === id);
+  if (gone.length) b.holds = b.holds.filter((h) => !gone.includes(h));
+  return gone;
 }
 
 // ───────────────────────────── validation ─────────────────────────────
@@ -457,18 +809,33 @@ export function validateDraft(b: BoulderDef): DraftCheck {
   const flagged = new Set<string>();
   let off = 0;
   let overlaps = 0;
+  let unmounted = 0;
+  const byId = new Map(b.holds.map((h) => [h.id, h] as const));
+  const caps = b.holds.map((h) => capsuleOf(h));
   for (let i = 0; i < b.holds.length; i++) {
     const h = b.holds[i];
-    if (!inBounds(h, holdBounds(b, h), 0.012)) {
+    const vol = h.onVolume ? byId.get(h.onVolume) : undefined;
+    if (vol && vol.type === 'volume') {
+      // bolted onto a volume: it must sit on that volume's face
+      if (insideDistance(volumeShape(vol).outline, h) < -EDITOR.mountTolerance) {
+        flagged.add(h.id);
+        unmounted++;
+      }
+    } else if (!inBounds(h, holdBounds(b, { ...h, onVolume: undefined }), 0.012)) {
       flagged.add(h.id);
       off++;
     }
     for (let j = i + 1; j < b.holds.length; j++) {
       const o = b.holds[j];
-      const ra = footprint(h);
-      const rb = footprint(o);
-      const gap = Math.hypot(h.x - o.x, h.y - o.y) - ra - rb;
-      if (gap < -EDITOR.overlapTolerance * Math.min(ra, rb) * 2) {
+      if (mountPair(h, o)) continue;
+      // only clear collisions: the tight capsule footprints AND the generous round ones both overlap
+      // well past the tolerance (generated problems — the game's own reference — always pass)
+      const ca = caps[i];
+      const cb = caps[j];
+      if (segSegDist(ca, cb) - ca.r - cb.r >= -EDITOR.overlapTolerance * Math.min(ca.r, cb.r) * 2) continue;
+      const ra = roundRadius(h);
+      const rb = roundRadius(o);
+      if (Math.hypot(h.x - o.x, h.y - o.y) - ra - rb < -EDITOR.overlapTolerance * Math.min(ra, rb) * 2) {
         if (!flagged.has(h.id) || !flagged.has(o.id)) overlaps++;
         flagged.add(h.id);
         flagged.add(o.id);
@@ -512,8 +879,8 @@ export function validateDraft(b: BoulderDef): DraftCheck {
       ok: wOk,
       label: 'On the wall',
       value: wOk ? 'OK' : `${flagged.size} hold${flagged.size === 1 ? '' : 's'}`,
-      fix: overlaps > 0 ? 'Separate overlapping holds' : 'Move holds onto the wall',
-      short: overlaps > 0 ? 'Overlapping' : 'Off the wall',
+      fix: overlaps > 0 ? 'Separate overlapping holds' : unmounted > 0 ? 'Move holds back onto their volume' : 'Move holds onto the wall',
+      short: overlaps > 0 ? 'Overlapping' : unmounted > 0 ? 'Off its volume' : 'Off the wall',
     },
     { id: 'rise', ok: rOk, label: 'Top above start', value: rOk ? 'OK' : 'LOW', fix: 'Set the top higher than the start', short: 'Top too low' },
   ];
