@@ -833,11 +833,6 @@
   cursor: pointer;
   appearance: none;
   -webkit-appearance: none;
-  transition:
-    background-color 0.2s,
-    border-color 0.2s,
-    color 0.2s,
-    transform 0.16s var(--ease);
 }
 .ed-wt.is-pressed {
   transform: scale(0.96);
@@ -908,10 +903,6 @@
   cursor: pointer;
   appearance: none;
   -webkit-appearance: none;
-  transition:
-    background-color 0.2s,
-    border-color 0.2s,
-    color 0.2s;
 }
 .ed-wv-b.on {
   border-color: rgba(var(--c-signal-rgb), 0.75);
@@ -1195,10 +1186,6 @@
   cursor: pointer;
   appearance: none;
   -webkit-appearance: none;
-  transition:
-    background-color 0.2s,
-    border-color 0.2s,
-    color 0.2s;
 }
 .ed-style.on {
   border-color: rgba(var(--c-signal-rgb), 0.75);
@@ -1435,7 +1422,7 @@
 .ed-pal-n {
   font-style: normal;
   font-weight: 600;
-  color: var(--c-steel);
+  color: var(--c-fog);
 }
 .ed-pal-tab.on .ed-pal-n {
   color: var(--c-signal-ink);
@@ -1617,16 +1604,16 @@
 .ed-det-row {
   display: flex;
   align-items: center;
-  height: 44px;
+  height: 46px;
   border-radius: 13px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--hair);
 }
 .ed-det-btn {
   flex: none;
-  width: 42px;
-  height: 42px;
-  min-height: 42px;
+  width: 44px;
+  height: 44px;
+  min-height: 44px;
   padding: 0;
   border: 0;
   border-radius: 12px;
@@ -1673,9 +1660,6 @@
   cursor: pointer;
   appearance: none;
   -webkit-appearance: none;
-  transition:
-    background-color 0.2s,
-    color 0.2s;
 }
 .ed-det-f.on,
 .ed-det-fin.on {
@@ -1846,6 +1830,18 @@
 /* ───────────────────────────── responsive + motion ───────────────────────────── */
 
 @container ui (max-width: 374px) {
+  .ed-wt {
+    gap: 4px;
+    padding: 0 4px 0 6px;
+  }
+  .ed-wt .ed-wg {
+    width: 18px;
+    height: 18px;
+  }
+  .ed-wt-l {
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
   .ed-test,
   .ed-pub {
     padding: 0 11px;

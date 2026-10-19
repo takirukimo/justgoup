@@ -3,7 +3,7 @@ import { chromium } from 'playwright-core';
 const [url, out, stepsJson] = process.argv.slice(2);
 const steps = stepsJson ? JSON.parse(stepsJson) : [];
 const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium', args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
-const page = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true });
+const page = await browser.newPage({ viewport: { width: Number(process.env.VW || 390), height: Number(process.env.VH || 844) }, deviceScaleFactor: 2, hasTouch: true, isMobile: true });
 page.setDefaultTimeout(120000);
 const logs = [];
 page.on('console', (m) => logs.push(`[${m.type()}] ${m.text()}`));
