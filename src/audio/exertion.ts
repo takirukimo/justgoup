@@ -21,7 +21,8 @@ export type ExertMoment =
   | 'dyno-miss'
   | 'pump-warning'
   | 'overload' // an overload while hanging still
-  | 'shake'; // the tremor started
+  | 'shake' // the tremor started
+  | 'breath-release'; // the next grab after a breath held through a crux: a sharp exhale (breath cooldown)
 
 /** What to play: a vocal one-shot, a breath one-shot, or heavier breathing (`breathe` 0..1). */
 export interface ExertAction {
@@ -117,6 +118,9 @@ export class ExertionDirector {
       case 'overload':
       case 'shake':
         return this.heavier(0.25 + 0.35 * sev);
+      case 'breath-release':
+        // never a vocal: the held breath goes out (within the breath cooldown), else just breathing on
+        return this.exhale(now, 0.2 + 0.25 * sev);
     }
     return NONE;
   }

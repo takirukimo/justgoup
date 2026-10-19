@@ -376,6 +376,26 @@ export class CameraRig {
   private sagX = 0;
   private sagV = 0;
 
+  // ── body as feedback (Phase D): the view breathes with the climber and closes in under strain ──
+  private breathV = 0;
+  private breathD = 0;
+  private strain = 0;
+  private strainS = 0;
+  private followW = 0;
+  /** 0 with reduced motion (no breath sway, no dolly-in), 1 otherwise. */
+  motionScale = 1;
+
+  /**
+   * The climber's breathing (value −1..1, + = inhaled; depth 0..~1.5) and strain 0..1 (tension past
+   * the crux line or a slip clock past half way). In 'follow' the view rises a few mm with each
+   * breath and dollies in up to 4 % under strain (eased in over 0.8 s, out over 1.5 s).
+   */
+  setBreath(value: number, depth: number, strain: number): void {
+    this.breathV = clamp(value, -1, 1);
+    this.breathD = clamp(depth, 0, 1.6);
+    this.strain = clamp(strain, 0, 1);
+  }
+
   setAspect(aspect: number): void {
     this.camera.aspect = aspect;
     this.camera.updateProjectionMatrix();
@@ -1145,6 +1165,19 @@ export class CameraRig {
     cam.position.copy(this.pos.value).add(this.shakeOff);
     cam.up.copy(this.up.value).normalize();
     this.v1.copy(this.look.value).addScaledVector(this.shakeOff, 0.6);
+    {
+      const fk = this.mode === 'follow' ? 1 : 0;
+      this.followW += (fk - this.followW) * (1 - Math.exp(-d * 3));
+      const st = this.strain * fk * this.motionScale;
+      this.strainS += (st - this.strainS) * (1 - Math.exp(-d / (st > this.strainS ? 0.8 : 1.5)));
+      const w = this.followW * this.motionScale;
+      if (w > 1e-3) {
+        const b = this.breathV * this.breathD * 0.005 * w;
+        cam.position.addScaledVector(cam.up, b);
+        this.v1.addScaledVector(cam.up, b * 0.4);
+      }
+      if (this.strainS > 1e-4) cam.position.lerp(this.v1, this.strainS * 0.04);
+    }
     cam.lookAt(this.v1);
     const rollNoise = noise1(st * 0.8, 9.2) * shake * 1.6 * DEG;
     if (this.roll.value !== 0 || rollNoise !== 0) cam.rotateZ(this.roll.value + rollNoise);

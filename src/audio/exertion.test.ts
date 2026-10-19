@@ -77,4 +77,16 @@ describe('exertion director (owner: effort audio was annoying)', () => {
     expect(p.breathe).toBeGreaterThan(0.5);
     expect(d.decide(20, 'slip', 0.5).vocal).toBe('gasp');
   });
+
+  it('a breath held through a crux goes out as one exhale on the next grab, never a grunt, within the breath gap', () => {
+    const d = new ExertionDirector(rng(13));
+    const a = d.decide(30, 'breath-release', 0.8);
+    expect(a.vocal).toBeNull();
+    expect(a.breath).toBe('exhale');
+    // a second release right after only breathes on (breath one-shots keep their 2.5–4.5 s gap)
+    const b = d.decide(31, 'breath-release', 0.8);
+    expect(b.vocal).toBeNull();
+    expect(b.breath).toBeNull();
+    for (let t = 32; t < 120; t += 0.3) expect(d.decide(t, 'breath-release', 1).vocal).toBeNull();
+  });
 });

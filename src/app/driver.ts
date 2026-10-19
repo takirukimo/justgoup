@@ -7,13 +7,16 @@
 // only on genuinely hard moments (an overload while moving, a reach at the anatomical edge, a
 // slip, a dyno launch / catch, a deep-pump warning) with randomised cooldowns, and otherwise
 // breathes harder. Nothing here repeats a grunt on a timer.
+// Body as feedback (Phase D): a breath held through a crux (tension past 0.82) goes out in one
+// exhale on the next grab; a limb whose slip clock passes half way creeps — a soft scrape and a
+// tick of haptics before the slip itself (iOS has no vibration: the sound and the body carry it).
 
 import type { RendererAPI, SimEvent } from '../core/contracts';
 import { bus } from '../core/events';
-import { clamp } from '../core/math';
+import { clamp, smoothstep } from '../core/math';
 import type { ClimberState, HoldDef, LimbId, Vec2 } from '../core/types';
 import { isHand } from '../core/types';
-import { GAME } from '../config/tuning';
+import { GAME, SIM } from '../config/tuning';
 import type { ClimberSim } from '../game/climber-sim';
 import { usableByHand } from '../game/holds';
 import type { Services } from './services';
@@ -73,6 +76,11 @@ export class SimDriver {
   private lookOn = false;
   private lookSet = false;
   private readonly lookSent: Vec2 = { x: NaN, y: NaN };
+  /** Seconds the breath has been held through the current crux. */
+  private heldT = 0;
+  /** Per limb: slip clock estimate (the sim's rule from stress) and whether its creep cue fired. */
+  private readonly slipK = [0, 0, 0, 0];
+  private readonly creepCued = [false, false, false, false];
 
   constructor(svc: Services, sim: ClimberSim, opts: DriverOptions = {}) {
     this.svc = svc;
@@ -156,6 +164,9 @@ export class SimDriver {
           // a hand that had to stretch to the very edge of its reach for it
           const reach = this.dragReach[LIMB_INDEX[e.limb]];
           if (reach >= REACH_EDGE) audio.exert('reach-edge', clamp((reach - REACH_EDGE) / 0.08, 0, 1) * 0.6 + (1 - clamp(e.quality, 0, 1)) * 0.4, { pan });
+          // the breath held through the crux goes out with the catch of the next hold
+          else if (this.heldT > 0.6) audio.exert('breath-release', clamp((this.heldT - 0.6) / 2, 0, 1), { pan });
+          this.heldT = 0;
         } else {
           audio.play('foot', { pan });
           audio.haptic(6);
@@ -318,10 +329,28 @@ export class SimDriver {
         else this.svc.renderer.fx.chalkPuff(L.pos, 0.6);
       }
     }
-    if (st.phase !== 'climbing') return;
+    if (st.phase !== 'climbing') {
+      this.heldT = 0;
+      return;
+    }
+    // a breath held through a crux (released on the next hand grab)
+    if (st.tension > 0.82 && !st.airborne) this.heldT += dt;
+    else if (st.tension < 0.55) this.heldT = Math.max(0, this.heldT - dt * 0.5);
     for (let i = 0; i < 4; i++) {
       const L = st.limbs[LIMB_ORDER[i]];
       if (L.dragging && L.reachRatio > this.dragReach[i]) this.dragReach[i] = L.reachRatio;
+      // slip clock (the sim's rule from the stress): half way, the fingers creep / the toe skates
+      const on = (!!L.holdId || L.smearing) && !L.dragging;
+      let k = this.slipK[i];
+      if (on && L.stress > SIM.slipStart) k = Math.min(1, k + (dt * smoothstep(SIM.slipStart, SIM.slipFull, L.stress)) / SIM.slipTime);
+      else k = on ? Math.max(0, k - SIM.slipRecover * dt) : 0;
+      this.slipK[i] = k;
+      if (k >= 0.5 && !this.creepCued[i]) {
+        this.creepCued[i] = true;
+        const hand = i < 2;
+        this.svc.audio.play('smear', { pan: this.pan(L.pos.x), volume: hand ? 0.2 : 0.28, pitch: hand ? 1.3 : 1.55 });
+        this.svc.audio.haptic([6, 40, 6]);
+      } else if (k < 0.15) this.creepCued[i] = false;
     }
     if (st.shake > 0.05) {
       this.shakePulse -= dt;

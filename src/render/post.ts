@@ -19,6 +19,7 @@ const FinalShader = {
     uGrain: { value: 0.035 },
     uVignette: { value: 0.42 },
     uCA: { value: 0.0 },
+    uDesat: { value: 0.0 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -33,6 +34,7 @@ const FinalShader = {
     uniform float uGrain;
     uniform float uVignette;
     uniform float uCA;
+    uniform float uDesat;
     varying vec2 vUv;
 
     float hash(vec2 p) {
@@ -57,6 +59,8 @@ const FinalShader = {
         col = texture2D(tDiffuse, uv).rgb;
       }
       float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+      // Pure mode strain: the world drains of colour a little at the crux (≤ 25 %)
+      col = mix(col, vec3(luma), uDesat);
       // gentle split-tone: cool shadows, warm highlights
       col += vec3(-0.006, 0.0, 0.010) * (1.0 - smoothstep(0.0, 0.35, luma));
       col *= mix(vec3(1.0), vec3(1.025, 1.0, 0.97), smoothstep(0.45, 1.0, luma));
@@ -129,6 +133,11 @@ export class PostFX {
     this.bloom.strength = strength;
     this.bloom.radius = radius;
     this.bloom.threshold = threshold;
+  }
+
+  /** Strain desaturation (Pure mode, research §4.2): 0..0.25. */
+  setDesaturation(v: number): void {
+    this.final.uniforms.uDesat.value = Math.max(0, Math.min(0.25, v));
   }
 
   setVignette(v: number): void {

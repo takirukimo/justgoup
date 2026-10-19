@@ -18,10 +18,16 @@
 //               hip turned in, high steps with the hips sitting back, matched hands / feet side
 //               by side, damped secondary motion (breathing, sway, Elvis-leg tremor, body shake,
 //               head tracking) and phase poses (falling, landed, hanging, topped + celebrate).
+//               Body as feedback (research §4.2, Phase D; stronger in Pure mode via setCueGain):
+//               breathing 15 → 30 → 45 /min with effort, held through a crux and let go after it;
+//               a pumped forearm swells, flushes and chicken-wings its elbow; overloaded hands
+//               tremble at 8–12 Hz and overloaded feet do the Elvis leg; the fingers carry chalk
+//               that fades as the hand sweats; a hand whose slip clock runs uncurls its fingers and
+//               creeps along the pull, a foot's toe skates (onCreep → a chalk trickle).
 
 import * as THREE from 'three';
 import type { ChalkId, ClimberState, ColorwayId, HeadId, HoldType, LimbId, LimbSnapshot, Vec2 } from '../core/types';
-import { BODY, GAME } from '../config/tuning';
+import { BODY, GAME, SIM } from '../config/tuning';
 import { CHALKS, COLORWAYS, SKIN_TONE, type ColorwayDef } from '../config/skins';
 import { PALETTE } from '../config/brand';
 import type { WallFrame } from './wall-frame';
@@ -2584,7 +2590,7 @@ export class BodyRig {
     B[ids.farm].position.copy(J.elbow[s]);
     basisQuat(_t1, _t2, B[ids.farm].quaternion);
     // a pumped forearm swells (girth only; the length stays the solved one)
-    const flex = 1 + 0.075 * Math.min(1, Math.max(0, goal.pump));
+    const flex = 1 + 0.08 * Math.min(1.6, Math.max(0, goal.pump));
     B[ids.farm].scale.set(flex, k, flex);
     // hand
     const H = B[ids.hand];
@@ -3447,6 +3453,7 @@ const LEG_REACH = THIGH + SHIN;
 
 const HAND_IDS: readonly LimbId[] = ['LH', 'RH'];
 const FOOT_IDS: readonly LimbId[] = ['LF', 'RF'];
+const LIMB_ORDER_IDS: readonly LimbId[] = ['LH', 'RH', 'LF', 'RF'];
 
 /** Smooth pseudo-random signal in [-1, 1] (sum of incommensurate sines). */
 function wobble(t: number, seed: number): number {
@@ -3486,6 +3493,27 @@ export class ClimberModel extends THREE.Group {
   private blink = 0;
   private initialized = false;
   private limbWorld: Record<LimbId, THREE.Vector3> = { LH: new THREE.Vector3(), RH: new THREE.Vector3(), LF: new THREE.Vector3(), RF: new THREE.Vector3() };
+  // ── body as feedback (Phase D) ──
+  /** Cue amplitude (1 = default HUD, ≈1.4 in Pure mode where the body is the only feedback). */
+  private cueGain = 1;
+  /** Breathing phase (accumulated, so a changing rate never jumps), smoothed effort and breath hold. */
+  private breathPh = 0;
+  private effS = 0;
+  private holdK = 0;
+  private breathV = 0;
+  private breathD = 0.3;
+  /** Per limb: estimated slip clock (the sim's rule from stress) and its creep blend. */
+  private slipK = [0, 0, 0, 0];
+  private creepK = [0, 0, 0, 0];
+  private creepFired = [false, false, false, false];
+  /** Per hand: chicken-wing blend (pump) and the smoothed friction (chalk on the fingers). */
+  private wingK = [0, 0];
+  private fricS = [1, 1];
+  /**
+   * Optional hook (the renderer wires it to its fx): a hand / foot whose slip clock passed half way —
+   * the fingers creep, a little chalk trickles off the hold. `p` is a scratch wall-local point.
+   */
+  onCreep: ((limb: LimbId, p: Vec2) => void) | null = null;
 
   // smoothed state
   private sP = new THREE.Vector3();
@@ -3607,6 +3635,25 @@ export class ClimberModel extends THREE.Group {
 
   setHarness(on: boolean): void {
     this.rig.setHarness(on);
+  }
+
+  /** Body-cue amplitude: 1 with the HUD, ≈1.4 in Pure mode (breathing, tremor, pump, creep, Elvis leg). */
+  setCueGain(k: number): void {
+    this.cueGain = Math.max(0.5, Math.min(2, Number.isFinite(k) ? k : 1));
+  }
+
+  /** Breathing for the camera's breath sway: value −1..1 (+ = inhaled) and depth 0..~1.5. */
+  get breathValue(): number {
+    return this.breathV;
+  }
+
+  get breathDepth(): number {
+    return this.breathD;
+  }
+
+  /** The furthest-run slip clock estimate of the four limbs (0..1). */
+  get maxSlip(): number {
+    return Math.max(this.slipK[0], this.slipK[1], this.slipK[2], this.slipK[3]);
   }
 
   setLookTarget(p: Vec2 | null): void {
@@ -3949,12 +3996,35 @@ export class ClimberModel extends THREE.Group {
     // ── head ──
     this.poseHead(state, frame, d, snap, celebrating ? ct : -1);
 
-    // ── breathing ──
-    const effort = Math.min(1, state.tension * 0.8 + state.pump * 0.6);
-    const rate = 0.26 + 0.34 * effort + (ph === 'landed' ? 0.25 * Math.exp(-this.phaseT * 0.3) : 0);
-    g.breath = Math.sin(t * rate * Math.PI * 2);
-    g.breathDepth = 0.45 + 0.55 * effort;
-    if (calm > 1e-3) g.chest.addScaledVector(Uw, (g.breath * 0.5 + 0.5) * 0.004 * calm);
+    // ── breathing (research §4.2): effort = max(tension, pump) smoothed over ~1 s drives the rate,
+    // 15 → 30 → 45 /min (rest → working → crux), and the depth. Above tension 0.8 the breath is held
+    // (chest full, the rate all but stops) and let go in a quick exhale once the position eases.
+    const climbing = ph === 'climbing';
+    const effRaw = Math.min(1.2, Math.max(state.tension, state.pump));
+    this.effS += (effRaw - this.effS) * (snap ? 1 : dampK(1, d));
+    const eff = Math.min(1, this.effS);
+    const holdT = climbing && !state.airborne ? sstep(0.78, 0.92, state.tension) : 0;
+    this.holdK += (holdT - this.holdK) * (snap ? 1 : dampK(holdT > this.holdK ? 5 : 10, d));
+    const rpm = 15 + 30 * eff + (ph === 'landed' ? 22 * Math.exp(-this.phaseT * 0.3) : 0);
+    this.breathPh += d * (rpm / 60) * Math.PI * 2 * (1 - 0.92 * this.holdK);
+    if (this.breathPh > 1e4) this.breathPh -= Math.PI * 2 * 1500;
+    let br = Math.sin(this.breathPh);
+    br += (0.75 - br) * this.holdK;
+    const gainB = 1 + (this.cueGain - 1) * 0.8;
+    g.breath = br;
+    g.breathDepth = (0.45 + 0.75 * eff) * gainB;
+    this.breathV = br;
+    this.breathD = g.breathDepth;
+    // the upper body heaves with each breath (shoulders rise on the inhale: visible at phone scale
+    // once the climber works; a calm rest keeps the old gentle rise)
+    if (onWall || ph === 'landed') {
+      const heave = (br * 0.5 + 0.5) * (0.0015 + 0.0055 * eff * gainB + 0.004 * calm);
+      g.chest.addScaledVector(Uw, heave).addScaledVector(Nw, heave * 0.35);
+      const lift = (br * 0.5 + 0.5) * (0.003 + 0.01 * eff) * gainB;
+      g.hands[0].lift += lift;
+      g.hands[1].lift += lift;
+    }
+    this.updateHandSkin(state, d, snap);
 
     // blink
     this.blinkT -= d;
@@ -4114,11 +4184,33 @@ export class ClimberModel extends THREE.Group {
     // a hand on its way to / from the bag or a shake-out swings out round the hip, never through it
     const transit = Math.max(Math.sin(Math.PI * Math.min(1, ck)), Math.sin(Math.PI * Math.min(1, sk)) * 0.6);
     if (transit > 1e-3) this.v0.addScaledVector(g.chestRight, side * 0.15 * transit).addScaledVector(this.Nh, 0.07 * transit);
-    // per-forearm pump: smoothed; a deep pump adds a fine tremor while holding on
+    // per-forearm pump: smoothed; the forearm swells (girth, scaled by the cue gain) and a deep pump
+    // adds a fine tremor while holding on
     this.pumpS[s] += ((L.pump ?? 0) - this.pumpS[s]) * (snap ? 1 : dampK(3, d));
-    hg.pump = this.pumpS[s];
+    hg.pump = this.pumpS[s] * this.cueGain;
+    const gain = this.cueGain;
+    const holding = !!L.holdId && onWall && ph === 'climbing';
     const pumpTrem = L.holdId && onWall ? sstep(0.55, 1, this.pumpS[s]) : 0;
     if (pumpTrem > 1e-3) this.v0.addScaledVector(Nl, wobble(t * 23, s * 4.7) * 0.0035 * pumpTrem);
+    // fatigue tremor (research §4.2: 8–12 Hz, ≈6 mm at stress 0.7 → 15 mm at 1.3, hand + forearm) on an
+    // overloaded or deeply pumped hand, in the wall plane so the camera sees it
+    const stressT = holding ? sstep(SIM.shakeOff, 1.3, L.stress) : 0;
+    const trem = Math.max(stressT, pumpTrem * 0.55);
+    if (trem > 1e-3) {
+      const amp = (0.004 + 0.011 * stressT) * trem * gain;
+      const w = t * Math.PI * 2 * 4.3;
+      this.v0.addScaledVector(Rw, wobble(w, s * 3.1 + 0.4) * amp).addScaledVector(Ul, wobble(w * 1.13, s * 1.7 + 2.2) * amp * 0.7);
+    }
+    // slip clock (the sim's rule, read off the stress): past ~15 % the fingers start to open and the
+    // hand creeps 5–15 mm along the pull toward the shoulder; half way, a little chalk trickles off
+    this.slipClock(s, L, holding, d, snap);
+    const creep = this.creepK[s];
+    if (creep > 1e-3) {
+      this.v1.subVectors(S, this.v0);
+      const len = this.v1.length();
+      if (len > 1e-4) this.v0.addScaledVector(this.v1, ((0.005 + 0.011 * creep) * creep * gain) / len);
+      this.v0.addScaledVector(Rw, wobble(t * 47, s * 2.3) * 0.0025 * creep);
+    }
 
     // smoothing
     const lam = sk > 0.5 ? 40 : fk > 0.3 ? 45 : L.holdId ? 40 : L.dragging ? 30 : ph === 'falling' ? 50 : 16;
@@ -4206,6 +4298,13 @@ export class ClimberModel extends THREE.Group {
     hg.curlA = sh.a + (ck > 0.5 ? 0.25 * dip : 0);
     hg.curlB = sh.b;
     hg.thumb = sh.thumb;
+    if (creep > 1e-3 && L.holdId) {
+      // the fingers peel open before the slip
+      const open = Math.min(1, creep * gain);
+      hg.curlA -= hg.curlA * 0.45 * open;
+      hg.curlB -= hg.curlB * 0.6 * open;
+      hg.thumb -= hg.thumb * 0.4 * open;
+    }
     // shoulder shrug when reaching up (fully up through a throw)
     const rel = this.v0.subVectors(hg.target, S).dot(WORLD_UP);
     hg.lift = Math.max(sstep(0.2, 0.55, rel) * 0.025, fk * sstep(0.1, 0.4, rel) * 0.035);
@@ -4223,6 +4322,13 @@ export class ClimberModel extends THREE.Group {
       .multiplyScalar(0.75 * (1 - hi) + 0.3 * hi - 0.15 * over)
       .addScaledVector(this.goal.chestRight, side * (0.45 + 0.15 * hi + 0.6 * over))
       .addScaledVector(WORLD_UP, -0.25 * (1 - hi) - 0.65 * hi);
+    // pump ≥ 0.5: the elbow chicken-wings out (10–25°), the classic tell of a flaming forearm
+    const wingT = holding ? sstep(0.45, 1, this.pumpS[s]) : 0;
+    this.wingK[s] += (wingT - this.wingK[s]) * (snap ? 1 : dampK(2.5, d));
+    if (this.wingK[s] > 1e-3) {
+      const wk = this.wingK[s] * Math.min(1.5, gain);
+      pole.addScaledVector(this.goal.chestRight, side * 0.55 * wk).addScaledVector(WORLD_UP, 0.3 * wk).addScaledVector(Nw, 0.12 * wk);
+    }
     if (ph === 'landed') pole.copy(Nw).multiplyScalar(0.8).addScaledVector(this.goal.chestRight, side * 0.6);
     if (rk > 0.5) pole.copy(WORLD_UP).multiplyScalar(-0.6).addScaledVector(this.goal.chestRight, side * 0.8).addScaledVector(Nw, 0.2);
     if (ck > 1e-3) {
@@ -4234,7 +4340,7 @@ export class ClimberModel extends THREE.Group {
       this.v1.copy(this.Nh).multiplyScalar(0.7).addScaledVector(this.goal.chestRight, side * 0.4).addScaledVector(WORLD_UP, -0.2);
       pole.normalize().lerp(this.v1.normalize(), sk);
     }
-    const tremor = Math.max(L.shake, pumpTrem * 0.35);
+    const tremor = Math.max(L.shake, pumpTrem * 0.35, stressT * 0.5) * Math.min(1.5, gain);
     if (tremor > 0.01) {
       pole.addScaledVector(Uw, wobble(t * 41, s * 3.3) * tremor * 0.6).addScaledVector(Rw, wobble(t * 37, s * 5.1 + 2) * tremor * 0.5);
     }
@@ -4325,6 +4431,12 @@ export class ClimberModel extends THREE.Group {
     if (snap || this.sFoot[s].distanceToSquared(this.v0) > 0.3) this.sFoot[s].copy(this.v0);
     else this.sFoot[s].lerp(this.v0, dampK(lam, d));
     fg.target.copy(this.sFoot[s]);
+    // a foot whose slip clock runs: the toe skates down off the hold, the knee jitters
+    this.slipClock(2 + s, L, mode === 'hold' && ph === 'climbing', d, snap);
+    const fcreep = this.creepK[2 + s];
+    if (fcreep > 1e-3) {
+      fg.target.addScaledVector(Uw, -(0.004 + 0.01 * fcreep) * fcreep * this.cueGain).addScaledVector(Rw, wobble(t * 53, s * 1.9) * 0.003 * fcreep);
+    }
     fg.pinned = mode === 'hold' || mode === 'wall' || mode === 'stand';
     fg.layer = layerOf(L);
 
@@ -4352,7 +4464,9 @@ export class ClimberModel extends THREE.Group {
       dir.copy(Nw).multiplyScalar(-Math.cos(turn)).addScaledVector(Rw, side * Math.sin(turn));
       let heel = L.smearing ? 0.72 : 0.24 + 0.1 * (1 - high) - 0.28 * overhang;
       if (mode === 'wall') heel = 0.95;
-      heel += Math.sin(t * 69 + s * 1.7) * 0.34 * L.shake + Math.sin(t * 43 + s) * 0.08 * L.shake;
+      // Elvis leg: the heel bounces on an overloaded foot (8–12 Hz), harder in Pure mode
+      const elvis = L.shake * Math.min(1.6, this.cueGain);
+      heel += Math.sin(t * 69 + s * 1.7) * 0.34 * elvis + Math.sin(t * 43 + s) * 0.08 * elvis;
       dir.multiplyScalar(Math.cos(heel)).addScaledVector(Uw, Math.sin(heel)).normalize();
       up.copy(Uw).addScaledVector(dir, -Uw.dot(dir)).normalize();
       // roll onto the inside edge for frog feet
@@ -4490,7 +4604,63 @@ export class ClimberModel extends THREE.Group {
         up.addScaledVector(dir, -up.dot(dir)).normalize();
       }
     }
+    if (mode === 'hold' && L.shake > 0.02) {
+      // the knee jiggles with the heel (Elvis leg)
+      const e = L.shake * Math.min(1.6, this.cueGain);
+      pole.normalize().addScaledVector(Uw, Math.sin(t * 69 + s * 1.7 + 0.6) * 0.22 * e).addScaledVector(Rw, Math.sin(t * 57 + s) * 0.12 * e);
+    }
     pole.normalize();
+  }
+
+  /**
+   * Slip clock estimate for limb `i` (0 LH, 1 RH, 2 LF, 3 RF): the sim's own rule (SIM.slipStart /
+   * slipFull / slipTime / slipRecover) applied to the reported stress, since the snapshot carries no
+   * clock. Drives creepK (0..1: fingers opening, toe skating) and fires onCreep once per episode.
+   */
+  private slipClock(i: number, L: LimbSnapshot, on: boolean, d: number, snap: boolean): void {
+    let k = this.slipK[i];
+    if (!on || snap) k = 0;
+    else if (L.stress > SIM.slipStart) k += (d * sstep(SIM.slipStart, SIM.slipFull, L.stress)) / SIM.slipTime;
+    else k = Math.max(0, k - SIM.slipRecover * d);
+    k = Math.min(1, k);
+    this.slipK[i] = k;
+    const target = sstep(0.12, 0.85, k);
+    this.creepK[i] += (target - this.creepK[i]) * (snap ? 1 : dampK(target > this.creepK[i] ? 14 : 6, d));
+    if (k >= 0.5 && !this.creepFired[i]) {
+      this.creepFired[i] = true;
+      if (this.onCreep) {
+        this.p2.x = L.pos.x;
+        this.p2.y = L.pos.y;
+        this.onCreep(LIMB_ORDER_IDS[i], this.p2);
+      }
+    } else if (k < 0.15) this.creepFired[i] = false;
+  }
+
+  /**
+   * Hands as feedback in the body material: the chalk on the fingers fades with the hand's friction
+   * (a greasy hand shows bare, glossy skin), a pumped forearm flushes. Climber only.
+   */
+  private updateHandSkin(state: ClimberState, d: number, snap: boolean): void {
+    const u = this.rig.material.userData.body;
+    const gain = this.cueGain;
+    for (let s = 0; s < 2; s++) {
+      const L = state.limbs[HAND_IDS[s]];
+      const f = L.friction ?? 1;
+      this.fricS[s] += (f - this.fricS[s]) * (snap ? 1 : dampK(f > this.fricS[s] ? 6 : 2, d));
+      const fr = Math.max(0, Math.min(1, this.fricS[s]));
+      const chalk = 0.1 + 0.9 * Math.pow(fr, 1.25);
+      const sweat = sstep(0.62, 0.12, fr) * Math.min(1, 0.75 * gain);
+      const flush = sstep(0.35, 1, this.pumpS[s]) * Math.min(0.85, 0.55 * gain);
+      if (s === 0) {
+        u.uHandChalk.value.x = chalk;
+        u.uHandSweat.value.x = sweat;
+        u.uFlush.value.x = flush;
+      } else {
+        u.uHandChalk.value.y = chalk;
+        u.uHandSweat.value.y = sweat;
+        u.uFlush.value.y = flush;
+      }
+    }
   }
 
   /**

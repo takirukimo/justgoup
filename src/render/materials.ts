@@ -608,6 +608,14 @@ export interface BodyUniforms {
   uAccent2: { value: THREE.Color };
   uChalk: { value: THREE.Color };
   uDetail: { value: THREE.Texture | null };
+  /**
+   * Body-as-feedback (Phase D; climber only, neutral on the guide): per hand (x left, y right)
+   * the chalk left on the fingers (1 fresh … ≈0.1 greasy), the sweaty sheen of a greasy hand (0..1),
+   * and the flush of a pumped forearm (0..1).
+   */
+  uHandChalk: { value: THREE.Vector2 };
+  uHandSweat: { value: THREE.Vector2 };
+  uFlush: { value: THREE.Vector2 };
 }
 
 export type BodyMaterial = THREE.MeshPhysicalMaterial & { userData: { body: BodyUniforms } };
@@ -630,9 +638,12 @@ export function createBodyMaterial(atlas: THREE.Texture): BodyMaterial {
     uAccent2: { value: new THREE.Color(PALETTE.signal) },
     uChalk: { value: new THREE.Color(PALETTE.chalk) },
     uDetail: { value: atlas },
+    uHandChalk: { value: new THREE.Vector2(1, 1) },
+    uHandSweat: { value: new THREE.Vector2(0, 0) },
+    uFlush: { value: new THREE.Vector2(0, 0) },
   };
   mat.userData.body = u;
-  mat.customProgramCacheKey = () => 'jgu-body-v3';
+  mat.customProgramCacheKey = () => 'jgu-body-v4';
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, u);
     injectRim(shader);
@@ -649,7 +660,8 @@ export function createBodyMaterial(atlas: THREE.Texture): BodyMaterial {
         varying vec3 vPrintColor;
         varying vec4 vMatP;
         varying vec3 vBodyAux;
-        varying vec2 vDetailUv;`,
+        varying vec2 vDetailUv;
+        varying vec4 vArm;`,
       )
       .replace(
         '#include <uv_vertex>',
@@ -659,7 +671,18 @@ export function createBodyMaterial(atlas: THREE.Texture): BodyMaterial {
         vPrintColor = (rid == ${REGION.bag} || rid == ${REGION.bagRim}) ? uBagPrint : uPrint;
         vMatP = uMat[rid];
         vBodyAux = aAux.yzw;
-        vDetailUv = uv;`,
+        vDetailUv = uv;
+        // skin of each hand (hand, fingers, tips, thumb) and forearm: per-hand chalk / sweat / flush
+        vArm = vec4(0.0);
+        #ifdef USE_SKINNING
+        if (rid == ${REGION.skin}) {
+          float bi = skinIndex.x;
+          vArm.x = step(5.5, bi) * step(bi, 9.5);
+          vArm.y = step(11.5, bi) * step(bi, 15.5);
+          vArm.z = step(4.5, bi) * step(bi, 5.5);
+          vArm.w = step(10.5, bi) * step(bi, 11.5);
+        }
+        #endif`,
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
@@ -668,11 +691,15 @@ export function createBodyMaterial(atlas: THREE.Texture): BodyMaterial {
         uniform vec3 uAccent2;
         uniform vec3 uChalk;
         uniform sampler2D uDetail;
+        uniform vec2 uHandChalk;
+        uniform vec2 uHandSweat;
+        uniform vec2 uFlush;
         varying vec3 vRegionColor;
         varying vec3 vPrintColor;
         varying vec4 vMatP;
         varying vec3 vBodyAux;
-        varying vec2 vDetailUv;`,
+        varying vec2 vDetailUv;
+        varying vec4 vArm;`,
       )
       .replace(
         '#include <color_fragment>',
@@ -681,14 +708,21 @@ export function createBodyMaterial(atlas: THREE.Texture): BodyMaterial {
         bcol = mix(bcol, vPrintColor, det.g * vBodyAux.z);
         bcol = mix(bcol, uAccent2, det.b);
         bcol *= 1.0 - det.r * 0.55;
-        float chalkAmt = vBodyAux.x;
+        // a pumped forearm flushes (skin only, ahead of the chalk)
+        float flush = clamp(dot(vArm.zw, uFlush) + dot(vArm.xy, uFlush) * 0.45, 0.0, 1.0);
+        bcol = mix(bcol, bcol * vec3(1.16, 0.8, 0.78), flush);
+        // chalk on the fingers fades as the hand sweats (fresh chalk reads white, a greasy hand bare)
+        float handMask = vArm.x + vArm.y;
+        float chalkAmt = vBodyAux.x * mix(1.0, dot(vArm.xy, uHandChalk), handMask);
+        float sweat = dot(vArm.xy, uHandSweat);
         bcol = mix(bcol, uChalk, chalkAmt);
         bcol *= vBodyAux.y;
         diffuseColor.rgb = bcol;`,
       )
       .replace(
         '#include <roughnessmap_fragment>',
-        `float roughnessFactor = clamp(mix(vMatP.x, 0.97, chalkAmt) + det.r * 0.08 - det.g * 0.12, 0.08, 1.0);`,
+        `float roughnessFactor = clamp(mix(vMatP.x, 0.97, chalkAmt) + det.r * 0.08 - det.g * 0.12, 0.08, 1.0);
+        roughnessFactor = mix(roughnessFactor, 0.34, sweat);`,
       )
       .replace('#include <metalnessmap_fragment>', 'float metalnessFactor = vMatP.z;')
       .replace(

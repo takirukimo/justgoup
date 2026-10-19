@@ -16,7 +16,7 @@ import type { BoulderEditor } from '../editor/editor';
 import { todayKey, tutorialBoulder } from '../game/generator';
 import { defaultProfile, randomClimberName, sanitizeName, saveProfile, flushProfile, type UnlockedItem } from '../net/profile';
 import { runIntro } from '../tutorial/tutorial';
-import { pureOf, readStoredPure, setPureMode, storePure, type SettingsExt } from '../input/pure';
+import { onPureMode, pureOf, readStoredPure, setPureMode, storePure, type SettingsExt } from '../input/pure';
 import { collectUnlocks, UNLOCK_WORD } from './progress';
 import { QualityManager } from './quality';
 import { CommunityRun, DailyRun, LeadTowerRun, SendTrainRun, TestRun, type RunHost } from './runs';
@@ -73,6 +73,9 @@ export class App implements RunHost {
     this.title = new TitleScene(this.svc);
     this.editor = opts.createEditor(this.svc);
     this.svc.ui.onResetProgress = () => this.resetProgress();
+    // Pure climbing: the renderer's body cues and thin-hold cue run stronger (the HUD and the limb
+    // controls follow the same flag on their own)
+    this.offs.push(onPureMode((on) => base.renderer.setPure(on)));
   }
 
   // ═══════════════════════════════ queries (QA / main loop) ═══════════════════════════════
@@ -438,6 +441,7 @@ export class App implements RunHost {
     controls.setAssist(s.assist);
     controls.setReducedMotion(s.reducedMotion);
     veil.setReducedMotion(s.reducedMotion);
+    this.svc.renderer.setMotionScale(s.reducedMotion ? 0 : 1);
     const pure = pureOf(s);
     setPureMode(pure);
     if (persist || pureOf(prev) !== pure) storePure(pure);
