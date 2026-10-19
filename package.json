@@ -1,7 +1,7 @@
 {
   "name": "justgoup",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "STEIBOCK by CHIRAL SPORTS — a premium handheld 3D bouldering and lead climbing game.",
   "scripts": {
@@ -10,17 +10,26 @@
     "build:single": "tsc --noEmit && vite build --mode single",
     "preview": "vite preview --host",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "ios:sync": "npm run build && cap sync ios",
+    "ios:open": "cap open ios",
+    "ios:assets": "node scripts/ios-assets.mjs"
   },
   "dependencies": {
+    "@capacitor/core": "^8.5.3",
+    "@capacitor/haptics": "^8.0.2",
+    "@capacitor/ios": "^8.5.3",
+    "@capacitor/splash-screen": "^8.0.2",
+    "@capacitor/status-bar": "^8.0.4",
     "three": "0.186.1"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.3",
     "@types/three": "0.186.0",
+    "playwright-core": "^1.56.0",
     "typescript": "~5.9.3",
     "vite": "^8.3.4",
     "vite-plugin-singlefile": "^2.3.4",
-    "vitest": "^5.0.5",
-    "playwright-core": "^1.56.0"
+    "vitest": "^5.0.5"
   }
 }
