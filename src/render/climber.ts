@@ -156,6 +156,11 @@ export interface LimbGoal {
    */
   useContact: boolean;
   contact: THREE.Vector3;
+  /**
+   * Feet: 0..1 how much of the high-step / hook joint range this leg may use (a foot at or above hip
+   * height, a heel / toe hook, a cam): the thigh may rise out to the side past horizontal, turned out.
+   */
+  highStep: number;
   /** Feet: allow pointing the foot (raising the heel) when the leg is too short. */
   autoPoint: boolean;
   /** Shoulder elevation (m) for this arm. */
@@ -216,6 +221,7 @@ function limbGoal(): LimbGoal {
     fingB: [0.5, 0.5, 0.5, 0.5],
     useContact: false,
     contact: new THREE.Vector3(),
+    highStep: 0,
     autoPoint: true,
     lift: 0,
     spread: 0,
@@ -366,6 +372,15 @@ export const JOINT_LIMITS = {
   hipCone: [
     [0, 95], [30, 115], [55, 128], [90, 125], [120, 108], [150, 80], [180, 30], [210, 22], [270, 22], [315, 45], [340, 75], [360, 95],
   ] as PolarTable,
+  /**
+   * The same cone for a high step / rock-over and the hooks (shared spec, v0.3 "feet above hip height"):
+   * with the knee bent deeply (or the foot hooking: footMode heel / toe / cam) the thigh rises out to
+   * the side and forward well past horizontal (frog: abduction + flexion with external rotation), so a
+   * foot can stand 0.32 m and hook 0.5 m above its hip. Blended in by BodyRig per leg (highK).
+   */
+  hipConeHigh: [
+    [0, 122], [30, 132], [55, 138], [90, 132], [120, 110], [150, 80], [180, 32], [210, 24], [270, 24], [315, 62], [340, 100], [360, 122],
+  ] as PolarTable,
   /** Flexion beyond this needs a bent knee (straight-leg raise is limited by the hamstrings). */
   hipFlexStraight: 92,
   /**
@@ -377,8 +392,12 @@ export const JOINT_LIMITS = {
    */
   hipRotOut: 85,
   hipRotIn: 55,
+  /** External rotation (knee out) in a high step / hook (frog), blended in with the high cone. */
+  hipRotOutHigh: 128,
   /** Knee flexion 0..150° (one way only: the swivel never reverses the hinge). */
   kneeFlex: 150,
+  /** …and in a high step / rock-over (calf pressed against the thigh). */
+  kneeFlexHigh: 158,
   /** Ankle (foot vs shin): pointing (plantar) / flexing (dorsi), toe-out / toe-in yaw, inversion roll. */
   anklePlantar: 45,
   ankleDorsi: 30,
@@ -976,6 +995,8 @@ export class BodyRig {
   readonly fallback = [false, false, false, false];
   /** QA: how far (m) the hand's / foot's contact point ended up from its target (last solve). */
   readonly reachMiss = [0, 0, 0, 0];
+  /** Per limb: the high-step / hook range blend for this solve (LimbGoal.highStep; legs only). */
+  private highK = [0, 0, 0, 0];
   private reqEnd = [0, 1, 2, 3].map(() => new THREE.Vector3());
   private stretchK = [1, 1, 1, 1];
   /** Last frame's elbow / knee apex direction per limb (swivel rate limit) and the solve's dt. */
@@ -2681,6 +2702,7 @@ export class BodyRig {
     const dir = this.tmpGoalDir.copy(goal.dir).normalize();
     const up = this.tmpGoalUp.copy(goal.up);
     const tgt = this.tgtW[li];
+    this.highK[li] = clampN(goal.highStep, 0, 1);
     if (goal.useContact) this.cToe.copy(goal.contact);
     else toeLocal(sg, this.outfit.shoe, this.cToe);
     const maxLeg = (THIGH + SHIN) * 0.992;
@@ -2891,8 +2913,9 @@ export class BodyRig {
       d.copy(leg ? this.PY : this.CY).negate();
       dist = 1e-6;
     } else d.multiplyScalar(1 / dist);
-    // max flexion → minimum root–end distance (law of cosines)
-    const flexMax = (leg ? JOINT_LIMITS.kneeFlex : JOINT_LIMITS.elbowFlex) * DEG;
+    // max flexion → minimum root–end distance (law of cosines); a high step folds the knee a little
+    // deeper (calf pressed to the thigh)
+    const flexMax = (leg ? JOINT_LIMITS.kneeFlex + (JOINT_LIMITS.kneeFlexHigh - JOINT_LIMITS.kneeFlex) * this.highK[li] : JOINT_LIMITS.elbowFlex) * DEG;
     const dMin = Math.sqrt(L1 * L1 + L2 * L2 + 2 * L1 * L2 * Math.cos(flexMax));
     const dc = clampN(dist, Math.max(dMin, Math.abs(L1 - L2) + 1e-4), (L1 + L2) * 0.9995);
     const a = (L1 * L1 - L2 * L2 + dc * dc) / (2 * dc);
@@ -3085,7 +3108,11 @@ export class BodyRig {
       const oy = u.dot(this.PY);
       const oz = -u.dot(this.PZ);
       const theta = Math.acos(clampN(-oy, -1, 1));
-      let max = polarMax(L.hipCone, Math.atan2(oz, ox) / DEG);
+      // a high step / hook: the frog range (hipConeHigh, more external rotation)
+      const kh = this.highK[li];
+      const omega = Math.atan2(oz, ox) / DEG;
+      let max = polarMax(L.hipCone, omega);
+      if (kh > 0) max += (polarMax(L.hipConeHigh, omega) - max) * kh;
       if (oz > 0) {
         // straight-leg raise: deep flexion needs a bent knee
         const straight = L.hipFlexStraight * DEG;
@@ -3098,7 +3125,8 @@ export class BodyRig {
         const n = this.cN.copy(this.PY).multiplyScalar(w).addScaledVector(this.PZ, w - 1);
         n.addScaledVector(u, -n.dot(u)).normalize();
         const psi = Math.atan2(this.kC.crossVectors(n, ap).dot(u), n.dot(ap)) * sg;
-        if (psi > L.hipRotOut * DEG) v += psi - L.hipRotOut * DEG;
+        const rotOut = (L.hipRotOut + (L.hipRotOutHigh - L.hipRotOut) * kh) * DEG;
+        if (psi > rotOut) v += psi - rotOut;
         else if (psi < -L.hipRotIn * DEG) v += -L.hipRotIn * DEG - psi;
       }
     } else {
@@ -3380,7 +3408,7 @@ export class BodyRig {
         const oz = -u.dot(this.PZ);
         const theta = Math.acos(clampN(-oy, -1, 1));
         const om = Math.atan2(oz, ox) / DEG;
-        cone = `θ ${(theta / DEG).toFixed(0)} ω ${om.toFixed(0)} max ${(polarMax(L.hipCone, om) / DEG).toFixed(0)}`;
+        cone = `θ ${(theta / DEG).toFixed(0)} ω ${om.toFixed(0)} max ${(polarMax(L.hipCone, om) / DEG).toFixed(0)}/${(polarMax(L.hipConeHigh, om) / DEG).toFixed(0)} kh ${this.highK[li].toFixed(2)}`;
         const w = sstep(30 * DEG, 100 * DEG, theta);
         const n = this.cN.copy(this.PY).multiplyScalar(w).addScaledVector(this.PZ, w - 1);
         n.addScaledVector(u, -n.dot(u)).normalize();
@@ -3525,6 +3553,8 @@ const SHAPE_LOOSE: HandShape = { a: 0.3, b: 0.34, thumb: 0.12 };
 /** Reach length shoulder → grip point with the arm straight. */
 const ARM_REACH = UPPER + FORE + 0.075;
 const LEG_REACH = THIGH + SHIN;
+/** Hip → ankle with the knee fully bent (JOINT_LIMITS.kneeFlex): nothing of the leg folds tighter. */
+const LEG_FOLD = Math.sqrt(THIGH * THIGH + SHIN * SHIN + 2 * THIGH * SHIN * Math.cos(JOINT_LIMITS.kneeFlexHigh * DEG));
 
 const HAND_IDS: readonly LimbId[] = ['LH', 'RH'];
 const FOOT_IDS: readonly LimbId[] = ['LF', 'RF'];
@@ -3872,7 +3902,9 @@ export class ClimberModel extends THREE.Group {
         const vy = L.pos.y - L.anchor.y;
         const hf = vx * bUx + vy * bUy;
         const out = (vx * bRx + vy * bRy) * SIGN[s];
-        sit = Math.max(sit, 0.2 * sstep(-0.14, 0.3, hf));
+        // a high step out to the side brings the hips IN (the sim's pelvisDepth: shared spec); only a
+        // high foot tucked in under the body needs the hips back a little for the knee
+        sit = Math.max(sit, 0.08 * sstep(-0.14, 0.3, hf) * (1 - sstep(0.12, 0.3, out)));
         hike += SIGN[s] * 0.4 * sstep(-0.1, 0.25, hf) * sstep(0.0, 0.2, out);
       }
     }
@@ -3904,6 +3936,22 @@ export class ClimberModel extends THREE.Group {
       }
       this.crossK += (cross - this.crossK) * (snap ? 1 : dampK(6, d));
       sit = Math.max(sit, 0.12 * this.crossK);
+    }
+    // a foot on a hold closer to its hip than the fully bent leg can fold (the knee's flexion limit):
+    // the hips ease out from the wall until it fits (last frame's targets)
+    if (onWall && this.initialized) {
+      for (let s = 0; s < 2; s++) {
+        const L = state.limbs[FOOT_IDS[s]];
+        if (L.holdId === null) continue;
+        this.v0.copy(this.sP).addScaledVector(this.goal.pelvisRight, SIGN[s] * BODY.hipHalf);
+        // the ankle sits a foot length back from the toe (out from the wall): that is what folds
+        const fg = this.goal.feet[s];
+        this.v1.copy(fg.target).addScaledVector(fg.dir, -0.168).addScaledVector(fg.up, 0.066);
+        const dist = this.v0.distanceTo(this.v1);
+        const short = LEG_FOLD + 0.03 - dist;
+        if (short > 0) sit = Math.max(sit, this.sSit + short * 1.5);
+      }
+      sit = Math.min(sit, 0.3);
     }
     this.sSit += (sit - this.sSit) * (snap ? 1 : dampK(5, d));
     this.sHike += (hike - this.sHike) * (snap ? 1 : dampK(5, d));
@@ -4675,6 +4723,9 @@ export class ClimberModel extends THREE.Group {
     // foot height relative to the hip (wall-local up)
     const hf = this.v1.subVectors(fg.target, Hp).dot(Uw);
     const high = sstep(-0.75, -0.05, hf);
+    // a foot at / above hip height or hooking may use the high-step range (frog: thigh out and up)
+    const hookish = fm === 'heel' || fm === 'toe' || fm === 'cam';
+    fg.highStep = mode === 'hold' ? Math.max(hookish ? 1 : 0, sstep(-0.24, 0.02, hf)) : mode === 'drag' ? sstep(-0.2, 0.05, hf) : 0;
     if (mode === 'hold' || mode === 'wall') {
       // toe into the wall, turned out (inside edge), heel dropped; Elvis leg = heel bounce
       const turn0 = (0.36 + 0.55 * high) * (1 - 0.55 * overhang) * (mode === 'wall' ? 0.4 : 1);

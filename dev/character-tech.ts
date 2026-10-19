@@ -2,6 +2,7 @@
 // ClimberSim through its public API (drags, chalkUp, shakeOut, dyno) and posed by the REAL
 // GameRenderer, frozen at the telling moment.
 //   tech = heel | toe | flag | backflag | drop | smear | shake | chalk | deadpoint | dyno | pump
+//          | highstep | heelhigh | toehigh (v0.3 high feet)
 //   at=<s> capture time after the action (default per technique)   cam=follow|side|front
 //   head=<id> cw=<colourway>
 // The page title reports the sim's footMode / flags at the capture so a shot can be checked.
@@ -12,7 +13,7 @@ import type { BoulderDef, ClimberState, ColorwayId, HeadId, HoldDef, LimbId, Vec
 import { ClimberSim } from '../src/game/climber-sim';
 import { WallFrame } from '../src/render/wall-frame';
 
-type Tech = 'heel' | 'toe' | 'flag' | 'backflag' | 'drop' | 'smear' | 'shake' | 'chalk' | 'deadpoint' | 'dyno' | 'pump';
+type Tech = 'heel' | 'toe' | 'flag' | 'backflag' | 'drop' | 'smear' | 'shake' | 'chalk' | 'deadpoint' | 'dyno' | 'pump' | 'highstep' | 'heelhigh' | 'toehigh';
 
 interface Scenario {
   wall: number;
@@ -134,6 +135,27 @@ const SCENARIOS: Record<Tech, Scenario> = {
     wall: 20,
     extra: () => [],
     script: [],
+    at: 2.0,
+  },
+  // v0.3 high feet (shared spec): a rock-over foot ≈0.25 m above the hip, out to the side, hips in
+  highstep: {
+    wall: 3,
+    extra: (a) => [hold('x', a.RF.x + 0.36, a.RF.y + 0.24, 'edge', 'hand', -Math.PI / 2, 0.065)],
+    script: [{ t: 0.6, run: dragTo('RF', () => ({ x: 0, y: 0 }), 0.7) }],
+    at: 2.2,
+  },
+  // a heel hook at chest height out to the side on a steep wall
+  heelhigh: {
+    wall: 35,
+    extra: (a) => [hold('x', a.RF.x + 0.42, a.RF.y + 0.42, 'jug', 'hand', Math.PI, 0.09)],
+    script: [{ t: 0.6, run: dragTo('RF', () => ({ x: 0, y: 0 }), 0.7) }],
+    at: 2.0,
+  },
+  // a toe hook high and far out on a steep wall
+  toehigh: {
+    wall: 40,
+    extra: (a) => [hold('x', a.RF.x + 0.58, a.RF.y + 0.3, 'jug', 'hand', 2.6, 0.09)],
+    script: [{ t: 0.6, run: dragTo('RF', () => ({ x: 0, y: 0 }), 0.7) }],
     at: 2.0,
   },
 };
