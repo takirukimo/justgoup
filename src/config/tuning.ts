@@ -254,6 +254,26 @@ export const SIM = {
   /** Wall angles (°) from which a pull-able foothold at / above the hip is a heel hook, and a far one a toe hook. */
   heelMinAngle: 8,
   toeMinAngle: 15,
+  // ── High feet (shared sim + render spec, v0.2 playtest: "feet should go above hip height") ──
+  /**
+   * A foot target more than this (m) above its hip joint (body frame) is a high step / high hook: it needs a
+   * hand holding (anatomy: a foot that high only goes on with the body held by the hands).
+   */
+  highStepFree: 0.17,
+  /**
+   * High steps bring the hips in (research §2.3: the toe reaches hip height + 0.06 m standing 23 cm off the
+   * wall): over a standing foot's height up the wall above its hip joint highStepDepthFrom → highStepDepthFull (m) the
+   * pelvis depth eases to highStepDepth (m) and stays there while the foot is high (steep panels keep their
+   * body-tension floor, SIM.steepPelvisDepth).
+   */
+  highStepDepthFrom: 0.08,
+  highStepDepthFull: 0.24,
+  highStepDepth: 0.2,
+  /**
+   * A hook costs a little core / hamstring work: tension + hookCore per hooking foot, × how high it is
+   * (0 at the hip joint … 1 at 0.5 m above it), + half of it for any hook at all.
+   */
+  hookCore: 0.08,
   /** Drop knee: the hip turns in — its leg's hip depth × this (not below dropKneeMinDepth, m). */
   dropKneeDepth: 0.62,
   dropKneeMinDepth: 0.12,

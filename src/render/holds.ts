@@ -700,6 +700,11 @@ export interface HoldGeometry {
   depth: number;
   /** Logo decal placement for volumes (local space), if any. */
   face?: VolumeBuilt['face'];
+  /**
+   * Vertices of the hold itself at the start of `geo` (the bolt is merged after them): the contact
+   * surface hands and feet are placed on (render/grip.ts).
+   */
+  ownVerts: number;
 }
 
 const geoCache = new Map<string, HoldGeometry>();
@@ -865,6 +870,7 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: Ho
 
   let geo: THREE.BufferGeometry;
   let face: VolumeBuilt['face'] | undefined;
+  let ownVerts = 0;
   if (vol) {
     geo = vol.geo;
     geo.scale(s, s, s);
@@ -872,6 +878,7 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: Ho
     // UVs are generated in unit space → meters
     const uv = geo.getAttribute('uv') as THREE.BufferAttribute;
     for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * s, uv.getY(i) * s);
+    ownVerts = geo.getAttribute('position').count;
     // two bolts on the largest face
     const bolts: THREE.BufferGeometry[] = [];
     for (const off of lod ? [] : [-0.45, 0.45]) {
@@ -884,6 +891,7 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: Ho
     geo.scale(s, s, s);
     const uv = geo.getAttribute('uv') as THREE.BufferAttribute;
     for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * s, uv.getY(i) * s);
+    ownVerts = geo.getAttribute('position').count;
     if (!lod) geo = mergeGeometries([geo, placeBolt(_v.set(0, 0.04 * s, 0.5 * s), _n.set(0, 0.2, 1).normalize(), Math.max(0.4, s / 0.06) * boltScale)], false) as THREE.BufferGeometry;
   } else if (built) {
     geo = built.geo;
@@ -903,9 +911,11 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: Ho
       _n.set(0, -0.35, 1).normalize();
     }
     const bscale = Math.min(1, Math.max(0.5, s / 0.06)) * boltScale;
+    ownVerts = geo.getAttribute('position').count;
     if (!lod) geo = mergeGeometries([geo, placeBolt(_v, _n, bscale)], false) as THREE.BufferGeometry;
   } else {
     geo = new THREE.SphereGeometry(s, 12, 8);
+    ownVerts = geo.getAttribute('position').count;
   }
   ensureSurfaceAttributes(geo);
   geo.computeBoundingBox();
@@ -922,6 +932,7 @@ export function holdGeometry(type: HoldType, seed: number, size: number, lod: Ho
     halfY,
     depth: bb.max.z,
     face,
+    ownVerts,
   };
   geoCache.set(key, entry);
   return entry;

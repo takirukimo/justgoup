@@ -54,7 +54,7 @@ import {
   type StaticsParams,
 } from './statics';
 import { dhypot } from './dmath';
-import { envEvalOn } from './anatomy';
+import { aboveHip, envEvalOn } from './anatomy';
 import { angleAt, makeProfile, profileOf, smoothAngleAt, type WallProfile } from './wall-profile';
 
 /** Planner thresholds. The sim slips only above stress 1.05, so these leave a margin. */
@@ -410,6 +410,11 @@ class Planner {
     return this.prof ? angleAt(this.prof, y) : this.b.wallAngle;
   }
 
+  /** Can a foot hook a hold at surface height y (its panel at least SIM.heelMinAngle)? */
+  hookWall(y: number): boolean {
+    return this.angleOf(y) >= SIM.heelMinAngle;
+  }
+
   /** Can a foot smear at surface height y (its panel ≤ SIM.smearMaxAngle)? */
   smearAt(y: number): boolean {
     return this.prof ? angleAt(this.prof, y) <= SIM.smearMaxAngle : this.smearOk;
@@ -450,6 +455,21 @@ class Planner {
       const m = footModeFor(c.hold, c.x, c.y, this.AX[i], this.AY[i], pose.px, wall, null);
       c.mode = m === 'heel' ? FOOT_HEEL : m === 'toe' ? FOOT_TOE : m === 'drop' ? FOOT_DROP : FOOT_PUSH;
     }
+  }
+
+  /**
+   * Would foot li placed on hold h at (tx, ty) hook it (heel / toe hook) with the body in `pose`? The sim's
+   * rule (holds.footModeFor, decided before the reach check).
+   */
+  hookAt(pose: Pose, li: number, h: HoldDef, tx: number, ty: number): boolean {
+    if (li < 2) return false;
+    computeAnchors(pose, this.AX, this.AY);
+    const prof = this.prof;
+    const comY = pose.py + BODY.comT * (pose.cy - pose.py);
+    const bodyAngle = prof ? smoothAngleAt(prof, comY) : this.b.wallAngle;
+    const wall = prof ? Math.max(angleAt(prof, ty), bodyAngle) : bodyAngle;
+    const m = footModeFor(h, tx, ty, this.AX[li], this.AY[li], pose.px, wall, null);
+    return m === 'heel' || m === 'toe';
   }
 
   /** Fill this.contacts for a node's slots, optionally without limb `skip`. */
@@ -501,8 +521,11 @@ class Planner {
     return out;
   }
 
-  /** Can limb `li` reach point (tx, ty) while the other three hold? */
-  reach(n: Node, li: number, tx: number, ty: number, cacheKey: string): { pose: Pose; tension: number; ok: boolean } {
+  /**
+   * Can limb `li` reach point (tx, ty) while the other three hold? `hook`: the foot will hook its target
+   * (heel / toe hook), so it reaches with the hooking leg's range (anatomy HOOK_ENVELOPE).
+   */
+  reach(n: Node, li: number, tx: number, ty: number, cacheKey: string, hook = false): { pose: Pose; tension: number; ok: boolean } {
     const hit = this.reachCache.get(cacheKey);
     if (hit) return hit;
     const contacts = this.setContacts(n, li);
@@ -511,8 +534,10 @@ class Planner {
     prm.reachLimb = li;
     prm.reachX = tx;
     prm.reachY = ty;
+    prm.reachHook = hook && li >= 2;
     const pose: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
     const r = optimizePose(contacts, prm, n.pose, pose, this.ev, 48, true);
+    prm.reachHook = false;
     const out = { pose, tension: r.tension, ok: r.violation < 0.004 && r.tension <= SOLVER.moveMax };
     this.reachCache.set(cacheKey, out);
     return out;
@@ -636,7 +661,7 @@ class Planner {
     const parent = n.parent!;
     n.move = null;
     if (m.dyno) return this.evaluateDyno(n, m, m.dyno);
-    const r = this.reach(parent, m.li, m.tx, m.ty, m.reachKey);
+    const r = this.reach(parent, m.li, m.tx, m.ty, m.reachKey, m.hold !== null && this.hookAt(parent.pose, m.li, m.hold, m.tx, m.ty));
     if (!r.ok) return false;
     // the sim checks self-clipping where the limb is released, i.e. around the reach pose
     if (!this.clearAt(r.pose, parent, m.li, m.hold, m.tx, m.ty)) return false;
@@ -861,13 +886,21 @@ class Planner {
    */
   targetOk(n: Node, li: number, hold: HoldDef | null, tx: number, ty: number, slack: number): boolean {
     const p = n.pose;
+    // a foot that will hook its hold reaches with the hooking leg's range (decided before the reach check)
+    const ei = hold !== null && this.hookAt(p, li, hold, tx, ty) ? li + 2 : li;
     computeAnchors(p, this.AX, this.AY);
     let ux = p.cx - p.px;
     let uy = p.cy - p.py;
     const l = dhypot(ux, uy) || 1;
     ux /= l;
     uy /= l;
-    if (envEvalOn(this.prof, li, this.AX[li], this.AY[li], ux, uy, tx, ty).excess > slack) return false;
+    if (envEvalOn(this.prof, ei, this.AX[li], this.AY[li], ux, uy, tx, ty).excess > slack) return false;
+    if (li >= 2 && aboveHip(this.AX[li], this.AY[li], ux, uy, tx, ty) > SIM.highStepFree) {
+      // a high step / high hook only with a hand holding the climber
+      const a = n.slots[0];
+      const b = n.slots[1];
+      if (!(a && a !== 'smear') && !(b && b !== 'smear')) return false;
+    }
     const contacts = this.setContacts(n, li);
     return !placementBlocked(li, tx, ty, hold, contacts, this.AX, this.AY, PLAN_CLEARANCE_MARGIN);
   }
@@ -921,7 +954,8 @@ class Planner {
         score = gain * 1.6 + nominalCapacity(h, true, this.angleOf(h.y)) * 1.2 - d * 0.4;
         if (this.topIds.has(h.id)) score += 2;
       } else {
-        if (h.y > n.pose.py - 0.12) continue;
+        // high steps (≈0.32 m over the hip joint) and high hooks (≈0.5 m) are possible (targetOk decides)
+        if (h.y > n.pose.py + (this.hookWall(h.y) ? 0.5 : 0.3)) continue;
         if (h.y < maxHandY - 2.15) continue;
         if (n.slots[pair] === h && (h.size < 0.05 || !canMatch(li, h))) continue;
         const ideal = minHandY - 1.2;
@@ -1098,7 +1132,7 @@ export class StanceLab {
       move: null,
     } as Node;
     if (!this.p.targetOk(node, li, target, tp.x, tp.y, li < 2 ? 0.5 : 0.32)) return { pose, tension: Infinity, ok: false };
-    return this.p.reach(node, li, tp.x, tp.y, `lab${this.seq++}`);
+    return this.p.reach(node, li, tp.x, tp.y, `lab${this.seq++}`, this.p.hookAt(pose, li, target, tp.x, tp.y));
   }
 
   /**

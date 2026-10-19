@@ -26,8 +26,10 @@ import { ClimberModel } from './climber';
 import { GuideModel } from './guide';
 import { RopeMesh } from './rope-mesh';
 import { renderPortrait, resetPortraitEnvironment } from './portrait';
-import { disposeHoldCache } from './holds';
+import { disposeHoldCache, holdMatrix } from './holds';
 import { HOLD_CUE } from './shading';
+
+const ONE3 = new THREE.Vector3(1, 1, 1);
 
 /** Optional fx beyond RendererAPI['fx'] (the app calls them when present). */
 export interface GameRendererFx {
@@ -262,6 +264,18 @@ export class GameRenderer implements RendererAPI {
       // a hold slid back from a roof lip (drawn copy vs the problem's hold): the limb follows the drawing
       const src = this.srcHolds.get(id);
       out.dy = src ? h.y - src.y : 0;
+      out.shape = h.shape;
+      out.fingers = h.fingers;
+      // the drawn hold itself (geometry + world transform, a volume mount included): hands and feet
+      // are placed on its real surface
+      const g = this.wall.holds.geoms.get(id);
+      if (g && out.matrix) {
+        out.geom = g;
+        const mount = this.wall.holds.mounts.get(id);
+        if (mount) out.matrix.compose(mount.pos, mount.quat, ONE3);
+        else holdMatrix(h, this.wallFrame, out.matrix);
+        out.hasMatrix = true;
+      }
       return true;
     });
     this.climber.setCueGain(this.pure ? 1.4 : 1);

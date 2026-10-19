@@ -235,6 +235,8 @@ class Builder {
   readonly color: string;
   readonly prof: WallProfile | null;
   private readonly dressRng: Rng;
+  /** High heel hooks (hookCands): their own stream, so the rest of a route sets as before. */
+  private readonly hookRng: Rng;
   private x0: number;
   private amp: number;
   private freq: number;
@@ -266,6 +268,7 @@ class Builder {
     if (this.prof && this.prof.flat) this.prof = null;
     this.color = color;
     this.dressRng = rng.fork(0xd7e55);
+    this.hookRng = rng.fork(0x4ee1);
     this.x0 = p.rope ? rng.range(-0.7, 0.7) : rng.range(-1.05, 1.05);
     this.amp = rng.range(0.08, p.rope ? 0.4 : 0.45);
     this.freq = rng.range(0.7, 1.5);
@@ -801,6 +804,29 @@ class Builder {
     }
   }
 
+  /**
+   * Steep walls: now and then a high heel hook (high-feet spec) — a positive hold at or above the hip, out
+   * to the side, facing back toward the hip, which the planner and the sim use as a heel hook (holds.
+   * footModeFor). The usual verification decides whether it makes the move.
+   */
+  private hookCands(fi: number, out: Cand[]): void {
+    const { p } = this;
+    const rng = this.hookRng;
+    const side = fi === 2 ? -1 : 1;
+    for (let k = 0; k < 2; k++) {
+      const hx = this.clampX(this.pose.px + side * rng.range(0.4, 0.6));
+      const hy = this.pose.py + rng.range(-0.02, 0.3);
+      if (this.gap(hx, hy, 0.07) < 0.04) continue;
+      const type: HoldType = p.grade <= 5 || rng.chance(0.5) ? 'jug' : 'edge';
+      const size = type === 'jug' ? rng.range(0.08, 0.1) : rng.range(0.06, 0.075);
+      // the good side faces the hip (a little downward): the heel pulls it in
+      const angle = datan2(this.pose.py - 0.05 - hy, this.pose.px - hx) + rng.range(-0.2, 0.2);
+      // (a plain hold, not dressed: the dress stream of the rest of the route stays as it was)
+      const h: HoldDef = { id: `~${this.tmpSeq++}`, x: r3(hx), y: r3(hy), type, size: r3(size), angle: r3(angle), role: 'foot', color: this.color, seed: 0 };
+      out.push({ li: fi, hold: h, fresh: true, maxT: this.maxT });
+    }
+  }
+
   private topCands(out: Cand[]): void {
     const { rng, p } = this;
     const a = this.slots[0]!;
@@ -914,6 +940,8 @@ class Builder {
       const gains = p.grade >= 5 ? [1.06 * this.boost, 0.98, 0.92, 0.86, 0.8, 0.74, 0.66, 0.5, 0.38] : [1.06 * this.boost, 0.96, 0.86, 0.86, 0.74, 0.62, 0.5, 0.38];
       this.handCands(lowH, gains, hands, footHigh);
       const feet: Cand[] = [];
+      // a high heel hook on a steep panel (occasionally: a move to remember, not every foot)
+      if (!p.rope && p.grade >= 3 && this.angleAt(this.pose.py) >= 25 && this.hookRng.next() < 0.18) this.hookCands(this.hookRng.chance(0.5) ? 2 : 3, feet);
       this.footCands(lowF, 6, feet);
       this.footCands(5 - lowF, 3, feet);
       const bump: Cand[] = [];

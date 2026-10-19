@@ -15,7 +15,9 @@
 //   ARMS: from straight UP (+U),   positive toward O; 180 = straight down.
 // Max reach r(φ) is piecewise linear between the table knots; outside [φmin, φmax] the region is
 // forbidden. Angles are unwrapped so the forbidden wedge is centred on the wrap-around point
-// (legs: φ ∈ (160°, 250°) i.e. up and up-inward; arms: φ ∈ (195°, 210°) i.e. down-inward).
+// (legs: φ ∈ (160°, 250°) i.e. up and up-inward — a hooking leg to 166°; arms: φ ∈ (195°, 210°) i.e.
+// down-inward). Legs have two tables: a standing foot (LEG_ENVELOPE, limb 2 / 3) and a hooking one
+// (HOOK_ENVELOPE, limb 4 / 5 = hookLimb(li)), which reaches higher out to the side.
 //
 // Everything here is allocation-free on the hot paths (raw-number variants write into module
 // scratch) and uses only IEEE basic arithmetic + Math.sqrt, so the generator stays bit-identical on
@@ -29,11 +31,15 @@ import { reachScale, type WallProfile } from './wall-profile';
 export type EnvelopeKnot = readonly [phi: number, r: number, strain: number];
 
 /**
- * LEG (hip → toe), legMax 0.93. A foot rises at most ~0.33 m above the hip joint and only out to
- * the side with a bent knee (high step / rockover); it never goes straight up. It can cross under the
- * body a little (backstep / drop-knee); a wide frog stance is fine. The strain weight says how
- * awkward the limit is in that direction (a straight standing leg is barely strained at full
- * length, a deep high step or a deep cross-under is).
+ * LEG (hip → toe), legMax 0.93, for a foot that STANDS (edging, smearing, a drop knee). A foot rises at
+ * most ~0.32 m above the hip joint, and only out to the side with the knee bent up and out and the hips
+ * brought in to the wall (a high step / rock-over: the sim pulls the pelvis in to SIM.highStepDepth while
+ * the foot is high, research §2.3: 97 ± 9 cm toe height for a 92 cm leg standing 23 cm off the wall); it
+ * never goes straight up. It can cross under the body a little (backstep / drop-knee); a wide frog stance
+ * is fine. The strain weight says how awkward the limit is in that direction (a straight standing leg is
+ * barely strained at full length, a deep high step or a deep cross-under is).
+ * Shared spec (sim + render, v0.2 feedback "feet should be able to go above hip height"): edging high
+ * steps to ≈0.32 m above the hip joint out to the side; hooks (HOOK_ENVELOPE) to ≈0.50 m.
  */
 export const LEG_ENVELOPE: readonly EnvelopeKnot[] = [
   [-110, 0.22, 1],
@@ -42,15 +48,44 @@ export const LEG_ENVELOPE: readonly EnvelopeKnot[] = [
   [-30, 0.86, 0.35],
   [0, 0.93, 0.12],
   [45, 0.93, 0.12],
-  // Above horizontal the limit is what the 3D body can really reach with the hips held 0.3–0.45 m
-  // off the wall (measured against the joint-limited IK in src/render/climber.ts): a high step tops
-  // out ~0.17 m above the hip joint, out to the side with the knee up and out.
-  [90, 0.8, 0.4],
-  [115, 0.38, 0.75],
-  [135, 0.24, 1],
-  [150, 0.17, 1],
-  [160, 0.12, 1],
+  // above horizontal: a high step with the knee up and out, the hips in (top ≈0.32 m over the hip at
+  // φ 130–140°, 0.38–0.25 m out)
+  [90, 0.84, 0.35],
+  [105, 0.72, 0.5],
+  [120, 0.6, 0.7],
+  [130, 0.5, 0.85],
+  [140, 0.4, 1],
+  [150, 0.28, 1],
+  [160, 0.14, 1],
 ];
+
+/**
+ * HOOK leg (hip → heel / toe), legMax 0.93, for a foot that PULLS: a heel hook (knee deeply bent, the
+ * hip abducted and turned out) or a toe hook (the leg nearly straight, the toe pulling) on a hold at or
+ * above hip height out to the side. It reaches ≈0.50 m above the hip joint (about chest height) at
+ * 0.25–0.65 m out to the side; below the horizontal it is the standing leg's range. The anatomy decides
+ * the mode first (holds.footModeFor): a foot placed high and out on a hookable hold is judged against
+ * this table; a standing foot against LEG_ENVELOPE. Limb indices 4 (LF) / 5 (RF) select it in every
+ * envelope function (hookLimb).
+ */
+export const HOOK_ENVELOPE: readonly EnvelopeKnot[] = [
+  [-110, 0.22, 1],
+  [-90, 0.34, 1],
+  [-60, 0.58, 0.75],
+  [-30, 0.86, 0.35],
+  [0, 0.93, 0.12],
+  [45, 0.93, 0.12],
+  [90, 0.93, 0.25],
+  [110, 0.88, 0.35],
+  [125, 0.84, 0.5],
+  [140, 0.74, 0.65],
+  [153, 0.56, 0.85],
+  [160, 0.42, 1],
+  [166, 0.3, 1],
+];
+
+/** Envelope limb index of a hooking foot (2 LF → 4, 3 RF → 5); other limbs unchanged. */
+export const hookLimb = (li: number): number => (li === 2 || li === 3 ? li + 2 : li);
 
 /**
  * ARM (shoulder → grip point), armMax 0.66. Full reach up and to the side, crossovers above the head
@@ -168,9 +203,10 @@ function strainAt(e: Envelope, phi: number): number {
 
 const ARM = build(ARM_ENVELOPE, false);
 const LEG = build(LEG_ENVELOPE, true);
-/** Envelope per limb index (0 LH, 1 RH, 2 LF, 3 RF). */
-const ENV: readonly Envelope[] = [ARM, ARM, LEG, LEG];
-const SIDE = [-1, 1, -1, 1] as const;
+const HOOK = build(HOOK_ENVELOPE, true);
+/** Envelope per limb index (0 LH, 1 RH, 2 LF, 3 RF; 4 LF / 5 RF hooking: hookLimb). */
+const ENV: readonly Envelope[] = [ARM, ARM, LEG, LEG, HOOK, HOOK];
+const SIDE = [-1, 1, -1, 1, -1, 1] as const;
 
 /**
  * Deterministic atan2 in DEGREES (argument reduction + odd series, |error| < 1e-6°).
@@ -234,16 +270,22 @@ const interleave = (e: Envelope): Float64Array => {
 };
 const ARM_RW = interleave(ARM);
 const LEG_RW = interleave(LEG);
+const HOOK_RW = interleave(HOOK);
 const ARM_MIN = ARM.phiMin;
 const ARM_MAX = ARM.phiMax;
 const ARM_LO = ARM.lo;
 const LEG_MIN = LEG.phiMin;
 const LEG_MAX = LEG.phiMax;
 const LEG_LO = LEG.lo;
+const HOOK_MIN = HOOK.phiMin;
+const HOOK_MAX = HOOK.phiMax;
+const HOOK_LO = HOOK.lo;
 const ARM_R0 = ARM.r[0];
 const ARM_R1 = ARM.r[ARM.r.length - 1];
 const LEG_R0 = LEG.r[0];
 const LEG_R1 = LEG.r[LEG.r.length - 1];
+const HOOK_R0 = HOOK.r[0];
+const HOOK_R1 = HOOK.r[HOOK.r.length - 1];
 // tuning snapshot (hot path: plain module constants)
 const EDGE_START = SIM.edgeStart;
 const EDGE_STRAIN = SIM.edgeStrain;
@@ -285,15 +327,16 @@ export function envEval(li: number, ax: number, ay: number, ux: number, uy: numb
       if (vo < 0) phi = -phi;
     }
   }
-  const lo = leg ? LEG_LO : ARM_LO;
-  const pmin = leg ? LEG_MIN : ARM_MIN;
-  const pmax = leg ? LEG_MAX : ARM_MAX;
+  const hook = li >= 4;
+  const lo = hook ? HOOK_LO : leg ? LEG_LO : ARM_LO;
+  const pmin = hook ? HOOK_MIN : leg ? LEG_MIN : ARM_MIN;
+  const pmax = hook ? HOOK_MAX : leg ? LEG_MAX : ARM_MAX;
   if (phi < lo) phi += 360;
   o.phi = phi;
   if (phi < pmin || phi > pmax) {
     const below = phi < pmin;
     const over = below ? pmin - phi : phi - pmax;
-    const re = leg ? (below ? LEG_R0 : LEG_R1) : below ? ARM_R0 : ARM_R1;
+    const re = hook ? (below ? HOOK_R0 : HOOK_R1) : leg ? (below ? LEG_R0 : LEG_R1) : below ? ARM_R0 : ARM_R1;
     o.over = over;
     o.rMax = re;
     o.excess = r * over * 0.017453292519943295 + (r > re ? r - re : 0);
@@ -304,7 +347,7 @@ export function envEval(li: number, ax: number, ay: number, ux: number, uy: numb
     o.strain = 1;
     o.edge = strainOf(o.ratio, 1);
   } else {
-    const t = leg ? LEG_RW : ARM_RW;
+    const t = hook ? HOOK_RW : leg ? LEG_RW : ARM_RW;
     const f = phi - pmin;
     let i = f | 0;
     const last = (t.length >> 1) - 1;
@@ -566,9 +609,9 @@ export function clampToEnvelope(limbIdx: number, anchor: Vec2, bodyUp: Vec2, tar
 
 /** Number of boundary samples of envelopePolygon (the anchor is vertex 0). */
 export const POLYGON_POINTS = 28;
-const POLY_PHI: Float64Array[] = [ARM, ARM, LEG, LEG].map((e) => {
+const POLY_PHI: Float64Array[] = [ARM, ARM, LEG, LEG, HOOK, HOOK].map((e) => {
   // knots always included, the remaining samples spread evenly over the range
-  const knots = (e === ARM ? ARM_ENVELOPE : LEG_ENVELOPE).map((k) => k[0]);
+  const knots = (e === ARM ? ARM_ENVELOPE : e === LEG ? LEG_ENVELOPE : HOOK_ENVELOPE).map((k) => k[0]);
   const n = POLYGON_POINTS - 1;
   const set = new Set<number>(knots);
   for (let i = 0; set.size < n && i <= 4 * n; i++) {
@@ -659,4 +702,12 @@ export function pointSegDist(px: number, py: number, ax: number, ay: number, bx:
 }
 
 /** Sanity: the tables' longest reach matches the body proportions. */
-export const ENVELOPE_MAX_OK = Math.abs(ARM.rMax - BODY.armMax) < 1e-9 && Math.abs(LEG.rMax - BODY.legMax) < 1e-9;
+export const ENVELOPE_MAX_OK = Math.abs(ARM.rMax - BODY.armMax) < 1e-9 && Math.abs(LEG.rMax - BODY.legMax) < 1e-9 && Math.abs(HOOK.rMax - BODY.legMax) < 1e-9;
+
+/**
+ * Height (m) of a target above the hip joint in the body frame (along body-up), for the high-step rules:
+ * > SIM.highStepFree is a high step (it needs a hand holding and brings the hips in).
+ */
+export function aboveHip(ax: number, ay: number, ux: number, uy: number, tx: number, ty: number): number {
+  return (tx - ax) * ux + (ty - ay) * uy;
+}

@@ -140,6 +140,11 @@ export interface StaticsParams {
    * reachable: a foot pointed far out of range doesn't swing the whole torso over.
    */
   reachCap: number;
+  /**
+   * The reaching foot will hook its target (heel / toe hook: anatomy HOOK_ENVELOPE, limb index + 2), so its
+   * reach is judged against the hooking leg's range. false for hands and standing feet.
+   */
+  reachHook: boolean;
   /** Climber strength (× hand capacity, 1 = the default V3–V5 climber). */
   strength: number;
   /** Per-hand forearm pump (index 0 LH, 1 RH); null = use `pump` for both (the planner). */
@@ -173,6 +178,7 @@ export function makeParams(wallAngle: number, assist = 0, pump = 0, profile: Wal
     maxPelvisY: Infinity,
     reachMargin: 0,
     reachCap: Infinity,
+    reachHook: false,
     strength: 1,
     handPump: null,
     handFric: null,
@@ -317,6 +323,7 @@ function estimateDepthRaw(p: Pose, contacts: Contacts, ax: Float64Array, ay: Flo
   let n = 0;
   let sum = 0;
   let hooks = 0;
+  let high = 0;
   const L3 = SIM.legDepthLen;
   for (let i = 2; i < 4; i++) {
     const c = contacts[i];
@@ -329,11 +336,19 @@ function estimateDepthRaw(p: Pose, contacts: Contacts, ax: Float64Array, ay: Flo
     let d = clamp(Math.sqrt(Math.max(0, L3 * L3 - l * l)), 0.14, 0.62);
     // drop knee: the hip turns in toward the wall
     if (c.mode === FOOT_DROP) d = Math.max(SIM.dropKneeMinDepth, d * SIM.dropKneeDepth);
+    // a high step: the foot up the wall above its hip joint only stays on with the hips brought in (a
+    // rock-over; measured along the wall, not the leaning torso)
+    const up = c.y - ay[i];
+    if (up > SIM.highStepDepthFrom) {
+      const k = smoothstep(SIM.highStepDepthFrom, SIM.highStepDepthFull, up);
+      if (k > high) high = k;
+    }
     sum += d;
     n++;
   }
   if (n) {
-    const d = sum / n;
+    let d = sum / n;
+    if (high > 0 && d > SIM.highStepDepth) d += (SIM.highStepDepth - d) * high;
     // a hooking leg pulls the hips in as well
     return hooks ? Math.max(0.14, d - SIM.hookDepthPull * hooks) : d;
   }
@@ -406,6 +421,7 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
   let maxArm = 0;
   let maxLeg = 0;
   let crouch = 0;
+  let hookCore = 0;
   for (let i = 0; i < 4; i++) {
     const c = contacts[i];
     out.load[i] = 0;
@@ -422,11 +438,13 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
       continue;
     }
     let en;
+    // a hooking foot reaches higher (anatomy HOOK_ENVELOPE: limb 4 / 5)
+    const ei = i >= 2 && isHook(c.mode) ? i + 2 : i;
     if (prof === null) {
-      en = envEval(i, ax[i], ay[i], ux, uy, c.x, c.y);
+      en = envEval(ei, ax[i], ay[i], ux, uy, c.x, c.y);
       out.angle[i] = prm.wallAngle;
     } else {
-      en = envEvalOn(prof, i, ax[i], ay[i], ux, uy, c.x, c.y);
+      en = envEvalOn(prof, ei, ax[i], ay[i], ux, uy, c.x, c.y);
       out.angle[i] = prof.ang[panelIndexAt(prof, c.y)];
     }
     const d = en.r;
@@ -448,6 +466,9 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
       if (isHook(c.mode)) {
         nk++;
         kys += c.y;
+        // core / hamstrings: a hook pulls, more the higher it is over the hip joint
+        const up = (c.x - ax[i]) * ux + (c.y - ay[i]) * uy;
+        hookCore += SIM.hookCore * (0.5 + clamp(up / 0.5, 0, 1));
         continue;
       }
       nf++;
@@ -870,13 +891,14 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
   const span = nh > 0 && nf > 0 ? Math.min(maxArm, maxLeg) : 0;
   out.stretchPen = SIM.spanPenalty * smoothstep(0.97, 1.02, span) + SIM.crouchPenalty * Math.min(1, crouch);
 
-  // ── core torque ──
-  out.corePen = SIM.corePenalty * smoothstep(0.06, 0.3, Math.abs(tau));
+  // ── core torque (+ the work of hooking feet) ──
+  out.corePen = SIM.corePenalty * smoothstep(0.06, 0.3, Math.abs(tau)) + hookCore;
 
   // ── reach strain of a dragged limb (beyond its anatomical envelope) ──
   if (prm.reachLimb >= 0) {
     const i = prm.reachLimb;
-    const en = prof === null ? envEval(i, ax[i], ay[i], ux, uy, prm.reachX, prm.reachY) : envEvalOn(prof, i, ax[i], ay[i], ux, uy, prm.reachX, prm.reachY);
+    const ei = prm.reachHook && i >= 2 ? i + 2 : i;
+    const en = prof === null ? envEval(ei, ax[i], ay[i], ux, uy, prm.reachX, prm.reachY) : envEvalOn(prof, ei, ax[i], ay[i], ux, uy, prm.reachX, prm.reachY);
     const m = prm.reachMargin;
     out.reachExcess = m > 0 ? (en.over > 0 ? en.excess + m : Math.max(0, en.r - (en.rMax - m))) : en.excess;
     // a foot pressing against its limit strains less than an arm hauling the body after it

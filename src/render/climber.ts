@@ -26,7 +26,8 @@
 //               creeps along the pull, a foot's toe skates (onCreep → a chalk trickle).
 
 import * as THREE from 'three';
-import type { ChalkId, ClimberState, ColorwayId, HeadId, HoldType, LimbId, LimbSnapshot, Vec2 } from '../core/types';
+import type { ChalkId, ClimberState, ColorwayId, HeadId, HoldShape, HoldType, LimbId, LimbSnapshot, Vec2 } from '../core/types';
+import type { HoldGeometry } from './holds';
 import { BODY, GAME, SIM } from '../config/tuning';
 import { CHALKS, COLORWAYS, SKIN_TONE, type ColorwayDef } from '../config/skins';
 import { PALETTE } from '../config/brand';
@@ -34,6 +35,7 @@ import type { WallFrame } from './wall-frame';
 import type { PanelSpan } from '../game/wall-profile';
 import { createHead, disposeHead, headBlinkWeights, setHeadBlink } from './heads/index';
 import { MeshBuilder, loft, sstep, superCos, superSin, type AttribFn } from './heads/geo';
+import { FING_A, FING_B, FING_L, FING_R, FING_SPLAY, FING_X, PALM, createHandSite, gripStyleOf, handSite, holdSurface, type HandSite } from './grip';
 import { ATLAS_RECTS, REGION, TORSO_E, TORSO_Y0, TORSO_Y1, createBodyMaterial, createOutfitAtlas, type BodyMaterial, type OutfitStyle, type TorsoSection, type UvRect } from './materials';
 
 // ═══════════════════════════════ skeleton layout ═══════════════════════════════
@@ -62,13 +64,41 @@ export const BONE = {
   shinR: 20,
   footR: 21,
   bag: 22,
+  // each finger has its own two bones (fing / tip above are the index fingers): a pocket takes one,
+  // two or three fingers while the others fold, a crimp locks the thumb over the index
+  fingL1: 23,
+  tipL1: 24,
+  fingL2: 25,
+  tipL2: 26,
+  fingL3: 27,
+  tipL3: 28,
+  fingR1: 29,
+  tipR1: 30,
+  fingR2: 31,
+  tipR2: 32,
+  fingR3: 33,
+  tipR3: 34,
 } as const;
-const BONE_COUNT = 23;
+const BONE_COUNT = 35;
 
-/** Per side (0 = left, 1 = right) bone ids. */
+/** Per side (0 = left, 1 = right) bone ids; fings / tips per finger index → pinky. */
 const ARM = [
-  { uarm: BONE.uarmL, farm: BONE.farmL, hand: BONE.handL, fing: BONE.fingL, tip: BONE.tipL, thumb: BONE.thumbL },
-  { uarm: BONE.uarmR, farm: BONE.farmR, hand: BONE.handR, fing: BONE.fingR, tip: BONE.tipR, thumb: BONE.thumbR },
+  {
+    uarm: BONE.uarmL,
+    farm: BONE.farmL,
+    hand: BONE.handL,
+    fings: [BONE.fingL, BONE.fingL1, BONE.fingL2, BONE.fingL3],
+    tips: [BONE.tipL, BONE.tipL1, BONE.tipL2, BONE.tipL3],
+    thumb: BONE.thumbL,
+  },
+  {
+    uarm: BONE.uarmR,
+    farm: BONE.farmR,
+    hand: BONE.handR,
+    fings: [BONE.fingR, BONE.fingR1, BONE.fingR2, BONE.fingR3],
+    tips: [BONE.tipR, BONE.tipR1, BONE.tipR2, BONE.tipR3],
+    thumb: BONE.thumbR,
+  },
 ] as const;
 const LEG = [
   { thigh: BONE.thighL, shin: BONE.shinL, foot: BONE.footL },
@@ -82,9 +112,6 @@ const FORE = BODY.forearm;
 const THIGH = BODY.thigh;
 const SHIN = BODY.shin;
 const SHOULDER_DROP = 0.035; // visual shoulder joint sits a little below the neck base
-const PALM = 0.058; // wrist → knuckles
-const FING_A = 0.034;
-const FING_B = 0.03;
 /** Torso bone origins above the pelvis centre (rest). */
 const SPINE_Y = 0.2;
 const CHEST_Y = 0.36;
@@ -115,6 +142,20 @@ export interface LimbGoal {
   curlA: number;
   curlB: number;
   thumb: number;
+  /**
+   * Hands: per-finger curls (index → pinky) used instead of curlA / curlB when `perFinger` is set
+   * (a pocket's free fingers fold while the others go in; a dome bends each finger its own amount).
+   */
+  perFinger: boolean;
+  fingA: [number, number, number, number];
+  fingB: [number, number, number, number];
+  /**
+   * The point of the hand / foot that `target` is for, in hand / foot coordinates (useContact): the
+   * finger crook on a jug's lip, the pads on an edge, the palm on a sloper, the heel on a heel hook.
+   * Without it the target is the default grip point (hands) / toe tip (feet).
+   */
+  useContact: boolean;
+  contact: THREE.Vector3;
   /** Feet: allow pointing the foot (raising the heel) when the leg is too short. */
   autoPoint: boolean;
   /** Shoulder elevation (m) for this arm. */
@@ -170,6 +211,11 @@ function limbGoal(): LimbGoal {
     curlA: 0.5,
     curlB: 0.5,
     thumb: 0.3,
+    perFinger: false,
+    fingA: [0.5, 0.5, 0.5, 0.5],
+    fingB: [0.5, 0.5, 0.5, 0.5],
+    useContact: false,
+    contact: new THREE.Vector3(),
     autoPoint: true,
     lift: 0,
     spread: 0,
@@ -1322,27 +1368,23 @@ export class BodyRig {
     }
     place(st, ids.hand);
 
-    // fingers: four distinct capsules per segment (index → pinky from the thumb side), fused at
-    // the knuckle line; chalk-whitened pads and tips
-    const FX = [-0.0255, -0.0085, 0.0085, 0.0255];
-    const FL = [1.0, 1.07, 1.0, 0.84];
-    const FR = [1.0, 1.04, 1.0, 0.9];
-    const fingerSeg = (bone: number, len: number, r0: number, r1: number, chalk0: number, chalk1: number, tip: boolean) => {
-      const sst = b.vertexCount;
+    // fingers: four distinct capsules per segment (index → pinky from the thumb side), each on its own
+    // bones (built straight along the bone; the splay is the bone's), chalk-whitened pads and tips
+    const fingerSeg = (bones: readonly number[], len: number, r0: number, r1: number, chalk0: number, chalk1: number, tip: boolean) => {
       for (let f = 0; f < 4; f++) {
-        const L = len * FL[f];
+        const L = len * FING_L[f];
         const fs = b.vertexCount;
         capsule(b, {
           y0: 0,
           y1: L,
-          cap0: r0 * FR[f] * 0.9,
-          cap1: r1 * FR[f],
+          cap0: r0 * FING_R[f] * 0.9,
+          cap1: r1 * FING_R[f],
           rows: 2,
           capRows: 2,
           cols: 8,
           sec: (y) => {
             const k = y / L;
-            const r = (r0 + (r1 - r0) * k) * FR[f];
+            const r = (r0 + (r1 - r0) * k) * FING_R[f];
             return { rx: r * 1.02, rz: r * 0.94, e: 2.1 };
           },
           uvRect: ATLAS_RECTS.blank,
@@ -1350,16 +1392,14 @@ export class BodyRig {
             const k = Math.min(1, Math.max(0, p.y / L));
             const pad = sstep(0.3, -0.5, n.z); // palm-side pads hold more chalk
             const c = (chalk0 + (chalk1 - chalk0) * (tip ? k * k : k)) * (0.5 + 0.5 * pad);
-            attr(REGION.skin, bone, c, 1)(p, n, v, u, out);
+            attr(REGION.skin, bones[f], c, 1)(p, n, v, u, out);
           },
         });
-        // slight splay + the finger's own lean
-        b.transform(new THREE.Matrix4().makeRotationZ(-FX[f] * (tip ? 0.9 : 1.6)).setPosition(FX[f], 0, 0), fs);
+        place(fs, bones[f]);
       }
-      place(sst, bone);
     };
-    fingerSeg(ids.fing, FING_A, 0.0092, 0.0086, 0.1, 0.22, false);
-    fingerSeg(ids.tip, FING_B, 0.0084, 0.0074, 0.28, 0.9, true);
+    fingerSeg(ids.fings, FING_A, 0.0092, 0.0086, 0.1, 0.22, false);
+    fingerSeg(ids.tips, FING_B, 0.0084, 0.0074, 0.28, 0.9, true);
 
     // thumb: thick base tapering to a rounded, chalked tip
     st = b.vertexCount;
@@ -2513,8 +2553,8 @@ export class BodyRig {
     const dir = this.tmpGoalDir.copy(goal.dir).normalize();
     const up = this.tmpGoalUp.copy(goal.up);
     const tgt = this.tgtW[s];
-    const curl = clampN(goal.curlA / 1.4, 0, 1);
-    gripLocal(curl, this.cGrip);
+    if (goal.useContact) this.cGrip.copy(goal.contact);
+    else gripLocal(clampN(goal.curlA / 1.4, 0, 1), this.cGrip);
     // first guess: protract / elevate the shoulder toward a far target (≤ 6 cm) and keep the
     // fingers within the wrist range of the rough forearm line
     basisQuat(dir, up, qh);
@@ -2599,17 +2639,23 @@ export class BodyRig {
     const H = B[ids.hand];
     H.position.copy(J.wrist[s]);
     H.quaternion.copy(qh);
-    // fingers: curl about the hand's local x (toward the palm = −z)
-    const F = B[ids.fing];
-    _t0.set(0, PALM, 0).applyQuaternion(qh);
-    F.position.copy(J.wrist[s]).add(_t0);
-    _q0.setFromAxisAngle(AX_X, -goal.curlA);
-    F.quaternion.copy(qh).multiply(_q0);
-    const T = B[ids.tip];
-    _t0.set(0, FING_A, 0).applyQuaternion(F.quaternion);
-    T.position.copy(F.position).add(_t0);
-    _q0.setFromAxisAngle(AX_X, -goal.curlB);
-    T.quaternion.copy(F.quaternion).multiply(_q0);
+    // fingers: each curls about its own (splayed) x axis toward the palm (−z)
+    for (let f = 0; f < 4; f++) {
+      const ca = goal.perFinger ? goal.fingA[f] : goal.curlA;
+      const cb = goal.perFinger ? goal.fingB[f] : goal.curlB;
+      const kx = FING_X[f] * sg;
+      const F = B[ids.fings[f]];
+      _t0.set(kx, PALM, 0).applyQuaternion(qh);
+      F.position.copy(J.wrist[s]).add(_t0);
+      _q0.setFromAxisAngle(AX_Z, -kx * FING_SPLAY);
+      _q1.setFromAxisAngle(AX_X, -ca);
+      F.quaternion.copy(qh).multiply(_q0).multiply(_q1);
+      const T = B[ids.tips[f]];
+      _t0.set(0, FING_A * FING_L[f], 0).applyQuaternion(F.quaternion);
+      T.position.copy(F.position).add(_t0);
+      _q0.setFromAxisAngle(AX_X, -cb);
+      T.quaternion.copy(F.quaternion).multiply(_q0);
+    }
     // thumb: from the thumb side of the palm; opposition swings it under the palm
     const Th = B[ids.thumb];
     _t0.set(-sg * 0.03, 0.012, -0.006).applyQuaternion(qh);
@@ -2632,7 +2678,8 @@ export class BodyRig {
     const dir = this.tmpGoalDir.copy(goal.dir).normalize();
     const up = this.tmpGoalUp.copy(goal.up);
     const tgt = this.tgtW[li];
-    toeLocal(sg, this.outfit.shoe, this.cToe);
+    if (goal.useContact) this.cToe.copy(goal.contact);
+    else toeLocal(sg, this.outfit.shoe, this.cToe);
     const maxLeg = (THIGH + SHIN) * 0.992;
     // raise the heel (point the foot) when the leg can't reach the ankle
     for (let iter = 0; iter < 4; iter++) {
@@ -2682,6 +2729,8 @@ export class BodyRig {
       J.ankle[s].copy(this.cOut);
     }
     basisQuat(dir, up, qf);
+    // the reported toe point is the toe tip, whatever point of the foot the target was for
+    if (goal.useContact) toeLocal(sg, this.outfit.shoe, this.cToe);
     _t0.copy(this.cToe).applyQuaternion(qf);
     J.toe[s].copy(J.ankle[s]).add(_t0);
   }
@@ -3427,6 +3476,16 @@ export interface HoldInfo {
    * back from a roof lip, render/holds.ts foldClampY): a hand / foot on it follows the drawn hold.
    */
   dy?: number;
+  /** Optional product details (HoldDef.shape / fingers): buckets, rails, micros, horns, pockets. */
+  shape?: HoldShape;
+  fingers?: number;
+  /**
+   * Optional: the drawn hold's geometry and world transform (hold-local → world, incl. a volume mount):
+   * hands and feet are then placed on its real surface (render/grip.ts). `hasMatrix` says it is set.
+   */
+  geom?: HoldGeometry | null;
+  matrix?: THREE.Matrix4;
+  hasMatrix?: boolean;
 }
 
 interface HandShape {
@@ -3447,6 +3506,8 @@ const GRIP: Record<HoldType, HandShape> = {
   foot: { a: 1.15, b: 0.9, thumb: 0.7 },
 };
 const SHAPE_FREE: HandShape = { a: 0.42, b: 0.48, thumb: 0.25 };
+/** Placeholder while a hand sits on the real hold surface (the curls come from its HandSite). */
+const SHAPE_SITE: HandShape = { a: 0.9, b: 0.9, thumb: 0.5 };
 const SHAPE_REACH: HandShape = { a: 0.14, b: 0.1, thumb: 0.22 };
 const SHAPE_OPEN: HandShape = { a: 0.08, b: 0.04, thumb: 0.08 };
 const SHAPE_CLIP: HandShape = { a: 0.75, b: 0.55, thumb: 0.95 };
@@ -3492,7 +3553,16 @@ export class ClimberModel extends THREE.Group {
   private holdLookup: ((id: string, out: HoldInfo) => boolean) | null = null;
   private ropeAnchor = new THREE.Vector3();
   private hasRopeAnchor = false;
-  private holdInfo: HoldInfo[] = [0, 1, 2, 3].map(() => ({ type: 'edge' as HoldType, angle: -Math.PI / 2, size: 0.06, depth: 0.03, dy: 0 }));
+  private holdInfo: HoldInfo[] = [0, 1, 2, 3].map(() => ({
+    type: 'edge' as HoldType,
+    angle: -Math.PI / 2,
+    size: 0.06,
+    depth: 0.03,
+    dy: 0,
+    geom: null,
+    matrix: new THREE.Matrix4(),
+    hasMatrix: false,
+  }));
   private time = 0;
   private phase: ClimberState['phase'] | null = null;
   private phaseT = 0;
@@ -3532,6 +3602,22 @@ export class ClimberModel extends THREE.Group {
   private sChestDepth = 0.25;
   private sYaw = 0;
   private sShape: HandShape[] = [{ ...SHAPE_FREE }, { ...SHAPE_FREE }];
+  /** Per hand: smoothed per-finger curls (index → pinky). */
+  private sFa = [new Array<number>(4).fill(SHAPE_FREE.a), new Array<number>(4).fill(SHAPE_FREE.a)];
+  private sFb = [new Array<number>(4).fill(SHAPE_FREE.b), new Array<number>(4).fill(SHAPE_FREE.b)];
+  // ── hands on the real hold surface (render/grip.ts) ──
+  /** Per hand: the placement on the hold (hold-local) and its world copy; whether it is in use. */
+  private site = [createHandSite(), createHandSite()];
+  private siteOn = [false, false];
+  private siteP = [new THREE.Vector3(), new THREE.Vector3()];
+  private siteDir = [new THREE.Vector3(), new THREE.Vector3()];
+  private siteUp = [new THREE.Vector3(), new THREE.Vector3()];
+  private siteN = [new THREE.Vector3(), new THREE.Vector3()];
+  /** The grab: which hold, seconds since the hand took it (reach → place → settle). */
+  private grabId: (string | null)[] = [null, null];
+  private grabT = [9, 9];
+  private mInv = new THREE.Matrix4();
+  private lq = new THREE.Vector3();
   private sRope = [0, 0];
   private sStand = 0;
   /** Drop-knee / backstep amount per foot (foot crossed inward of its hip) and the hip turn it drives. */
@@ -3683,6 +3769,10 @@ export class ClimberModel extends THREE.Group {
   private lookupHold(id: string | null, slot: number): HoldInfo | null {
     if (!id || !this.holdLookup) return null;
     const out = this.holdInfo[slot];
+    out.hasMatrix = false;
+    out.geom = null;
+    out.shape = undefined;
+    out.fingers = undefined;
     return this.holdLookup(id, out) ? out : null;
   }
 
@@ -3986,7 +4076,8 @@ export class ClimberModel extends THREE.Group {
     for (let s = 0; s < 2; s++) this.poseFoot(state, frame, s, d, snap, overhang);
     // matched hands / feet sit side by side on a shared hold (never inside each other), and a
     // foot never shares a spot with a hand
-    this.separate(g.hands[0].target, g.hands[1].target, 0.075, Rw, Uw);
+    // (hands placed on the real hold surface are already apart: the sim spreads matched hands)
+    if (!this.siteOn[0] || !this.siteOn[1]) this.separate(g.hands[0].target, g.hands[1].target, 0.075, Rw, Uw);
     // (shoes are ≈ 9 cm wide: matched feet stand side by side, never inside each other)
     this.separate(g.feet[0].target, g.feet[1].target, 0.112, Rw, Uw);
     for (let f = 0; f < 2; f++) for (let h = 0; h < 2; h++) this.keepApart(g.feet[f].target, g.hands[h].target, 0.1, Uw, Nw);
@@ -4081,6 +4172,25 @@ export class ClimberModel extends THREE.Group {
     hg.jointTarget = false;
     hg.lift = 0;
     hg.spread = 0;
+    // on a hold: the hand goes onto the drawn hold's real surface (reach → place → settle)
+    if (L.holdId !== this.grabId[s]) {
+      this.grabId[s] = L.holdId;
+      this.grabT[s] = 0;
+    } else this.grabT[s] += d;
+    if (snap) this.grabT[s] = 9;
+    const onHoldPh = ph === 'climbing' || ph === 'idle' || ph === 'topped';
+    const useSite = onHoldPh && L.holdId !== null && info !== null && this.placeHandOnHold(s, L, info, frame, S);
+    this.siteOn[s] = useSite;
+    if (useSite) {
+      this.v0.copy(this.siteP[s]);
+      const gt = this.grabT[s];
+      if (gt < 0.6) {
+        // placed in along the surface normal, then the hand settles onto the hold as it takes weight
+        const ap = 1 - sstep(0, 0.16, gt);
+        const settle = Math.sin(Math.PI * clampN((gt - 0.1) / 0.36, 0, 1));
+        this.v0.addScaledVector(this.siteN[s], 0.03 * ap).addScaledVector(this.siteDir[s], -0.0045 * settle);
+      }
+    }
 
     // phase-specific targets
     let ropeK = 0;
@@ -4270,6 +4380,17 @@ export class ClimberModel extends THREE.Group {
       up.copy(Nl).addScaledVector(dir, -dir.dot(Nl));
       if (up.lengthSq() < 1e-6) up.copy(Nl);
       shape = SHAPE_REACH;
+    } else if (useSite) {
+      // on the real hold surface: the hand turns onto its placement (smoothly: a fresh grab rotates in)
+      const k = snap ? 1 : dampK(this.grabT[s] < 0.3 ? 20 : 28, d);
+      if (!hg.useContact) gripLocal(clampN(hg.curlA / 1.4, 0, 1), hg.contact);
+      dir.lerp(this.siteDir[s], k).normalize();
+      up.lerp(this.siteUp[s], k);
+      up.addScaledVector(dir, -up.dot(dir));
+      if (up.lengthSq() < 1e-8) up.copy(this.siteUp[s]);
+      up.normalize();
+      hg.contact.lerp(this.site[s].local, k);
+      shape = SHAPE_SITE;
     } else if (L.holdId && ph !== 'falling' && ph !== 'landed') {
       // fingers wrap over the hold: opposite to the hold's good direction, blended with the arm line
       this.v3.copy(this.v2).addScaledVector(Nl, -this.v2.dot(Nl));
@@ -4299,24 +4420,42 @@ export class ClimberModel extends THREE.Group {
       up.copy(this.goal.chestRight).multiplyScalar(side).addScaledVector(Nw, 0.3);
       if (ph !== 'falling') shape = SHAPE_FREE;
     }
+    if (!useSite) hg.useContact = false;
     // pumped fingers flutter on the hold (tiny, fast)
     if (pumpTrem > 1e-3) dir.addScaledVector(Rw, wobble(t * 19, s * 2.9 + 1) * 0.05 * pumpTrem).normalize();
-    // grip shape (damped so hands visibly close on a hold)
+    // grip shape (damped so hands visibly close on a hold): per finger; on a fresh grab the fingers
+    // stay open while the hand is placed, then close onto the hold
     const sh = this.sShape[s];
     const kS = snap ? 1 : dampK(14, d);
-    sh.a += (shape.a - sh.a) * kS;
-    sh.b += (shape.b - sh.b) * kS;
-    sh.thumb += (shape.thumb - sh.thumb) * kS;
-    hg.curlA = sh.a + (ck > 0.5 ? 0.25 * dip : 0);
-    hg.curlB = sh.b;
-    hg.thumb = sh.thumb;
-    if (creep > 1e-3 && L.holdId) {
-      // the fingers peel open before the slip
-      const open = Math.min(1, creep * gain);
-      hg.curlA -= hg.curlA * 0.45 * open;
-      hg.curlB -= hg.curlB * 0.6 * open;
-      hg.thumb -= hg.thumb * 0.4 * open;
+    const site = this.site[s];
+    const close = useSite ? sstep(0.03, 0.15, this.grabT[s]) : 1;
+    const tThumb = useSite ? SHAPE_REACH.thumb + (site.thumb - SHAPE_REACH.thumb) * close : shape.thumb;
+    sh.thumb += (tThumb - sh.thumb) * kS;
+    const FA = this.sFa[s];
+    const FB = this.sFb[s];
+    let ma = 0;
+    let mb = 0;
+    for (let f = 0; f < 4; f++) {
+      const ta = useSite ? SHAPE_REACH.a + (site.a[f] - SHAPE_REACH.a) * close : shape.a;
+      const tb = useSite ? SHAPE_REACH.b + (site.b[f] - SHAPE_REACH.b) * close : shape.b;
+      FA[f] += (ta - FA[f]) * kS;
+      FB[f] += (tb - FB[f]) * kS;
+      ma += FA[f] * 0.25;
+      mb += FB[f] * 0.25;
     }
+    sh.a = ma;
+    sh.b = mb;
+    const open = creep > 1e-3 && L.holdId ? Math.min(1, creep * gain) : 0;
+    const dipA = ck > 0.5 ? 0.25 * dip : 0;
+    hg.perFinger = true;
+    for (let f = 0; f < 4; f++) {
+      // the fingers peel open before the slip
+      hg.fingA[f] = (FA[f] + dipA) * (1 - 0.45 * open);
+      hg.fingB[f] = FB[f] * (1 - 0.6 * open);
+    }
+    hg.curlA = (ma + dipA) * (1 - 0.45 * open);
+    hg.curlB = mb * (1 - 0.6 * open);
+    hg.thumb = sh.thumb * (1 - 0.4 * open);
     // shoulder shrug when reaching up (fully up through a throw)
     const rel = this.v0.subVectors(hg.target, S).dot(WORLD_UP);
     hg.lift = Math.max(sstep(0.2, 0.55, rel) * 0.025, fk * sstep(0.1, 0.4, rel) * 0.035);
@@ -4357,6 +4496,45 @@ export class ClimberModel extends THREE.Group {
       pole.addScaledVector(Uw, wobble(t * 41, s * 3.3) * tremor * 0.6).addScaledVector(Rw, wobble(t * 37, s * 5.1 + 2) * tremor * 0.5);
     }
     pole.normalize();
+  }
+
+  /**
+   * A hand on a hold with a known drawn shape: where on its real surface the hand goes (render/grip.ts)
+   * → siteP / siteDir / siteUp / siteN (world) and site[s] (contact in hand coordinates, curls).
+   * The fingers go over the hold's grip side, turned toward the arm as far as the grip allows.
+   */
+  private placeHandOnHold(s: number, L: LimbSnapshot, info: HoldInfo, frame: WallFrame, S: THREE.Vector3): boolean {
+    if (!info.hasMatrix || !info.geom || !info.matrix) return false;
+    const M = info.matrix;
+    const inv = this.mInv.copy(M).invert();
+    const surf = holdSurface(info.geom, info.type);
+    const def = gripStyleOf(info.type, info.shape);
+    // where the sim holds it, at the hold's base (a volume mount's face), into hold-local XY
+    const lift = Math.max(0, info.depth - info.geom.depth);
+    const cp = L.contactPos ?? L.pos;
+    this.p2.x = cp.x;
+    this.p2.y = cp.y + (info.dy ?? 0);
+    frame.toWorld(this.p2, lift, this.lq).applyMatrix4(inv);
+    const cx = this.lq.x;
+    const cy = this.lq.y;
+    // the arm's direction (shoulder → hold) in hold-local XY
+    this.v1.setFromMatrixPosition(M).sub(S).transformDirection(inv);
+    const al = Math.hypot(this.v1.x, this.v1.y);
+    let th = 0;
+    if (al > 1e-4) {
+      // angle of the arm from the grip side (+y), fading out when the arm comes from the other side
+      const a = Math.atan2(-this.v1.x, this.v1.y);
+      th = clampN(a, -def.turn, def.turn) * sstep(2.7, 1.7, Math.abs(a));
+    }
+    const gx = -Math.sin(th);
+    const gy = Math.cos(th);
+    const across = this.v1.x >= 0 ? 1 : -1;
+    const site = handSite(surf, def, cx, cy, gx, gy, SIGN[s], info.fingers ?? 3, across, this.site[s]);
+    this.siteP[s].copy(site.p).applyMatrix4(M);
+    this.siteDir[s].copy(site.dir).transformDirection(M);
+    this.siteUp[s].copy(site.up).transformDirection(M);
+    this.siteN[s].copy(site.n).transformDirection(M);
+    return true;
   }
 
   private poseFoot(state: ClimberState, frame: WallFrame, s: number, d: number, snap: boolean, bodyOverhang: number): void {

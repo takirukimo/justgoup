@@ -136,7 +136,7 @@ import {
   volumeYields,
   usableByHand,
 } from './holds';
-import { anatomicStrain, envClampOn, envelopePolygon, envEvalOn, envProjectOn, FOLD_K, PROJ_OUT, segmentsCross } from './anatomy';
+import { aboveHip, anatomicStrain, envClampOn, envelopePolygon, envEvalOn, envProjectOn, FOLD_K, PROJ_OUT, segmentsCross } from './anatomy';
 import { angleAt, local3DToSurface, profileOf, smoothAngleAt, surfaceToLocal3D, worldHeight, type Vec3, type WallProfile } from './wall-profile';
 import {
   computeAnchors,
@@ -468,6 +468,9 @@ export class ClimberSim implements ClimberSimAPI {
   private stampSeq = 0;
   /** Pelvis height when the current foot drag began (the reach posture may not lift above it). */
   private reachCapY = 0;
+  /** The dragged foot points at a hold it would hook (its reach uses the hooking leg's range). */
+  private reachHook = false;
+  private readonly hookTmp = { x: 0, y: 0 };
   /** Residual envelope violation (m) of each attached limb after the last PBD projection. */
   private readonly envResidual = new Float64Array(4);
 
@@ -704,6 +707,7 @@ export class ClimberSim implements ClimberSimAPI {
     L.overloaded = false;
     L.stamp = ++this.stampSeq;
     if (i >= 2) this.reachCapY = this.P.y;
+    this.reachHook = false;
     if (held && i < 2) this.refreshMatch();
     if (wasAttached) this.events.push({ type: 'release', limb, holdId: held ? held.id : null });
     if (L.shakeOut) this.endShakeOut(i);
@@ -1158,7 +1162,11 @@ export class ClimberSim implements ClimberSimAPI {
   private throwReaches(hands: number[], o: typeof this.planOut, gp: number, u: Vec2): boolean {
     const sx = o.vx * o.tApex;
     const sy = o.vy * o.tApex - 0.5 * gp * o.tApex * o.tApex;
-    const ex = (i: number, t: number, x: number, y: number): number => envEvalOn(this.prof, i, this.ax[i] + sx * t, this.ay[i] + sy * t, u.x, u.y, x, y).excess;
+    // (i may be a hooking foot's envelope index 4 / 5: its hip is anchor i − 2)
+    const ex = (i: number, t: number, x: number, y: number): number => {
+      const a = i >= 4 ? i - 2 : i;
+      return envEvalOn(this.prof, i, this.ax[a] + sx * t, this.ay[a] + sy * t, u.x, u.y, x, y).excess;
+    };
     // the furthest fraction of the shift a staying contact allows (bisection on its envelope edge)
     const limit = (i: number, x: number, y: number): number => {
       if (ex(i, 1, x, y) <= 1e-3) return 1;
@@ -1183,7 +1191,8 @@ export class ClimberSim implements ClimberSimAPI {
       for (let i = 2; i < 4; i++) {
         const L = this.limbs[i];
         if (!(L.hold || L.smear) || L.dragging) continue;
-        if (ex(i, 1, L.cx, L.cy) <= 0.03) t = Math.min(t, limit(i, L.cx, L.cy));
+        const ei = this.envLi(i);
+        if (ex(ei, 1, L.cx, L.cy) <= 0.03) t = Math.min(t, limit(ei, L.cx, L.cy));
       }
     for (let k = 0; k < hands.length; k++) if (ex(hands[k], t, o.tx[k], o.ty[k]) > SIM.dynoCatchTol * 0.85) return false;
     return true;
@@ -1238,7 +1247,7 @@ export class ClimberSim implements ClimberSimAPI {
     for (let i = 2; i < 4; i++) {
       const L = this.limbs[i];
       if (!(L.hold || L.smear) || L.dragging) continue;
-      const stay = kind === 'deadpoint' && envEvalOn(this.prof, i, this.ax[i] + sx, this.ay[i] + sy, u.x, u.y, L.cx, L.cy).excess <= 0.03;
+      const stay = kind === 'deadpoint' && envEvalOn(this.prof, this.envLi(i), this.ax[i] + sx, this.ay[i] + sy, u.x, u.y, L.cx, L.cy).excess <= 0.03;
       if (stay) continue;
       out.push({ type: 'release', limb: LIMB_IDS[i], holdId: L.hold ? L.hold.id : null });
       L.prevHold = L.hold;
@@ -1434,7 +1443,7 @@ export class ClimberSim implements ClimberSimAPI {
       if (d > GAME.snapRadius || d >= bestD) continue;
       if (i >= 2 && volumeYields(h, p.x, p.y, this.mounts)) continue;
       contactPoint(h, i, this.wouldMatch(i, h), tmp);
-      if (!this.reachOk(i, tmp.x, tmp.y, SIM.reachTolerance)) continue;
+      if (!this.placeOk(i, h, tmp.x, tmp.y, SIM.reachTolerance)) continue;
       if (this.blocked(i, tmp.x, tmp.y, h)) continue;
       best = h;
       bestD = d;
@@ -1517,7 +1526,7 @@ export class ClimberSim implements ClimberSimAPI {
     const saved = this.contacts[i];
     const matched = this.wouldMatch(i, h);
     setContact(c, h, i, matched);
-    if (!this.reachOk(i, c.x, c.y, SIM.reachTolerance) || this.blocked(i, c.x, c.y, h)) {
+    if (!this.placeOk(i, h, c.x, c.y, SIM.reachTolerance) || this.blocked(i, c.x, c.y, h)) {
       this.contacts[i] = saved;
       return 0;
     }
@@ -1540,7 +1549,7 @@ export class ClimberSim implements ClimberSimAPI {
     const out: string[] = [];
     for (const h of list) {
       contactPoint(h, i, this.wouldMatch(i, h), tmp);
-      if (this.reachOk(i, tmp.x, tmp.y, SIM.reachTolerance) && !this.blocked(i, tmp.x, tmp.y, h)) out.push(h.id);
+      if (this.placeOk(i, h, tmp.x, tmp.y, SIM.reachTolerance) && !this.blocked(i, tmp.x, tmp.y, h)) out.push(h.id);
     }
     return out;
   }
@@ -1665,8 +1674,58 @@ export class ClimberSim implements ClimberSimAPI {
   }
 
   /** Is (x, y) inside limb i's envelope (grown by tol) in the frame last set by frameNow()? */
-  private reachOk(i: number, x: number, y: number, tol: number): boolean {
-    return envEvalOn(this.prof, i, this.ax[i], this.ay[i], this.upTmp.x, this.upTmp.y, x, y).excess <= tol;
+  private reachOk(i: number, x: number, y: number, tol: number, ei = i): boolean {
+    return envEvalOn(this.prof, ei, this.ax[i], this.ay[i], this.upTmp.x, this.upTmp.y, x, y).excess <= tol;
+  }
+
+  /**
+   * Envelope limb index of an ATTACHED limb: a hooking foot (heel / toe hook) is judged against the hooking
+   * leg's range (anatomy HOOK_ENVELOPE, index + 2), everything else against its own.
+   */
+  private envLi(i: number): number {
+    if (i < 2) return i;
+    const m = this.limbs[i].mode;
+    return m === 'heel' || m === 'toe' ? i + 2 : i;
+  }
+
+  /**
+   * Can foot i be put on hold h at its contact (cx, cy) right now (frame from frameNow())? The technique is
+   * decided BEFORE the reach check (high-feet spec): a foot placed above hip height out to the side on a
+   * hookable hold hooks it and reaches with the hooking leg's range; a standing foot with the standing
+   * range. A foot that high (more than SIM.highStepFree over the hip joint) only goes on while a hand
+   * holds the climber.
+   */
+  private footReach(i: number, h: HoldDef, cx: number, cy: number, tol: number): boolean {
+    const m = footModeFor(h, cx, cy, this.ax[i], this.ay[i], this.P.x, this.techAngle(cy), null);
+    const ei = m === 'heel' || m === 'toe' ? i + 2 : i;
+    if (!this.reachOk(i, cx, cy, tol, ei)) return false;
+    if (aboveHip(this.ax[i], this.ay[i], this.upTmp.x, this.upTmp.y, cx, cy) > SIM.highStepFree && !this.handHolding()) return false;
+    return true;
+  }
+
+  /** Is at least one hand on a hold (not dragged, not busy)? */
+  private handHolding(): boolean {
+    for (let k = 0; k < 2; k++) {
+      const H = this.limbs[k];
+      if (H.hold && !H.dragging && !H.busy) return true;
+    }
+    return false;
+  }
+
+  /** Reach check of limb i placed on hold h at (x, y): the foot's technique-aware range, a hand's own. */
+  private placeOk(i: number, h: HoldDef, x: number, y: number, tol: number): boolean {
+    return i < 2 ? this.reachOk(i, x, y, tol) : this.footReach(i, h, x, y, tol);
+  }
+
+  /** Would foot i released at (x, y) hook the hold it snaps to (heel / toe hook)? */
+  private wouldHookAt(i: number, x: number, y: number): boolean {
+    this.hookTmp.x = x;
+    this.hookTmp.y = y;
+    const h = this.snapCandidate(LIMB_IDS[i], this.hookTmp);
+    if (!h) return false;
+    const c = contactPoint(h, i, this.wouldMatch(i, h), this.hookTmp);
+    const m = footModeFor(h, c.x, c.y, this.ax[i], this.ay[i], this.P.x, this.techAngle(c.y), null);
+    return m === 'heel' || m === 'toe';
   }
 
   /** Self-clipping: would limb i on (x, y) / hold h overlap another limb? (frame from frameNow()). */
@@ -1863,7 +1922,7 @@ export class ClimberSim implements ClimberSimAPI {
   private measureGap(i: number): void {
     const L = this.limbs[i];
     const u = this.frameNow();
-    L.attachGap = Math.min(envProjectOn(this.prof, i, this.ax[i], this.ay[i], u.x, u.y, L.cx, L.cy), SIM.reachTolerance + 0.35);
+    L.attachGap = Math.min(envProjectOn(this.prof, this.envLi(i), this.ax[i], this.ay[i], u.x, u.y, L.cx, L.cy), SIM.reachTolerance + 0.35);
   }
 
   private softAllow(L: LimbRt): number {
@@ -1912,7 +1971,7 @@ export class ClimberSim implements ClimberSimAPI {
     if (L.prevHold) {
       const tmp = this.qTmp;
       contactPoint(L.prevHold, i, this.wouldMatch(i, L.prevHold), tmp);
-      if (this.reachOk(i, tmp.x, tmp.y, tol) && !this.blocked(i, tmp.x, tmp.y, L.prevHold)) {
+      if (this.placeOk(i, L.prevHold, tmp.x, tmp.y, tol) && !this.blocked(i, tmp.x, tmp.y, L.prevHold)) {
         this.attach(i, L.prevHold);
         return L.prevHold.id;
       }
@@ -2147,9 +2206,11 @@ export class ClimberSim implements ClimberSimAPI {
     if (!any) return;
     prm.reachMargin = reachLimb >= 0 ? SIM.reachComfort : 0;
     prm.reachCap = reachLimb >= 2 ? FOOT_LEAN_REACH : Infinity;
+    prm.reachHook = reachLimb >= 2 && this.reachHook;
     bestLean(this.contacts, prm, this.P.x, this.P.y, this.evScratch, this.leanPose, this.lean);
     prm.reachMargin = 0;
     prm.reachCap = Infinity;
+    prm.reachHook = false;
     // rate-limited: the torso turns smoothly (≈2.4 rad/s)
     const maxStep = 2.4 * H * 4;
     this.lean += clamp(LEAN_OUT.lean - this.lean, -maxStep, maxStep);
@@ -2178,10 +2239,13 @@ export class ClimberSim implements ClimberSimAPI {
     for (let i = 0; i < 4; i++) if (this.contacts[i]) any = true;
     if (!any) return;
     const L = this.limbs[li];
+    // a foot pointed at a hold it would hook reaches with the hooking leg's range (high hooks)
+    this.reachHook = li >= 2 && this.wouldHookAt(li, L.tx, L.ty);
     const prm = this.prmScratch;
     prm.reachLimb = li;
     prm.reachX = L.tx;
     prm.reachY = this.reachY(li);
+    prm.reachHook = this.reachHook;
     // a reaching foot never lifts the body: the hips may sink or shift for it, not rise
     prm.maxPelvisY = li >= 2 ? this.reachCapY + 0.02 : Infinity;
     prm.reachMargin = SIM.reachComfort;
@@ -2190,6 +2254,7 @@ export class ClimberSim implements ClimberSimAPI {
     seed.py = this.posture.py;
     optimizePose(this.contacts, prm, seed, this.posture, this.evScratch, 36, true);
     prm.reachMargin = 0;
+    prm.reachHook = false;
     this.postureOn = true;
   }
 
@@ -2280,6 +2345,7 @@ export class ClimberSim implements ClimberSimAPI {
         break;
       }
     this.prm.reachLimb = reachLimb;
+    this.prm.reachHook = reachLimb >= 2 && this.reachHook;
     for (let i = 0; i < 2; i++) this.capPumpF[i] = pumpCapFactor(this.handPump[i]);
     if (reachLimb >= 0) {
       this.prm.reachX = this.limbs[reachLimb].tx;
@@ -2588,8 +2654,9 @@ export class ClimberSim implements ClimberSimAPI {
         if (!(L.hold || L.smear) || L.dragging || L.busy) continue;
         const allow = this.softAllow(L) + 0.004;
         // conservative excess first (cheap); the exact distance only near the edge
-        if (envEvalOn(this.prof, i, this.hipAx[i], this.hipAy[i], vx, vy, L.cx, L.cy).excess <= allow) continue;
-        if (envProjectOn(this.prof, i, this.hipAx[i], this.hipAy[i], vx, vy, L.cx, L.cy) > allow) fits = false;
+        const ei = this.envLi(i);
+        if (envEvalOn(this.prof, ei, this.hipAx[i], this.hipAy[i], vx, vy, L.cx, L.cy).excess <= allow) continue;
+        if (envProjectOn(this.prof, ei, this.hipAx[i], this.hipAy[i], vx, vy, L.cx, L.cy) > allow) fits = false;
       }
       if (fits) return true;
     }
@@ -2711,7 +2778,7 @@ export class ClimberSim implements ClimberSimAPI {
         const dx = L.cx - hx;
         const dy = L.cy - hy;
         const d = Math.hypot(dx, dy);
-        const dist = envProjectOn(this.prof, i, hx, hy, ux, uy, L.cx, L.cy);
+        const dist = envProjectOn(this.prof, this.envLi(i), hx, hy, ux, uy, L.cx, L.cy);
         const allow = this.softAllow(L);
         if (dist > allow) {
           const k = (dist - allow) / dist;
@@ -2749,7 +2816,7 @@ export class ClimberSim implements ClimberSimAPI {
       for (let i = 0; i < 4; i++) {
         const L = this.limbs[i];
         const on = (L.hold || L.smear) && !L.dragging && !L.busy;
-        res[i] = on ? Math.max(0, envProjectOn(this.prof, i, this.ax[i], this.ay[i], dx / l, dy / l, L.cx, L.cy) - this.softAllow(L)) : 0;
+        res[i] = on ? Math.max(0, envProjectOn(this.prof, this.envLi(i), this.ax[i], this.ay[i], dx / l, dy / l, L.cx, L.cy) - this.softAllow(L)) : 0;
       }
     }
   }
@@ -2771,12 +2838,14 @@ export class ClimberSim implements ClimberSimAPI {
       if (L.dragging) {
         // the limb follows the finger up to its anatomical limit (a hold up to SIM.reachTolerance
         // further out still snaps on release; the body is then eased into reach)
-        const c = envClampOn(this.prof, i, ax[i], ay[i], sx, sy, L.tx, L.ty, 0);
+        // (a dragged foot may go as high as a hook could: the hooking leg's range contains the standing one)
+        const di = i >= 2 ? i + 2 : i;
+        const c = envClampOn(this.prof, di, ax[i], ay[i], sx, sy, L.tx, L.ty, 0);
         const kk = 1 - Math.exp(-36 * h);
         L.px += (c.x - L.px) * kk;
         L.py += (c.y - L.py) * kk;
         // the body moves too: the endpoint itself never leaves the envelope
-        const e = envClampOn(this.prof, i, ax[i], ay[i], sx, sy, L.px, L.py, 0);
+        const e = envClampOn(this.prof, di, ax[i], ay[i], sx, sy, L.px, L.py, 0);
         L.px = e.x;
         L.py = e.y;
         L.depth = damp(L.depth, 0.12, 14, h);
@@ -3367,7 +3436,7 @@ export class ClimberSim implements ClimberSimAPI {
       o.stress = L.stress;
       o.capacity = L.cap;
       // fraction of the anatomical reach in this direction (≥ 1 = at the envelope's edge)
-      o.reachRatio = envEvalOn(this.prof, i, this.ax[i], this.ay[i], u.x, u.y, L.px, L.py).ratio;
+      o.reachRatio = envEvalOn(this.prof, L.dragging && i >= 2 ? i + 2 : this.envLi(i), this.ax[i], this.ay[i], u.x, u.y, L.px, L.py).ratio;
       o.smearing = L.smear;
       o.shake = L.shake;
       o.busy = L.busy;
