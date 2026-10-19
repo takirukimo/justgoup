@@ -8,6 +8,20 @@ import { hold, makeBoulder } from './test-helpers';
 import { usableByFoot, usableByHand } from './holds';
 import { availableStyles } from './archetypes';
 
+/**
+ * Milliseconds of CPU this process has used (falls back to wall-clock time where process.cpuUsage is
+ * missing). Timing guards measure CPU time: on a shared box (other test files, other agents, CI
+ * neighbours) wall-clock time also counts the slices the scheduler gave to someone else.
+ */
+function cpuMs(): number {
+  const proc = (globalThis as { process?: { cpuUsage?: () => { user: number; system: number } } }).process;
+  if (typeof proc?.cpuUsage === 'function') {
+    const u = proc.cpuUsage();
+    return (u.user + u.system) / 1000;
+  }
+  return performance.now();
+}
+
 /** ≥ 1: how much busier than one runnable task per core the machine is right now (1 when unknown). */
 function loadFactor(): number {
   type OS = { loadavg(): number[]; cpus(): unknown[] };
@@ -43,14 +57,15 @@ describe('planBeta', () => {
       // best of three: robust against other test files running in parallel
       let best = Infinity;
       for (let k = 0; k < 3; k++) {
-        const t0 = performance.now();
+        const t0 = cpuMs();
         expect(planBeta(b, { maxMs: 1000 })).not.toBeNull();
-        best = Math.min(best, performance.now() - t0);
+        best = Math.min(best, cpuMs() - t0);
       }
       times.push(best);
     }
     times.sort((a, b) => a - b);
-    // 60 ms on an idle machine; the budget scales with the machine's load (shared CI / dev boxes)
+    // 60 ms of CPU (typical boulders of the shipped default, folded walls included); the budget also
+    // scales with the machine's load (shared CI / dev boxes: steal time, cache and memory contention)
     expect(times[Math.floor(times.length / 2)]).toBeLessThan(60 * loadFactor());
   });
 
@@ -63,10 +78,10 @@ describe('planBeta', () => {
     for (const b of problems) {
       let best = Infinity;
       for (let k = 0; k < 2; k++) {
-        const t0 = performance.now();
+        const t0 = cpuMs();
         // the generator's own deterministic budget: every generated problem solves within it
         expect(planBeta(b, { maxNodes: 700 }), b.id).not.toBeNull();
-        best = Math.min(best, performance.now() - t0);
+        best = Math.min(best, cpuMs() - t0);
       }
       times.push(best);
     }
