@@ -6,7 +6,10 @@
 //                     for reading (S.holdTime), ends pointing at the wall. Skippable.
 //   runTutorial(ctx)  the lesson: one limb at a time from TUTORIAL_SEQUENCE (hand, foot, hips,
 //                     shaking + pump, match on TOP), with gating, hold highlights, guide reactions,
-//                     mistake handling and a finale. Resolves 'done' or 'skipped'.
+//                     mistake handling and a finale. Two short Phase B beats ride along: a shake-out
+//                     on the first big jug after the pump lesson, and a chalk dip before the TOP
+//                     (phrased by the hand's real friction); a full stretch at a hold a throw would
+//                     reach gets the deadpoint tip. Resolves 'done' or 'skipped'.
 //
 // ── What the app must do ─────────────────────────────────────────────────────────────────────
 // runTutorial:
@@ -56,6 +59,7 @@ import type { BoulderDef, HoldDef, LimbId, Vec2 } from '../core/types';
 import { bus } from '../core/events';
 import { clamp } from '../core/math';
 import { SIM } from '../config/tuning';
+import { chalkBagAt, frictionWord, SHAKE_LANE, shakeLanePoint, spineUp } from '../input/release';
 import { TUTORIAL_SEQUENCE, type TutorialStep } from '../game/generator';
 import { Clock, Scope, isAborted } from './scope';
 import { ensureTutorialStyles, IntroOverlay, overlayHost } from './overlay';
@@ -95,11 +99,24 @@ export interface TutorialStatus {
   total: number;
   /** The active lesson (limb + target hold), or null. */
   lesson: TutorialStep | null;
-  /** Set during the rescue's "stand up on that foot" beat (hips only; `lesson` is the foot + hold). */
-  beat: 'stand-up' | null;
+  /**
+   * Set during a beat that isn't a plain move onto `lesson.holdId`:
+   *  'stand-up'  the rescue's "stand up on that foot" (hips only; `lesson` is the foot + hold),
+   *  'shake-out' let `lesson.limb` hang by the side (the sim's shake-out lane) and let go,
+   *  'chalk'     dip `lesson.limb` into the chalk bag (drag it to the hips, or tap its forearm gauge).
+   * (`lesson.holdId` is the hold that hand is on for the last two.)
+   */
+  beat: TutorialBeat | null;
+  /**
+   * 'shake-out' / 'chalk' beats: the wall-local point to let the hand go at right now (a spot of the
+   * shake-out lane clear of holds, or the chalk bag); it moves with the body. Null otherwise.
+   */
+  target: Vec2 | null;
 }
 
-const IDLE_STATUS: TutorialStatus = { running: false, phase: 'idle', step: -1, total: TUTORIAL_SEQUENCE.length, lesson: null, beat: null };
+export type TutorialBeat = 'stand-up' | 'shake-out' | 'chalk';
+
+const IDLE_STATUS: TutorialStatus = { running: false, phase: 'idle', step: -1, total: TUTORIAL_SEQUENCE.length, lesson: null, beat: null, target: null };
 
 let activeIntro: { promise: Promise<void>; director: IntroDirector } | null = null;
 let activeTutorial: { sim: ClimberSimAPI; promise: Promise<'done' | 'skipped'>; director: TutorialDirector } | null = null;
@@ -162,6 +179,12 @@ function guideSpot(b: BoulderDef | null, mode: 'intro' | 'wide' | 'lesson'): { x
   const half = b ? b.width / 2 : 2.3;
   const x = mode === 'intro' ? cx - 0.95 : mode === 'wide' ? cx + 0.9 : lo - 0.8;
   return { x: clamp(x, -half + 0.45, half - 0.45), depth: mode === 'wide' ? 1.2 : 1.3 };
+}
+
+/** The long-reach pump lesson ('shake') came before step i. */
+function shakeTaught(steps: readonly TutorialStep[], i: number): boolean {
+  for (let j = 0; j < i; j++) if (steps[j].teach === 'shake') return true;
+  return false;
 }
 
 function topCenter(b: BoulderDef | null): Vec2 {
@@ -454,6 +477,10 @@ const MISTAKE_COOLDOWN_S = 1.6;
 const STUCK_STRETCH_S = 4;
 /** The rescue's stand-up beat moves on after this long without success. */
 const STAND_UP_GIVE_UP_S = 28;
+/** The shake-out / chalk beats move on after this long (or three misses) without it happening. */
+const BEAT_GIVE_UP_S = 32;
+/** How long the hand hangs and shakes before Steini asks for it back (s, game time). */
+const SHAKE_OUT_HANG_S = 2.8;
 
 interface LessonOutcome {
   /** The limb ended on the target hold. */
@@ -478,8 +505,14 @@ class TutorialDirector extends Director {
   private readonly holds = new Map<string, HoldDef>();
   private readonly steps: TutorialStep[];
   private readonly done = new Set<number>();
-  /** The rescue's stand-up beat (reported by status()). */
+  /** The move being taught when it isn't steps[stepIdx] (rescue stand-up, the Phase B beats; reported by status()). */
   private beatLesson: TutorialStep | null = null;
+  private beatKind: TutorialBeat | null = null;
+  /** A shake-out / chalk beat is waiting for the hand to let go in its zone (status().target is live). */
+  private beatArmed = false;
+  /** The Phase B beats run once per tutorial. */
+  private restDone = false;
+  private chalkDone = false;
   private phase: TutorialPhase = 'opening';
   private stepIdx = -1;
   private superseded = false;
@@ -487,6 +520,7 @@ class TutorialDirector extends Director {
   // once-per-tutorial tips
   private saidFirstDrag = false;
   private saidLetGo = false;
+  private saidDeadpoint = false;
   private readonly mistakeAt = new Map<S.MistakeKind, number>();
   private readonly mistakeN = new Map<S.MistakeKind, number>();
   /** Hold time of the last mistake line (the instruction comes back only after it was readable). */
@@ -508,7 +542,9 @@ class TutorialDirector extends Director {
 
   status(): TutorialStatus {
     const lesson = this.beatLesson ?? (this.stepIdx >= 0 && this.stepIdx < this.steps.length ? this.steps[this.stepIdx] : null);
-    return { running: true, phase: this.phase, step: this.stepIdx, total: this.steps.length, lesson, beat: this.beatLesson ? 'stand-up' : null };
+    const beat = this.beatLesson ? this.beatKind : null;
+    const target = this.beatLesson && this.beatArmed && (beat === 'shake-out' || beat === 'chalk') ? this.zonePoint(beat, this.beatLesson.limb === 'RH' ? 'RH' : 'LH') : null;
+    return { running: true, phase: this.phase, step: this.stepIdx, total: this.steps.length, lesson, beat, target };
   }
 
   /** A newer runTutorial() took over: tear down quietly (no 'tutorial:done'). */
@@ -575,6 +611,75 @@ class TutorialDirector extends Director {
     return this.steps[i].teach === 'match' && !this.steps.slice(i + 1).some((s) => s.teach === 'match');
   }
 
+  /**
+   * Which hand dips into the chalk bag: the one NOT on the jug (the other hangs on the best hold while
+   * it is in the bag), else the more worn one, else `fallback`.
+   */
+  private chalkHand(fallback: 'LH' | 'RH'): 'LH' | 'RH' {
+    const st = this.sim.getState();
+    const jug = (l: 'LH' | 'RH'): boolean => {
+      const id = st.limbs[l].holdId;
+      return !!id && this.holds.get(id)?.type === 'jug';
+    };
+    if (jug('LH') !== jug('RH')) return jug('LH') ? 'RH' : 'LH';
+    const fl = st.limbs.LH.friction ?? 1;
+    const fr = st.limbs.RH.friction ?? 1;
+    if (Math.abs(fl - fr) > 0.05) return fl < fr ? 'LH' : 'RH';
+    return fallback;
+  }
+
+  /** The step's hand is on a big jug (a rest hold) now. */
+  private onJug(step: TutorialStep): boolean {
+    if (step.limb !== 'LH' && step.limb !== 'RH') return false;
+    const id = this.sim.getState().limbs[step.limb].holdId;
+    const h = id ? this.holds.get(id) : undefined;
+    return !!h && h.type === 'jug';
+  }
+
+  /** A committed flick of the step's (hand) limb at its target would make it (the sim's throw preview). */
+  private throwable(step: TutorialStep): boolean {
+    if (step.limb !== 'LH' && step.limb !== 'RH') return false;
+    const h = this.hold(step.holdId);
+    const d = typeof this.sim.dynoCandidate === 'function' ? this.sim.dynoCandidate(step.limb, { x: h.x, y: h.y }) : null;
+    return !!d && d.holdId === h.id && d.feasible;
+  }
+
+  /**
+   * Where `hand` would let go for a beat right now: the chalk bag, or the spot of the hand's
+   * shake-out lane (input/release.ts, mirrors the sim) furthest from any hold it would grab
+   * instead (null when the whole lane is covered by holds).
+   */
+  private zonePoint(kind: 'shake-out' | 'chalk', hand: 'LH' | 'RH'): Vec2 | null {
+    const st = this.sim.getState();
+    const up = spineUp(st.pelvis, st.chest, { x: 0, y: 1 });
+    if (kind === 'chalk') return chalkBagAt(st.pelvis, up, { x: 0, y: 0 });
+    const A = st.limbs[hand].anchor;
+    const idx = hand === 'LH' ? 0 : 1;
+    let best: Vec2 | null = null;
+    let bestScore = -Infinity;
+    const p = { x: 0, y: 0 };
+    for (let a = 1; a <= 5; a++) {
+      for (let b = 1; b <= 5; b++) {
+        const down = SHAKE_LANE.down0 + ((SHAKE_LANE.down1 - SHAKE_LANE.down0) * a) / 6;
+        const out = SHAKE_LANE.out0 + ((SHAKE_LANE.out1 - SHAKE_LANE.out0) * b) / 6;
+        shakeLanePoint(idx, A, up, down, out, p);
+        if (this.sim.snapCandidate(hand, p)) continue;
+        // clear of holds by the widest margin, then nearest the middle of the lane
+        let clear = 1;
+        for (const h of this.holds.values()) {
+          if (h.role === 'deco') continue;
+          clear = Math.min(clear, Math.hypot(h.x - p.x, h.y - p.y) - h.size);
+        }
+        const score = Math.min(clear, 0.25) - 0.15 * (Math.abs(a - 3) + Math.abs(b - 3)) / 4;
+        if (score > bestScore) {
+          bestScore = score;
+          best = { x: p.x, y: p.y };
+        }
+      }
+    }
+    return best;
+  }
+
   // ── script ──
 
   protected async script(): Promise<void> {
@@ -613,6 +718,11 @@ class TutorialDirector extends Director {
       this.stepIdx = i;
       this.phase = 'lesson';
       const prev = i > 0 ? this.steps[i - 1] : null;
+      // fresh chalk for the TOP moves: dip the hand that goes up first
+      if (step.teach === 'match' && !this.chalkDone) {
+        this.chalkDone = true;
+        await this.chalkBeat(this.chalkHand(step.limb === 'RH' ? 'RH' : 'LH'));
+      }
       if (step.teach === 'hips') {
         await this.hipsLesson(step);
       } else if (step.teach === 'shake') {
@@ -634,6 +744,11 @@ class TutorialDirector extends Director {
         await this.moveWithRescue(i, S.lessonCopy(step, i, last), { quiet: last });
       }
       this.done.add(i);
+      // the first big jug after the pump lesson is a rest: shake the other (pumped) arm out
+      if (shakeTaught(this.steps, i) && !this.restDone && this.onJug(step)) {
+        this.restDone = true;
+        await this.shakeOutBeat(step.limb === 'LH' ? 'RH' : 'LH');
+      }
     }
     await this.finale();
   }
@@ -668,10 +783,12 @@ class TutorialDirector extends Director {
       // a high foot only helps once you stand up on it
       if (foot.placed) {
         this.beatLesson = { limb: h.limb, holdId: h.holdId, teach: 'hips' };
+        this.beatKind = 'stand-up';
         try {
           await this.standUp(this.hold(h.holdId));
         } finally {
           this.beatLesson = null;
+          this.beatKind = null;
         }
       }
     }
@@ -732,6 +849,8 @@ class TutorialDirector extends Director {
       let stretchT = 0;
       let saidStretch = false;
       let stuck = false;
+      /** A chalk dip is under way: its automatic 'return' to the hold is not a miss. */
+      let chalking = false;
       let fromHold: string | null = sim.getState().limbs[step.limb].holdId;
       let restore: (() => void) | null = null;
       const scheduleRestore = (): void => {
@@ -783,13 +902,29 @@ class TutorialDirector extends Director {
       });
       s.on('sim:event', (e: SimEvent) => {
         if (e.type === 'shake-start') out.shook = true;
+        if (e.type === 'dyno-miss') {
+          // a flick that didn't stick: coach the throw (the invincible sim puts the hand back)
+          if (e.limbs.includes(step.limb)) mistake('dyno-miss');
+          return;
+        }
         if (!('limb' in e) || e.limb !== step.limb) return;
         // (sim events of a drop arrive before input:drag-end)
         if ((e.type === 'return' || e.type === 'grab' || e.type === 'smear') && strainedRelease()) stuck = true;
-        if (e.type === 'grab' && e.holdId !== step.holdId) {
+        if (e.type === 'chalk-start') {
+          // let go at the hips: the hand dips into the chalk bag and comes back by itself
+          chalking = true;
+          mistake('chalk');
+        } else if (e.type === 'shake-out-start') {
+          // let go down by the side: the arm hangs and shakes out until it is dragged again
+          mistake('shake-out');
+        } else if (e.type === 'grab' && e.holdId !== step.holdId) {
           fails++;
           mistake(e.holdId === fromHold ? 'short' : 'wrong');
         } else if (e.type === 'return') {
+          if (chalking) {
+            chalking = false;
+            return;
+          }
           fails++;
           mistake('return');
         } else if (e.type === 'smear') {
@@ -808,7 +943,9 @@ class TutorialDirector extends Director {
           stretchT = L.reachRatio > 0.96 && short ? stretchT + dt : short ? Math.max(0, stretchT - dt) : stretchT;
           if (stretchT > 0.8 && !saidStretch) {
             saidStretch = true;
-            this.line(S.DRAG_TIPS.stretch, copy.pos, true);
+            // a hand that could throw for it: teach the deadpoint flick instead of "keep holding"
+            this.line(this.throwable(step) && !this.saidDeadpoint ? S.DRAG_TIPS.deadpoint : S.DRAG_TIPS.stretch, copy.pos, true);
+            if (this.throwable(step)) this.saidDeadpoint = true;
           }
           if (stretchT > STUCK_STRETCH_S && !stuck && outOfReach()) stuck = true;
           return;
@@ -910,6 +1047,206 @@ class TutorialDirector extends Director {
       this.line(S.RESCUE.stood, pos);
       this.react('clap', 1.3, this.chest());
       await this.sleep(S.holdTime(S.RESCUE.stood.text));
+    }
+  }
+
+  /**
+   * Rest beat (Phase B): on a big jug after the pump lesson, the other, pumped hand lets go down by the
+   * side (the sim's shake-out lane), hangs and shakes for a moment, then goes back on its hold. Gives
+   * up after a few misses or half a minute, so it never traps anyone.
+   */
+  private async shakeOutBeat(hand: 'LH' | 'RH'): Promise<void> {
+    const { sim, controls } = this;
+    const home = sim.getState().limbs[hand].holdId;
+    if (!home || typeof sim.shakeOut !== 'function' || !this.zonePoint('shake-out', hand)) return;
+    const pos: Pos = 'top';
+    const instruct = S.SHAKE_OUT.instruct(hand);
+    const nudge = S.SHAKE_OUT.nudge(hand);
+    let started = false;
+    this.beatLesson = { limb: hand, holdId: home, teach: 'hand' };
+    this.beatKind = 'shake-out';
+    this.beatArmed = true;
+    const s = this.root.child();
+    try {
+      controls.setAllowed([hand], false);
+      this.highlight(null);
+      this.focus(null);
+      this.pose('point', this.chest());
+      this.line(instruct, pos);
+      let dragging = false;
+      let misses = 0;
+      let idle = 0;
+      let nudges = 0;
+      let elapsed = 0;
+      s.on('input:drag-start', (e) => {
+        if (e.limb !== hand) return;
+        dragging = true;
+        idle = 0;
+      });
+      s.on('input:drag-end', (e) => {
+        if (e.limb === hand) dragging = false;
+      });
+      s.on('input:blocked', () => this.sayMistake('blocked', pos));
+      s.on('ui:hint', () => {
+        idle = 0;
+        this.line(nudge, pos);
+      });
+      s.on('sim:event', (e: SimEvent) => {
+        if (!('limb' in e) || e.limb !== hand || started) return;
+        if (e.type === 'shake-out-start') {
+          // it hangs: no more drags until Steini asks for it back
+          started = true;
+          this.beatArmed = false;
+          controls.setAllowed([], false);
+        } else if (e.type === 'return' || e.type === 'grab' || e.type === 'smear' || e.type === 'chalk-start') {
+          misses++;
+          this.line(S.SHAKE_OUT.free, pos, true);
+        }
+      });
+      s.every((dt) => {
+        if (dragging) return;
+        idle += dt;
+        if (idle < IDLE_NUDGE_S + nudges * 4) return;
+        idle = 0;
+        nudges++;
+        this.line(nudges % 2 ? nudge : instruct, pos);
+        this.react('point', 1.4, this.chest());
+      });
+      await s.until((dt) => {
+        elapsed += dt;
+        return started || (!dragging && (misses >= 3 || elapsed > BEAT_GIVE_UP_S));
+      });
+    } finally {
+      s.close();
+      this.beatArmed = false;
+      if (!started) {
+        this.beatLesson = null;
+        this.beatKind = null;
+      }
+    }
+    controls.setAllowed([], false);
+    if (started) {
+      // let it hang: the forearm recovers while the arm shakes by the side
+      this.react('clap', 1.0, this.chest());
+      const shaking = S.SHAKE_OUT.shaking(hand, (sim.getState().limbs[hand].pump ?? 0) > 0.12);
+      this.line(shaking, pos);
+      await this.sleep(Math.max(SHAKE_OUT_HANG_S, S.readTime(shaking.text)));
+    } else {
+      this.line(S.SHAKE_OUT.skip, pos);
+      await this.sleep(S.holdTime(S.SHAKE_OUT.skip.text));
+    }
+    // …and back on the hold it left (also after a miss onto another hold); status() reports that move
+    if (sim.getState().limbs[hand].holdId === home) return;
+    const back: TutorialStep = { limb: hand, holdId: home, teach: 'hand' };
+    this.beatLesson = back;
+    this.beatKind = null;
+    try {
+      const copy = S.SHAKE_OUT.back(hand);
+      await this.moveLesson(back, started ? copy : { ...copy, instruct: S.backOn(hand), success: S.PRAISE_BACK }, { allowStuck: true });
+    } finally {
+      this.beatLesson = null;
+    }
+  }
+
+  /**
+   * Chalk beat (Phase B) before the TOP moves: dip `hand` into the chalk bag, by dragging it to the
+   * hips or tapping its forearm gauge. Phrased by what the HUD shows for that hand (FRESH / WORN /
+   * GREASY). The hand comes back to its hold by itself. Never traps: gives up like the rest beat.
+   */
+  private async chalkBeat(hand: 'LH' | 'RH'): Promise<void> {
+    const { sim, controls } = this;
+    const st = sim.getState();
+    const home = st.limbs[hand].holdId;
+    const other = st.limbs[hand === 'LH' ? 'RH' : 'LH'];
+    if (!home || !other.holdId || st.phase !== 'climbing' || typeof sim.chalkUp !== 'function') return;
+    const pos: Pos = 'top';
+    const instruct = S.CHALK.instruct(hand, frictionWord(st.limbs[hand].friction ?? 1));
+    const nudge = S.CHALK.nudge(hand);
+    let started = false;
+    this.beatLesson = { limb: hand, holdId: home, teach: 'hand' };
+    this.beatKind = 'chalk';
+    this.beatArmed = true;
+    const s = this.root.child();
+    try {
+      controls.setAllowed([hand], false);
+      this.highlight(null);
+      this.focus(null);
+      this.pose('point', this.chest());
+      this.line(instruct, pos);
+      let dragging = false;
+      let misses = 0;
+      let idle = 0;
+      let nudges = 0;
+      let elapsed = 0;
+      s.on('input:drag-start', (e) => {
+        if (e.limb !== hand) return;
+        dragging = true;
+        idle = 0;
+      });
+      s.on('input:drag-end', (e) => {
+        if (e.limb === hand) dragging = false;
+      });
+      s.on('input:blocked', () => this.sayMistake('blocked', pos));
+      s.on('ui:hint', () => {
+        idle = 0;
+        this.line(nudge, pos);
+      });
+      s.on('sim:event', (e: SimEvent) => {
+        if (!('limb' in e) || e.limb !== hand || started) return;
+        if (e.type === 'chalk-start') {
+          // in the bag: it comes back by itself, hands off meanwhile
+          started = true;
+          this.beatArmed = false;
+          controls.setAllowed([], false);
+        } else if (e.type === 'return' || e.type === 'grab' || e.type === 'smear' || e.type === 'shake-out-start') {
+          misses++;
+          this.line(S.CHALK.miss, pos, true);
+        }
+      });
+      s.every((dt) => {
+        if (dragging) return;
+        idle += dt;
+        if (idle < IDLE_NUDGE_S + nudges * 4) return;
+        idle = 0;
+        nudges++;
+        this.line(nudges % 2 ? nudge : instruct, pos);
+        this.react('point', 1.4, this.chest());
+      });
+      await s.until((dt) => {
+        elapsed += dt;
+        return started || (!dragging && (misses >= 3 || elapsed > BEAT_GIVE_UP_S));
+      });
+      if (started) {
+        this.line(S.CHALK.dipping, pos, true);
+        // the dip takes SIM.chalkTime; the hand then goes back onto its hold by itself
+        await s.until(() => {
+          const L = sim.getState().limbs[hand];
+          return !L.chalking && !L.busy && !L.dragging;
+        }, SIM.chalkTime + 3);
+      }
+    } finally {
+      s.close();
+      this.beatArmed = false;
+      this.beatLesson = null;
+      this.beatKind = null;
+    }
+    controls.setAllowed([], false);
+    const after = started ? S.CHALK.success : S.CHALK.skip;
+    if (started) {
+      this.chime();
+      this.react('clap', 1.3, this.chest());
+    }
+    this.line(after, pos);
+    await this.sleep(S.holdTime(after.text));
+    // a hand that wandered off its hold (a miss onto another hold, a shake-out) goes back on first
+    if (sim.getState().limbs[hand].holdId !== home && this.holds.has(home)) {
+      const back: TutorialStep = { limb: hand, holdId: home, teach: 'hand' };
+      this.beatLesson = back;
+      try {
+        await this.moveLesson(back, { ...S.SHAKE_OUT.back(hand), instruct: S.backOn(hand), success: S.PRAISE_BACK }, { allowStuck: true, quiet: true });
+      } finally {
+        this.beatLesson = null;
+      }
     }
   }
 

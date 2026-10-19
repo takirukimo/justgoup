@@ -14,6 +14,19 @@ import { abortTutorial, runIntro, runTutorial, TUTORIAL_SIM_OPTIONS, tutorialSta
 import { cardHoldTime, colourWord, FINALE, holdTime, INTRO_CARD, INTRO_LINES, readTime, tOpen } from './script';
 import { BRAND, PALETTE } from '../config/brand';
 import { randomTip, TIPS, tipFor } from './tips';
+import { chalkBagAt, SHAKE_LANE, shakeLanePoint, spineUp } from '../input/release';
+
+/** A spot of `limb`'s shake-out lane where no hold would be grabbed (null if none). */
+function clearLanePoint(sim: ClimberSim, limb: LimbId, up: Vec2): Vec2 | null {
+  const A = sim.getState().limbs[limb].anchor;
+  for (const f of [0.5, 0.35, 0.65, 0.2, 0.8]) {
+    for (const g of [0.5, 0.8, 0.2]) {
+      const p = shakeLanePoint(limb === 'LH' ? 0 : 1, A, up, SHAKE_LANE.down0 + (SHAKE_LANE.down1 - SHAKE_LANE.down0) * f, SHAKE_LANE.out0 + (SHAKE_LANE.out1 - SHAKE_LANE.out0) * g, { x: 0, y: 0 });
+      if (!sim.snapCandidate(limb, p)) return p;
+    }
+  }
+  return null;
+}
 
 const DT = 1 / 60;
 const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
@@ -114,9 +127,10 @@ function rig(edit?: (b: BoulderDef) => BoulderDef): Rig {
 /** A player that does what the tutorial asks (optionally making a few mistakes first). */
 class Player {
   private busy = 0;
-  private drag: { limb: LimbId; from: Vec2; to: Vec2; t: number; hold: string } | null = null;
+  /** `zone`: a release zone (shake-out lane / chalk bag) rather than a hold: let go once there. */
+  private drag: { limb: LimbId; from: Vec2; to: Vec2; t: number; hold: string; zone?: boolean; live?: () => Vec2 | null } | null = null;
   private hip: { t: number; x: number } | null = null;
-  mistakes: ('wrong' | 'return')[] = [];
+  mistakes: ('wrong' | 'return' | 'lane' | 'bag')[] = [];
 
   constructor(private readonly r: Rig) {}
 
@@ -130,8 +144,21 @@ class Player {
       this.busy--;
       return;
     }
-    const hl = this.r.highlights.find((h) => h.kind === 'tutorial');
     const a = this.r.allowed;
+    const { beat, target } = tutorialStatus();
+    if ((beat === 'shake-out' || beat === 'chalk') && target && a.limbs !== 'all' && a.limbs.length === 1) {
+      // the Phase B beats: let the hand go down by the side (clear of holds), or at the chalk bag
+      const limb = a.limbs[0];
+      const L = st.limbs[limb];
+      if (L.shakingOut || L.chalking || L.busy) return;
+      const to = { x: target.x, y: target.y };
+      if (!sim.beginDrag(limb)) return;
+      bus.emit('input:drag-start', { limb });
+      // the zone moves with the body: keep aiming at the live target
+      this.drag = { limb, from: { x: L.pos.x, y: L.pos.y }, to, t: 0, hold: '', zone: true, live: () => tutorialStatus().target };
+      return;
+    }
+    const hl = this.r.highlights.find((h) => h.kind === 'tutorial');
     if (!hl || a.limbs === 'all') return;
     if (a.limbs.length === 1) {
       const limb = a.limbs[0];
@@ -143,10 +170,15 @@ class Player {
       const pair: LimbId = limb === 'LH' ? 'RH' : limb === 'RH' ? 'LH' : limb === 'LF' ? 'RF' : 'LF';
       let to = contactPoint(h, LIMB_INDEX[limb], st.limbs[pair].holdId === h.id, { x: 0, y: 0 });
       if (m === 'return') to = { x: st.limbs[limb].pos.x + 0.9, y: st.limbs[limb].pos.y + 0.3 }; // blank wall
+      const up = spineUp(st.pelvis, st.chest, { x: 0, y: 1 });
+      // down by the side, clear of holds (the shake-out lane), or at the hips (the chalk bag)
+      if (m === 'lane') to = clearLanePoint(sim, limb, up) ?? to;
+      if (m === 'bag') to = chalkBagAt(st.pelvis, up, { x: 0, y: 0 });
       if (!sim.beginDrag(limb)) return;
       bus.emit('input:drag-start', { limb });
       const p = sim.getState().limbs[limb].pos;
-      this.drag = { limb, from: { x: p.x, y: p.y }, to, t: 0, hold: holdId };
+      const live = m === 'bag' ? (): Vec2 => { const s = sim.getState(); return chalkBagAt(s.pelvis, spineUp(s.pelvis, s.chest, { x: 0, y: 1 }), { x: 0, y: 0 }); } : undefined;
+      this.drag = { limb, from: { x: p.x, y: p.y }, to, t: 0, hold: holdId, zone: m === 'lane' || m === 'bag', live };
     } else if (a.limbs.length === 0 && a.hips) {
       this.hip = { t: 0, x: sim.boulder.holds.find((x) => x.id === hl.holdId)!.x };
       bus.emit('input:hip-start');
@@ -158,12 +190,14 @@ class Player {
     const { sim } = this.r;
     d.t += DT;
     const k = Math.min(1, d.t / 0.45);
+    const lt = d.live?.();
+    if (lt) d.to = { x: lt.x, y: lt.y };
     const p = { x: d.from.x + (d.to.x - d.from.x) * k, y: d.from.y + (d.to.y - d.from.y) * k };
     sim.dragTo(d.limb, p);
     const c = sim.snapCandidate(d.limb, p);
     bus.emit('input:drag-move', { limb: d.limb, candidateHoldId: c ? c.id : null, quality: 0.8 });
     if (k < 1) return;
-    if (c?.id !== d.hold && d.t < 2.4) return; // hold the finger until it would snap (like a person)
+    if (!d.zone && c?.id !== d.hold && d.t < 2.4) return; // hold the finger until it would snap (like a person)
     for (const e of sim.endDrag(d.limb)) bus.emit('sim:event', e);
     bus.emit('input:drag-end', { limb: d.limb });
     this.drag = null;
@@ -206,11 +240,20 @@ describe('runTutorial', () => {
     let doneEvt: { skipped: boolean } | null = null;
     const off = bus.on('tutorial:done', (e) => (doneEvt = e));
     const shakeSeen: boolean[] = [];
-    const offShake = bus.on('sim:event', (e) => e.type === 'shake-start' && shakeSeen.push(true));
+    const phaseB = { shakeOut: 0, chalk: 0, chalkDone: 0 };
+    const offShake = bus.on('sim:event', (e) => {
+      if (e.type === 'shake-start') shakeSeen.push(true);
+      if (e.type === 'shake-out-start') phaseB.shakeOut++;
+      if (e.type === 'chalk-start') phaseB.chalk++;
+      if (e.type === 'chalk-done') phaseB.chalkDone++;
+    });
+    const beats = new Set<string>();
     const steps = new Set<number>();
     void runTutorial({ sim: r.sim, renderer: r.renderer, controls: r.controls, ui: r.ui, audio: r.audio, skipSignal, clock: r.clock }).then((v) => (result = v));
-    await drive(r, player, 240, () => {
-      steps.add(tutorialStatus().step);
+    await drive(r, player, 300, () => {
+      const s = tutorialStatus();
+      steps.add(s.step);
+      if (s.beat) beats.add(s.beat);
       return result !== null;
     });
     off();
@@ -224,6 +267,15 @@ describe('runTutorial', () => {
     expect(r.callouts).toContain('SENT!');
     expect(shakeSeen.length).toBeGreaterThan(0); // the stretch lesson really shakes with TUTORIAL_SIM_OPTIONS
     expect(r.lines.some((l) => l.text.startsWith('Feel the shaking'))).toBe(true);
+    // Phase B beats: a shake-out on the big jug after the pump lesson, a chalk dip before the TOP
+    expect([...beats].sort()).toEqual(['chalk', 'shake-out']);
+    expect(phaseB.shakeOut).toBe(1);
+    expect(phaseB.chalk).toBe(1);
+    expect(phaseB.chalkDone).toBe(1);
+    expect(r.lines.some((l) => l.text.startsWith('Shake it out'))).toBe(true);
+    expect(r.lines.some((l) => l.text.startsWith('That’s a shake-out. Rest'))).toBe(true);
+    expect(r.lines.some((l) => l.text.startsWith('Fresh chalk, better grip'))).toBe(true);
+    expect(r.lines.some((l) => /Not quite|Lower, right down/.test(l.text))).toBe(false); // a careful player never misses them
     // every lesson line is short enough to read mid-move
     for (const l of r.lines) if (!l.waitForTap) expect(l.text.split(/\s+/).length, l.text).toBeLessThanOrEqual(16);
     // clean exit
@@ -244,6 +296,26 @@ describe('runTutorial', () => {
     const texts = r.lines.map((l) => l.text);
     expect(texts.some((t) => /Wrong hold|Not that one/.test(t))).toBe(true);
     expect(texts.some((t) => /Let go right on the hold|Missed!/.test(t))).toBe(true);
+    expect(r.sim.getState().limbs.RH.holdId).toBe('tut-hand-1');
+    expect(result).toBeNull();
+  }, 60000);
+
+  it('coaches a hand let go into the shake-out lane or at the chalk bag mid-lesson, then carries on', async () => {
+    const r = rig();
+    const player = new Player(r);
+    player.mistakes = ['lane', 'bag'];
+    const seen: string[] = [];
+    const off = bus.on('sim:event', (e) => (e.type === 'shake-out-start' || e.type === 'chalk-start') && seen.push(e.type));
+    let result: string | null = null;
+    void runTutorial({ sim: r.sim, renderer: r.renderer, controls: r.controls, ui: r.ui, audio: r.audio, skipSignal: new Promise(() => undefined), clock: r.clock }).then((v) => (result = v));
+    await drive(r, player, 90, () => tutorialStatus().step >= 1);
+    off();
+    const texts = r.lines.map((l) => l.text);
+    expect(seen).toEqual(['shake-out-start', 'chalk-start']);
+    expect(texts.some((t) => t.startsWith('That’s a shake-out: the arm hangs'))).toBe(true);
+    expect(texts.some((t) => t.startsWith('Chalking up?'))).toBe(true);
+    // the chalk dip's automatic return to the hold is not coached as a miss
+    expect(texts.some((t) => /Let go right on the hold|Missed!/.test(t))).toBe(false);
     expect(r.sim.getState().limbs.RH.holdId).toBe('tut-hand-1');
     expect(result).toBeNull();
   }, 60000);

@@ -153,6 +153,10 @@ const BY_HOLD: Record<string, Omit<LessonCopy, 'pos'>> = {
   },
 };
 
+/** A hand put back on its hold after a beat that didn't happen. */
+export const PRAISE_BACK: Line = L('Back on. Good.', 'cheer');
+export const backOn = (hand: LimbId): Line => L(`Put your ${LIMB_NAME[hand]} back on the glowing hold.`, 'point');
+
 const PRAISE: readonly Line[] = [L('Allez!', 'cheer'), L('Hopp, nice!', 'cheer'), L('Clean move.', 'cheer'), L('Exactly like that.', 'cheer')];
 
 /** Copy for one lesson step (hand-written for the canonical sequence, generic otherwise). */
@@ -194,15 +198,15 @@ export const HIPS = {
 
 export const SHAKE = {
   felt: L('Feel the shaking? That’s tension. Stretched out like this, you pump out fast.', 'warn'),
-  concept: L('That gauge at the bottom is your tension. Past the notch, you start to shake.', 'think'),
-  pump: L('Shaking fills your pump bar. Full pump means you fall. So don’t hang around.', 'warn'),
+  concept: L('The middle gauge at the bottom is your tension. Past the notch, you start to shake.', 'think'),
+  pump: L('Shaking pumps your forearms: the bars left and right. Full pump means you fall.', 'warn'),
   calmInstruct: L('Now bring your right foot up, under that hand.', 'point'),
   calmSuccess: L('Solid. Good feet fix almost everything.', 'cheer'),
 } as const;
 
 // ───────────────────────────── mistakes ─────────────────────────────
 
-export type MistakeKind = 'wrong' | 'short' | 'return' | 'smear' | 'blocked' | 'struggle' | 'off-top';
+export type MistakeKind = 'wrong' | 'short' | 'return' | 'smear' | 'blocked' | 'struggle' | 'off-top' | 'shake-out' | 'chalk' | 'dyno-miss';
 
 export const MISTAKES: Record<MistakeKind, readonly Line[]> = {
   wrong: [L('Close! Wrong hold, though. Aim for the glowing one.', 'think'), L('Not that one. The glowing hold, please.', 'think')],
@@ -212,13 +216,60 @@ export const MISTAKES: Record<MistakeKind, readonly Line[]> = {
   blocked: [L('Not that one yet. Move the bright ring.', 'think'), L('One limb at a time. Just the bright ring for now.', 'think')],
   struggle: [L('Tip: drag onto the glowing hold, pause, and let go when it lights up green.', 'think')],
   'off-top': [L('Both hands on TOP, and keep them there a moment.', 'warn')],
+  // a hand let go down by the side (the shake-out lane) or at the hips (the chalk bag) mid-lesson
+  'shake-out': [L('That’s a shake-out: the arm hangs and recovers. Now onto the glowing hold.', 'think')],
+  chalk: [L('Chalking up? Good habit! Then onto the glowing hold.', 'happy')],
+  'dyno-miss': [L('So close! Flick harder, straight at the hold.', 'think'), L('Almost! Aim the flick right at the glowing hold.', 'think')],
 };
 
 export const DRAG_TIPS = {
   firstDrag: L('Aim for the glowing hold. Green means a good grip.', 'point'),
   letGo: L('That’s the one. Let go!', 'cheer'),
   stretch: L('Full stretch! Keep holding. Your body leans into the reach.', 'point'),
+  /** At full stretch with a throw that would make it (sim.dynoCandidate feasible). */
+  deadpoint: L('Just out of reach? Flick toward it as you let go: a deadpoint.', 'point'),
 } as const;
+
+// ───────────────────────────── shake-out + chalk (Phase B body) ─────────────────────────────
+
+const side = (hand: LimbId): string => LIMB_NAME[hand].split(' ')[0];
+const ringOf = (hand: LimbId): string => `${LIMB_NAME[hand].replace(' ', '-')} ring`;
+
+/** Rest beat on a big jug: drop the pumped hand by the side, shake it out, put it back. */
+export const SHAKE_OUT = {
+  instruct: (hand: LimbId): Line => L(`Big jug, good feet: rest here. Let your ${side(hand)} arm hang down by your side.`, 'point'),
+  nudge: (hand: LimbId): Line => L(`Drag the ${ringOf(hand)} down by your side, clear of the holds, then let go.`, 'point'),
+  /** The hand landed on a hold / went back instead of hanging free. */
+  free: L('Let it hang free: down by your side, clear of the holds.', 'think'),
+  /** `pumped`: that forearm has pump to lose (else the line explains the rest instead). */
+  shaking: (hand: LimbId, pumped: boolean): Line =>
+    pumped ? L(`Shake it out… Watch your ${side(hand)} forearm gauge drain.`, 'happy') : L('Shake it out… A loose, hanging arm recovers fastest.', 'happy'),
+  back: (hand: LimbId): LessonCopy => ({
+    instruct: L(`Rested. Now put your ${LIMB_NAME[hand]} back on its hold.`, 'point'),
+    nudge: L(`${cap(ringOf(hand))} back onto the glowing hold.`, 'point'),
+    success: L('That’s a shake-out. Rest on big holds before the pump gets you.', 'cheer'),
+    pos: 'bottom',
+  }),
+  skip: L('We’ll leave it. Remember: pumped? Shake out on a big hold.', 'happy'),
+} as const;
+
+/** Chalk beat before the top: dip a hand into the bag (drag it to the hips, or tap its forearm gauge). */
+export const CHALK = {
+  /** `word` is what the HUD shows for that hand's chalk (FRESH / WORN / GREASY). */
+  instruct: (hand: LimbId, word: 'FRESH' | 'WORN' | 'GREASY'): Line =>
+    word === 'FRESH'
+      ? L(`Before the top, chalk up. Drag your ${LIMB_NAME[hand]} down to the bag at your hips.`, 'point')
+      : L(`Your ${side(hand)} hand reads ${word}. Sweaty skin slips. Drag it to your chalk bag.`, 'warn'),
+  nudge: (hand: LimbId): Line => L(`Drag the ${ringOf(hand)} onto the chalk bag at your hips, or tap its forearm gauge.`, 'point'),
+  miss: L('Not quite. The chalk bag hangs behind your hips.', 'think'),
+  dipping: L('Dip, dip… fresh chalk.', 'happy'),
+  success: L('Fresh chalk, better grip. Slopers and crimps feel it most.', 'cheer'),
+  skip: L('We’ll leave it. Greasy hand? Tap its forearm gauge to chalk up.', 'happy'),
+} as const;
+
+function cap(t: string): string {
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
 
 // ───────────────────────────── rescue (a move that's out of reach from here) ─────────────────────────────
 
@@ -237,7 +288,7 @@ export const RESCUE = {
 
 export const FINALE: readonly Line[] = [
   L(`SENT! Your first ${BRAND.name} problem. I’d high-five you, but… hooves.`, 'cheer'),
-  L('Out there, problems are random. Shake too long or rush it, and you fall.', 'warn'),
+  L('Out there, walls get steep. Too far? Flick your hand at the hold: a deadpoint.', 'point'),
   L(`Send as many as you can without falling. That’s your score. Welcome to ${BRAND.game}. Hopp!`, 'point'),
 ];
 
