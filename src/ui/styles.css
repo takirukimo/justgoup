@@ -2113,6 +2113,89 @@
   transform: scaleX(0);
 }
 
+/* Special stance (advanced moves): BAT HANG with the core's endurance left, FIGURE 4; above the instruments. */
+.hud-special {
+  position: absolute !important;
+  left: 50%;
+  bottom: calc(var(--safe-b) + 112px);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 14px 6px 12px;
+  border-color: rgba(154, 212, 222, 0.5) !important;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 8px) scale(0.96);
+  transition:
+    opacity 0.2s,
+    transform 0.3s var(--ease-spring);
+}
+.hud-special.on {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+.hud-special.sp-fig4 {
+  border-color: rgba(var(--c-signal-rgb), 0.55) !important;
+}
+.jgu-ui .sp-ic {
+  width: 18px;
+  height: 18px;
+  color: var(--c-glacier);
+  flex: none;
+}
+.sp-bat .sp-ic {
+  transform: rotate(180deg);
+}
+.sp-fig4 .sp-ic {
+  color: var(--c-signal-ink);
+}
+.sp-txt {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.sp-word {
+  font-family: var(--f-display);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  line-height: 1;
+  color: var(--c-chalk);
+  white-space: nowrap;
+}
+.sp-sub {
+  font-family: var(--f-mono);
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  line-height: 1;
+  color: var(--c-mist);
+  white-space: nowrap;
+}
+.sp-bar {
+  width: 56px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  flex: none;
+}
+.sp-fig4 .sp-bar {
+  display: none;
+}
+.sp-fill {
+  display: block;
+  height: 100%;
+  background: var(--c-glacier);
+  transform-origin: left;
+  transition: background-color 0.25s;
+}
+.sp-fill.low {
+  background: var(--c-warn);
+}
+
 .hud-bottom {
   position: absolute !important;
   left: calc(var(--safe-l) + 12px);

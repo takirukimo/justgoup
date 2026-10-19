@@ -227,8 +227,33 @@ export class SimDriver {
       case 'shake-out-start':
         audio.exhale(0.75);
         break;
-      case 'technique':
-        audio.play('tick', { pan: this.pan(st.limbs[e.limb].pos.x), volume: 0.45, pitch: e.technique === 'heel' ? 0.85 : e.technique === 'toe' ? 1.1 : 1 });
+      case 'technique': {
+        const pan = this.pan(st.limbs[e.limb].pos.x);
+        if (e.technique === 'cam') {
+          // the foot jams: a low, solid lock and a short buzz
+          audio.play('tick', { pan, volume: 0.6, pitch: 0.7 });
+          audio.haptic(14);
+        } else if (e.technique === 'bat') {
+          // letting go: the body swings back and down under the feet, one long breath out
+          audio.play('whoosh', { volume: 0.42, pitch: 0.75 });
+          audio.exhale(0.8);
+          audio.haptic([10, 40, 10]);
+          this.kick(0.08);
+        } else if (e.technique === 'figure4') {
+          // the leg over the arm and the press up on it: an effort
+          audio.play('tick', { pan, volume: 0.5, pitch: 0.9 });
+          audio.exert('dyno-start', 0.55, { pan });
+          audio.haptic(18);
+        } else audio.play('tick', { pan, volume: 0.45, pitch: e.technique === 'heel' ? 0.85 : e.technique === 'toe' ? 1.1 : 1 });
+        break;
+      }
+      case 'special-end':
+        if (e.reason === 'grab') {
+          // the sit-up out of the bat hang onto a hold
+          audio.exert('dyno-catch', 0.4);
+          audio.haptic(16);
+        } else if (e.reason === 'foot') audio.exhale(0.6);
+        else if (e.reason === 'fatigue' || e.reason === 'slip') audio.exert('slip', 0.7);
         break;
       case 'dyno-start':
         audio.play('whoosh', { volume: e.kind === 'dyno' ? 0.4 : 0.26, pitch: 1.35 });

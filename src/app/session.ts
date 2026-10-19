@@ -107,6 +107,7 @@ export class ClimbSession {
   private pxpm = 120;
   private pxpmT = 1;
   private dynoKind: 'deadpoint' | 'dyno' | null = null;
+  private camNamed = false;
 
   constructor(svc: Services, cfg: SessionConfig) {
     this.svc = svc;
@@ -261,6 +262,14 @@ export class ClimbSession {
         break;
       case 'dyno-start':
         this.dynoKind = e.kind;
+        break;
+      case 'technique':
+        // the first heel-toe cam of a climb is named once (the BAT HANG / FIGURE 4 pill names those);
+        // Pure climbing: the locked foot says it
+        if (e.technique === 'cam' && !this.camNamed && this.phase === 'climbing' && !isPureMode()) {
+          this.camNamed = true;
+          this.svc.ui.hud.toast('HEEL-TOE CAM · THAT FOOT HOLDS EVERY WAY');
+        }
         break;
       case 'dyno-catch':
         // a full double-hand dyno is a moment; deadpoints are everyday moves and stay quiet

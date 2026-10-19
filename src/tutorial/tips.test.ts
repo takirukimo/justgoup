@@ -49,6 +49,19 @@ describe('tips match the wall', () => {
     expect([...lead].some((t) => CHALK_TIP.test(t))).toBe(true);
   });
 
+  it('teaches the advanced moves where they fit: cams and bat hangs on steep walls, figure 4s on dyno problems', () => {
+    const steep = new Set(Array.from({ length: 600 }, (_, i) => randomTip(i, 'boulder', { wallAngle: 50, style: 'cave' })));
+    expect([...steep].some((t) => /a cam/.test(t))).toBe(true);
+    expect([...steep].some((t) => /like a bat/.test(t))).toBe(true);
+    const dyno = new Set(Array.from({ length: 600 }, (_, i) => randomTip(i, 'boulder', { wallAngle: 10, style: 'dyno' })));
+    expect([...dyno].some((t) => /figure 4/.test(t))).toBe(true);
+    for (let seed = 0; seed < 400; seed++) {
+      const flat = randomTip(seed, 'boulder', { wallAngle: 0 });
+      expect(flat).not.toMatch(/a cam|like a bat|figure 4/);
+    }
+    expect(TIPS.join(' ')).toMatch(/above your hips/);
+  });
+
   it('teaches the new moves: chalk, shake-outs, hooks, flags', () => {
     const all = TIPS.join(' ');
     expect(all).toMatch(/chalk up/i);

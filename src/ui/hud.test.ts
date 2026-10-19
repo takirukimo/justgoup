@@ -58,6 +58,9 @@ describe('HUD forearm columns', () => {
     // not in flight, not before / after the climb
     expect(canChalk(state({ airborne: true }), 'LH')).toBe(false);
     expect(canChalk(state({ phase: 'idle' }), 'RH')).toBe(false);
+    // a bat hang frees both hands; a figure 4 locks the arm the leg is over
+    expect(canChalk(state({ special: 'bat' }, { LH: { holdId: null }, RH: { holdId: null } }), 'LH')).toBe(true);
+    expect(canChalk(state({ special: 'figure4', figure4: { hand: 'LH', leg: 'RF', blend: 1 } }), 'LH')).toBe(false);
   });
 
   it('CHALK buttons and grip chips only where chalk matters: lead yes, every boulder mode no', () => {

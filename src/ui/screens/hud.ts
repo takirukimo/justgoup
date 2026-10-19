@@ -33,6 +33,11 @@ type P = ScreenProps['hud'];
  */
 export type HudRunInfo = RunInfo & { clipReady?: boolean; chalk?: boolean };
 
+/** The special-stance pill (advanced moves): the stance and how to get out of it. */
+export function specialText(sp: 'bat' | 'fig4'): { word: string; sub: string } {
+  return sp === 'bat' ? { word: 'BAT HANG', sub: 'GRAB A HOLD TO SIT UP' } : { word: 'FIGURE 4', sub: 'REACH HIGH · A FOOT BACK ON ENDS IT' };
+}
+
 /** Does this climb show the CHALK buttons and grip chips? */
 export function chalkShown(run: HudRunInfo): boolean {
   return run.chalk ?? run.mode === 'rope';
@@ -67,7 +72,11 @@ export function canChalk(s: ClimberState, hand: 'LH' | 'RH'): boolean {
   if (s.phase !== 'climbing' || s.airborne) return false;
   const L = s.limbs[hand];
   const o = s.limbs[hand === 'LH' ? 'RH' : 'LH'];
-  return !L.busy && !L.dragging && !L.flying && !!o.holdId && !o.busy && !o.dragging;
+  if (L.busy || L.dragging || L.flying) return false;
+  // hanging from the feet in a bat hang both hands are free: either may chalk
+  if (s.special === 'bat') return !o.busy;
+  if (s.special === 'figure4' && s.figure4?.hand === hand) return false; // the leg is over that arm
+  return !!o.holdId && !o.busy && !o.dragging;
 }
 
 /** Forearm pump band for the HUD. */
@@ -151,6 +160,11 @@ export class HudView implements ScreenView<P> {
   private balDot = el('i', 'bal-dot');
   private topBox: HTMLElement;
   private topFill = el('i', 'tp-fill');
+  // special stance (advanced moves): BAT HANG (with the core fatigue) / FIGURE 4 and how to get out
+  private spBox: HTMLElement;
+  private spWord = el('span', 'sp-word');
+  private spSub = el('span', 'sp-sub');
+  private spFill = el('i', 'sp-fill');
   private vig = el('div', 'hud-vig');
   // buttons
   private hintBtn: HTMLButtonElement;
@@ -180,6 +194,8 @@ export class HudView implements ScreenView<P> {
     grade: -1,
     mode: '',
     chalk: -1,
+    special: '',
+    spf: -1,
   };
 
   constructor(_ctx: UICtx, props: P) {
@@ -219,6 +235,8 @@ export class HudView implements ScreenView<P> {
 
     // top-hold progress
     this.topBox = el('div', 'hud-topprog hud-glass', icon('flag', 'tp-ic'), el('span', 'tp-txt', 'MATCH & HOLD'), el('span', 'tp-bar', this.topFill));
+    this.spBox = el('div', 'hud-special hud-glass', icon('pure', 'sp-ic'), el('span', 'sp-txt', this.spWord, this.spSub), el('span', 'sp-bar', this.spFill));
+    this.spBox.setAttribute('role', 'status');
 
     // instruments: left forearm · tension · right forearm
     this.arms = [this.buildArm('LH'), this.buildArm('RH')];
@@ -256,6 +274,7 @@ export class HudView implements ScreenView<P> {
       el('div', 'hud-top', pause, route, this.scoreBox),
       this.ropeRow,
       this.topBox,
+      this.spBox,
       this.alt,
       el(
         'div',
@@ -519,6 +538,29 @@ export class HudView implements ScreenView<P> {
       q.top = top;
       toggle(this.topBox, 'on', top > 0);
       this.topFill.style.transform = `scaleX(${top / 100})`;
+    }
+
+    // SPECIAL STANCE: what the body is doing and the way out (Pure mode: hidden, the body says it)
+    const sp = s.special === 'bat' ? 'bat' : s.special === 'figure4' ? 'fig4' : '';
+    if (sp !== q.special) {
+      q.special = sp;
+      q.spf = -1;
+      toggle(this.spBox, 'on', !!sp);
+      toggle(this.spBox, 'sp-bat', sp === 'bat');
+      toggle(this.spBox, 'sp-fig4', sp === 'fig4');
+      if (sp) {
+        const t = specialText(sp);
+        setText(this.spWord, t.word);
+        setText(this.spSub, t.sub);
+      }
+    }
+    if (sp === 'bat') {
+      const f = Math.round(Math.min(1, Math.max(0, s.bat?.fatigue ?? 0)) * 100);
+      if (f !== q.spf) {
+        q.spf = f;
+        this.spFill.style.transform = `scaleX(${(1 - f / 100).toFixed(2)})`;
+        toggle(this.spFill, 'low', f >= 70);
+      }
     }
 
     // Edge vignette: tension past the shake line or pump near the limit.

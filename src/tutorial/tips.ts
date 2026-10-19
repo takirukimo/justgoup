@@ -78,6 +78,11 @@ const TIP_DEFS: readonly Tip[] = [
   T('Dyno: legs drive, arms guide. Catch the hold at the top of the throw.', 'dyno', 'feet'),
   T('Slabs are a balance game. Small steps, quiet feet, hips over your toes.', 'slab', 'balance'),
   T('Roofs need tension. Keep your toes pulling or your feet will swing off.', 'steep', 'feet'),
+  // v0.3: high feet and the advanced moves (heel-toe cam, bat hang, figure 4)
+  T('Feet can go above your hips. Heel or toe hook it, then pull your hips in.', 'feet', 'balance'),
+  T('Two footholds a foot apart in a roof? Jam heel and toe between them: a cam.', 'feet', 'steep'),
+  T('Feet locked in a roof? Let go, hang like a bat, shake out, then sit up.', 'pump', 'steep'),
+  T('No feet, one good jug? Hook your leg over that arm and sit on it: a figure 4.', 'dyno', 'arms'),
 ] as const;
 
 /** Every tip, in a stable order. */

@@ -56,6 +56,7 @@ import { HandleLayout, type SafeRect } from './layout';
 import { FOOT_GLYPH, HAND_GLYPH, HIP_GLYPH } from './glyphs';
 import { onPureMode } from './pure';
 import { alongSpeed, chalkBagAt, flickPower, frictionWord, inChalkZone, inShakeLane, isFlick, SHAKE_LANE, shakeLanePoint, spineUp, throwWord } from './release';
+import { batHangAt, camAt, fig4HandFor, figure4At, figure4Possible, forearmSegment, segDist } from './advanced';
 import { ensureLimbControlStyles } from './styles';
 import { VelocityTracker } from './velocity';
 
@@ -142,6 +143,13 @@ const PURE_HIP_R = 36;
 const DUO_HINTS = 4;
 /** Throw colour (CHIRAL pink, lifted for hairlines on the dark wall) and its "too far" grey. */
 const C_THROW = '#EE6B79';
+/** Advanced moves (input/advanced.ts): the figure-4 arm target (CHIRAL pink) and technique tags (glacier). */
+const C_FIG4 = PALETTE.signal;
+const C_TECH = PALETTE.glacier;
+/** A foot dragged this close (m) to the opposite holding forearm shows the figure-4 drop target. */
+const FIG4_NEAR = 0.45;
+/** Advanced-move previews refresh at most this often (s) while a limb is dragged. */
+const ADV_EVAL = 0.06;
 const C_THROW_DIM = 'rgba(185,190,197,0.7)';
 
 // ── colour tables (precomputed strings: no per-frame string building) ──
@@ -228,8 +236,13 @@ type ReleaseTargetFn = (limb: LimbId, p: Vec2) => { hold: HoldDef | null; clip: 
 
 /** LimbControls.releasePreview: what a release would do now. */
 export interface ReleasePreview {
-  kind: 'grab' | 'clip' | 'throw' | 'chalk' | 'shake' | 'double' | 'none';
+  /** 'figure4': a foot onto the opposite holding forearm hooks the leg over it; 'bat': the last hand let go into a bat hang. */
+  kind: 'grab' | 'clip' | 'throw' | 'chalk' | 'shake' | 'double' | 'figure4' | 'bat' | 'none';
   holdId: string | null;
+  /** grab with a foot: the opposing hold it would heel-toe cam against. */
+  cam?: string;
+  /** figure4: the hand whose arm the leg hooks. */
+  hand?: 'LH' | 'RH';
   rise?: number;
   feasible?: boolean;
   throwKind?: 'deadpoint' | 'dyno';
@@ -344,6 +357,20 @@ export class LimbControls implements LimbControlsAPI {
   private zone = ZONE_NONE;
   private chalkOk = false;
   private shakeOk = false;
+  // advanced moves (input/advanced.ts): what the release would do besides a plain grab
+  /** A foot release here hooks the leg over this hand's arm (figure 4). */
+  private fig4: 'LH' | 'RH' | null = null;
+  /** A figure 4 is possible and the dragged foot is near the holding forearm: show the drop target. */
+  private fig4Near = false;
+  private readonly fig4A: Vec2 = { x: 0, y: 0 };
+  private readonly fig4B: Vec2 = { x: 0, y: 0 };
+  /** The foot on the candidate hold would heel-toe cam against this hold (at camX, camY). */
+  private camHold: HoldDef | null = null;
+  private camX = 0;
+  private camY = 0;
+  /** The hand released here (over nothing, the other hand off) enters a bat hang. */
+  private batOk = false;
+  private advT = 0;
   private readonly up: Vec2 = { x: 0, y: 1 };
   private readonly bag: Vec2 = { x: 0, y: 0 };
 
@@ -607,7 +634,9 @@ export class LimbControls implements LimbControlsAPI {
       return { kind: 'double', holdId: this.duoHold ? this.duoHold.id : null, rise: this.duoRise, feasible: this.duoFeasible };
     }
     if (this.clip) return { kind: 'clip', holdId: this.clip.id };
-    if (this.cand) return { kind: 'grab', holdId: this.cand.id };
+    if (this.fig4) return { kind: 'figure4', holdId: null, hand: this.fig4 };
+    if (this.cand) return this.camHold ? { kind: 'grab', holdId: this.cand.id, cam: this.camHold.id } : { kind: 'grab', holdId: this.cand.id };
+    if (this.batOk) return { kind: 'bat', holdId: null };
     if (this.dyno && this.dynoHold) return { kind: 'throw', holdId: this.dynoHold.id, rise: this.dyno.rise, feasible: this.dyno.feasible, throwKind: this.dyno.kind };
     if (this.zone === ZONE_CHALK) return { kind: 'chalk', holdId: null };
     if (this.zone === ZONE_SHAKE) return { kind: 'shake', holdId: null };
@@ -1063,6 +1092,7 @@ export class LimbControls implements LimbControlsAPI {
     this.reachT = Infinity; // refresh the reachable set on the first frame
     this.reachIds = [];
     this.nextDrawReach = null;
+    this.resetAdvanced();
     this.dyno = null;
     this.dynoHold = null;
     this.zone = ZONE_NONE;
@@ -1424,6 +1454,7 @@ export class LimbControls implements LimbControlsAPI {
       this.dyno = null;
       this.dynoHold = null;
       this.zone = ZONE_NONE;
+      this.resetAdvanced();
       this.clearOwnHighlights();
     }
     this.duoHintOn = false;
@@ -1550,6 +1581,52 @@ export class LimbControls implements LimbControlsAPI {
     this.zone = z;
   }
 
+  private resetAdvanced(): void {
+    this.fig4 = null;
+    this.fig4Near = false;
+    this.camHold = null;
+    this.batOk = false;
+    this.advT = ADV_EVAL;
+  }
+
+  /**
+   * Advanced-move previews (input/advanced.ts, the sim's own rules): a foot dragged onto the opposite
+   * holding forearm hooks a figure 4 (and near it the arm shows as a drop target), a foot on a hold
+   * with an opposing surface a foot-length away cams, the last hand let go over nothing with both feet
+   * hooked / cammed on a steep panel bat-hangs.
+   */
+  private evalAdvanced(state: ClimberState, idx: number): void {
+    const sim = this.sim;
+    const prevCam = this.camHold;
+    const prevFig = this.fig4;
+    const prevNear = this.fig4Near;
+    this.fig4 = null;
+    this.fig4Near = false;
+    this.camHold = null;
+    this.batOk = false;
+    if (!sim || state.phase !== 'climbing') return;
+    if (idx >= 2 && idx < 4) {
+      const foot = IDS[idx] as 'LF' | 'RF';
+      if (figure4Possible(sim, state, foot)) {
+        this.fig4 = figure4At(sim, state, foot, this.target, this.cand);
+        const hand = fig4HandFor(foot);
+        if (forearmSegment(state, hand, this.fig4A, this.fig4B)) this.fig4Near = !!this.fig4 || segDist(this.target, this.fig4A, this.fig4B) <= FIG4_NEAR;
+      }
+      if (this.cand && !this.fig4) {
+        const c = camAt(sim, state, foot, this.cand);
+        if (c && c.hold) {
+          this.camHold = c.hold;
+          this.camX = c.x;
+          this.camY = c.y;
+        }
+      }
+    } else if (idx >= 0 && idx < 2) {
+      const nothing = !this.cand && !this.clip && this.zone === ZONE_NONE;
+      this.batOk = batHangAt(sim, state, IDS[idx] as 'LH' | 'RH', nothing);
+    }
+    if (prevCam !== this.camHold || prevFig !== this.fig4 || prevNear !== this.fig4Near) this.highlightsDirty = true;
+  }
+
   private updateDragQueries(state: ClimberState, dt: number): void {
     const sim = this.sim as ClimberSimAPI;
     const idx = this.dragIdx;
@@ -1563,6 +1640,11 @@ export class LimbControls implements LimbControlsAPI {
     this.evalCandidate(false);
     if (idx < 2) this.evalZone(state, idx);
     else this.zone = ZONE_NONE;
+    this.advT += dt;
+    if (this.advT >= ADV_EVAL) {
+      this.advT = 0;
+      this.evalAdvanced(state, idx);
+    }
     if (this.cand) {
       this.qualityT += dt;
       if (this.qualityT > 0.12) {
@@ -1637,7 +1719,15 @@ export class LimbControls implements LimbControlsAPI {
       h.quality = 0;
       own.push(h);
     }
-    if (candId) {
+    if (this.camHold && this.camHold.id !== candId && this.camHold.type !== 'volume') {
+      // the opposing hold of a heel-toe cam: the toe presses it
+      const h = this.ownSlot(n++);
+      h.holdId = this.camHold.id;
+      h.kind = 'reachable';
+      h.quality = 0;
+      own.push(h);
+    }
+    if (candId && !this.fig4) {
       const h = this.ownSlot(n++);
       h.holdId = candId;
       h.kind = 'candidate';
@@ -1997,12 +2087,28 @@ export class LimbControls implements LimbControlsAPI {
     const d = this.dyno;
     const dh = this.dynoHold;
     let tagOn = false;
-    if (c && this.homo.map(c.x, c.y, this.s0)) {
+    if (this.fig4 && this.homo.map((this.fig4A.x + this.fig4B.x) / 2, (this.fig4A.y + this.fig4B.y) / 2, this.s0)) {
+      // the leg goes over the holding arm: a figure 4
+      this.setTagText(this.candTag, 'FIGURE 4', 'LEG OVER ARM', C_FIG4);
+      this.placeTag(this.candTag, this.s0.x, this.s0.y, 18, h.x, h.y);
+      tagOn = true;
+    } else if (c && this.camHold && this.homo.map(c.x, c.y, this.s0)) {
+      // heel on one hold, toe against the other: a heel-toe cam
+      this.setTagText(this.candTag, 'CAM', 'HEEL-TOE', C_TECH);
+      const rpx = holdRadius(c) * this.homo.scaleAt(c.x, c.y, this.s2, this.s3);
+      this.placeTag(this.candTag, this.s0.x, this.s0.y, rpx, h.x, h.y);
+      tagOn = true;
+    } else if (c && this.homo.map(c.x, c.y, this.s0)) {
       const other = state.limbs[IDS[idx ^ 1]];
       const type = c.role === 'top' && idx < 2 ? 'TOP' : other.holdId === c.id && !other.dragging ? 'MATCH' : TYPE_WORD[c.type];
       this.setTagText(this.candTag, qualityWord(this.quality), type, qualityColor(this.quality));
       const rpx = holdRadius(c) * this.homo.scaleAt(c.x, c.y, this.s2, this.s3);
       this.placeTag(this.candTag, this.s0.x, this.s0.y, rpx, h.x, h.y);
+      tagOn = true;
+    } else if (this.batOk && this.homo.map(this.target.x, this.target.y, this.s0)) {
+      // the last hand off with both feet locked on a steep panel: hang from the feet
+      this.setTagText(this.candTag, 'BAT HANG', 'LET GO · FEET HOLD', C_TECH);
+      this.placeTag(this.candTag, this.s0.x, this.s0.y, 16, h.x, h.y);
       tagOn = true;
     } else if (d && dh && this.homo.map(dh.x, dh.y, this.s0)) {
       const t = throwWord(d);
@@ -2321,6 +2427,8 @@ export class LimbControls implements LimbControlsAPI {
 
     // hand release targets: chalk bag at the hips, shake-out lane beside the body
     if (idx < 2) this.drawReleaseTargets(state, idx);
+    // feet: the figure-4 arm target and a heel-toe cam's span
+    if (idx >= 2) this.drawAdvancedFoot();
 
     // anchor (shoulder / hip) marker
     if (!H.map(ax, ay, p)) return;
@@ -2581,6 +2689,63 @@ export class LimbControls implements LimbControlsAPI {
   }
 
   /** Chalk bag + shake-out lane while a hand is dragged: faint until the finger nears them, lit when it would trigger. */
+  /**
+   * Foot drags: the opposite holding forearm as a drop target while a figure 4 is possible and the foot is
+   * near it (dashed; solid and lit once a release would hook it), and a heel-toe cam's span from the
+   * foothold to the opposing surface.
+   */
+  private drawAdvancedFoot(): void {
+    const ctx = this.ctx;
+    const H = this.homo;
+    if (this.fig4Near && H.map(this.fig4A.x, this.fig4A.y, this.s2) && H.map(this.fig4B.x, this.fig4B.y, this.s3)) {
+      const on = !!this.fig4;
+      const w = Math.max(14, 0.09 * H.scaleAt(this.fig4A.x, this.fig4A.y, this.s0, this.s1));
+      ctx.setLineDash(DASH_NONE);
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(this.s2.x, this.s2.y);
+      ctx.lineTo(this.s3.x, this.s3.y);
+      ctx.strokeStyle = C_FIG4;
+      ctx.globalAlpha = on ? 0.42 : 0.16;
+      ctx.lineWidth = w;
+      ctx.stroke();
+      ctx.globalAlpha = on ? 1 : 0.75;
+      ctx.lineWidth = on ? 2 : 1.3;
+      if (!on) ctx.setLineDash(DASH_RING);
+      ctx.strokeStyle = on ? '#FFFFFF' : C_FIG4;
+      ctx.stroke();
+      ctx.setLineDash(DASH_NONE);
+      this.grow(this.s2.x, this.s2.y, w);
+      this.grow(this.s3.x, this.s3.y, w);
+    }
+    const c = this.cand;
+    if (this.camHold && c && H.map(c.x, c.y, this.s2) && H.map(this.camX, this.camY, this.s3)) {
+      ctx.setLineDash(DASH_NONE);
+      ctx.lineCap = 'round';
+      ctx.globalAlpha = 0.6;
+      ctx.strokeStyle = C_SHADOW;
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(this.s2.x, this.s2.y);
+      ctx.lineTo(this.s3.x, this.s3.y);
+      ctx.stroke();
+      ctx.globalAlpha = 0.95;
+      ctx.strokeStyle = C_TECH;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // end caps: heel on one surface, toe on the other
+      ctx.fillStyle = C_TECH;
+      ctx.beginPath();
+      ctx.arc(this.s2.x, this.s2.y, 3.5, 0, Math.PI * 2);
+      ctx.moveTo(this.s3.x + 3.5, this.s3.y);
+      ctx.arc(this.s3.x, this.s3.y, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+      this.grow(this.s2.x, this.s2.y, 6);
+      this.grow(this.s3.x, this.s3.y, 6);
+    }
+    ctx.globalAlpha = 1;
+  }
+
   private drawReleaseTargets(state: ClimberState, idx: number): void {
     const ctx = this.ctx;
     const H = this.homo;
