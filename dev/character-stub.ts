@@ -3,7 +3,7 @@
 // no-op; reads return blank pixels. Import this module before anything from src/render.
 
 const noop = (): void => undefined;
-const gradient = { addColorStop: noop };
+const gradient = { addColorStop: noop, setTransform: noop };
 
 function fakeContext(canvas: { width: number; height: number }): unknown {
   const state: Record<string | symbol, unknown> = {};
@@ -76,6 +76,18 @@ class FakePath2D {
 
 class FakeDOMMatrix {
   constructor(_m?: unknown) {}
+  scale(): FakeDOMMatrix {
+    return this;
+  }
+  translate(): FakeDOMMatrix {
+    return this;
+  }
+  rotate(): FakeDOMMatrix {
+    return this;
+  }
+  multiply(): FakeDOMMatrix {
+    return this;
+  }
 }
 
 const g = globalThis as unknown as Record<string, unknown>;
