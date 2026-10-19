@@ -2593,13 +2593,52 @@
   }
 }
 
-/* Pure mode (ROADMAP Phase D, input/pure.ts): no HUD; only a quiet pause button stays. */
-.jgu-ui.is-pure .scr-hud > :not(.hud-top),
+/* Pure mode (ROADMAP Phase D, input/pure.ts): no HUD, no hints, no route reading. Only a faint,
+   small pause control stays (44px target), and the danger vignette turns into plain tunnel vision:
+   a dark edge that closes in as the body strains (the climber's body carries the rest). */
+.jgu-ui.is-pure .scr-hud > :not(.hud-top):not(.hud-vig),
 .jgu-ui.is-pure .scr-hud .hud-top > :not(.hud-pause) {
   display: none;
 }
+.jgu-ui.is-pure .scr-hud .hud-top {
+  height: 44px;
+}
 .jgu-ui.is-pure .scr-hud .hud-pause {
-  opacity: 0.55;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(13, 14, 16, 0.34);
+  box-shadow: none;
+  border-color: transparent;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+}
+.jgu-ui.is-pure .scr-hud .hud-pause svg {
+  width: 17px;
+  height: 17px;
+}
+.jgu-ui.is-pure .scr-hud .hud-pause.is-pressed,
+.jgu-ui.is-pure .scr-hud .hud-pause:focus-visible {
+  opacity: 1;
+}
+.jgu-ui.is-pure .scr-hud .hud-vig {
+  background: radial-gradient(ellipse 78% 64% at 50% 48%, transparent 46%, rgba(4, 5, 6, 0.66) 100%);
+  transition: opacity 0.8s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.jgu-ui.is-pure .scr-hud.is-shaking .hud-vig {
+  animation: none;
+}
+/* Route reading before a Pure climb: the card keeps the name, grade, wall and colour; the
+   START / TOP legend and Steini's tip (help) stay off. The tapes on the wall still mark the line. */
+.jgu-ui.is-pure .scr-preview .pv-legend,
+.jgu-ui.is-pure .scr-preview .pv-tip-slot {
+  display: none;
+}
+/* Settings: a choice Pure climbing makes moot stays settable but reads as secondary. */
+.row.is-muted .row-lbl,
+.row.is-muted .row-ic,
+.row.is-muted .switch {
+  opacity: 0.5;
 }
 
 /* ───────────────────────────── preview ───────────────────────────── */

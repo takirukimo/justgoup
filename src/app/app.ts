@@ -16,6 +16,7 @@ import type { BoulderEditor } from '../editor/editor';
 import { todayKey, tutorialBoulder } from '../game/generator';
 import { defaultProfile, randomClimberName, sanitizeName, saveProfile, flushProfile, type UnlockedItem } from '../net/profile';
 import { runIntro } from '../tutorial/tutorial';
+import { pureOf, readStoredPure, setPureMode, storePure, type SettingsExt } from '../input/pure';
 import { collectUnlocks, UNLOCK_WORD } from './progress';
 import { QualityManager } from './quality';
 import { CommunityRun, DailyRun, LeadTowerRun, SendTrainRun, TestRun, type RunHost } from './runs';
@@ -103,6 +104,13 @@ export class App implements RunHost {
   /** Apply the stored settings + skin and put the backdrop up (behind the splash). */
   boot(): void {
     const p = this.prof;
+    // Pure climbing lives in the profile's settings; the fallback key covers a profile store that
+    // drops settings it doesn't know yet
+    const st = p.settings as SettingsExt;
+    if (typeof st.pure !== 'boolean') {
+      const stored = readStoredPure();
+      if (stored !== null) p.settings = { ...p.settings, pure: stored } as SettingsExt;
+    }
     this.applySettings(p.settings, false);
     this.svc.renderer.setSkin(p.head, p.colorway, p.chalk);
     this.svc.audio.setVoice(p.head);
@@ -430,6 +438,9 @@ export class App implements RunHost {
     controls.setAssist(s.assist);
     controls.setReducedMotion(s.reducedMotion);
     veil.setReducedMotion(s.reducedMotion);
+    const pure = pureOf(s);
+    setPureMode(pure);
+    if (persist || pureOf(prev) !== pure) storePure(pure);
     ui.setSettings(s);
     if (qualityChanged) this.quality.apply(s.quality);
     if (persist) this.svc.save();

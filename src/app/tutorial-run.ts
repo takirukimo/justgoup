@@ -1,11 +1,14 @@
 // Steini's lesson, hosted by the app: the app owns the sim stepping, the HUD and pause; the tutorial
 // director owns the camera, the guide, highlights and limb gating while it runs.
+// Pure climbing is suspended for the lesson (it teaches with the gauges, handles and target rings
+// it points at) and comes back on its own when the lesson ends, however it ends.
 
 import { bus, type AppEvents } from '../core/events';
 import type { ClimberState, RunInfo } from '../core/types';
 import { ClimberSim } from '../game/climber-sim';
 import { tutorialBoulder } from '../game/generator';
 import { runTutorial, TUTORIAL_SIM_OPTIONS } from '../tutorial/tutorial';
+import { suspendPure } from '../input/pure';
 import { SimDriver } from './driver';
 import type { Services } from './services';
 
@@ -54,6 +57,7 @@ export class TutorialRun {
       if (this.paused) this.resume();
     });
     let result: 'done' | 'skipped' = 'skipped';
+    suspendPure('tutorial', true);
     try {
       do {
         this.restart = false;
@@ -63,6 +67,7 @@ export class TutorialRun {
       for (const o of this.offs) o();
       this.offs.length = 0;
       this.teardown();
+      suspendPure('tutorial', false);
     }
     return result;
   }

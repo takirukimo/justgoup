@@ -19,7 +19,7 @@ import {
   spineUp,
   throwWord,
 } from './release';
-import { isPureMode, onPureMode, setPureMode } from './pure';
+import { isPureMode, onPureMode, pureChosen, pureOf, setPureMode, suspendPure } from './pure';
 
 describe('VelocityTracker', () => {
   it('reads a steady flick as its speed (units / s)', () => {
@@ -229,5 +229,27 @@ describe('pure mode flag', () => {
     setPureMode(true);
     expect(seen).toEqual([false, true, false]);
     setPureMode(false);
+  });
+
+  it('a suspension (the tutorial) turns it off without touching the setting', () => {
+    const seen: boolean[] = [];
+    const off = onPureMode((v) => seen.push(v));
+    setPureMode(true);
+    suspendPure('tutorial', true);
+    expect(isPureMode()).toBe(false);
+    expect(pureChosen()).toBe(true);
+    setPureMode(true); // the setting re-applied mid-lesson stays suspended
+    expect(isPureMode()).toBe(false);
+    suspendPure('tutorial', false);
+    expect(isPureMode()).toBe(true);
+    setPureMode(false);
+    off();
+    expect(seen).toEqual([false, true, false, true, false]);
+  });
+
+  it('reads the choice from settings (absent = off)', () => {
+    const base = { sfx: 1, music: 1, haptics: true, quality: 'auto' as const, assist: true, reducedMotion: false };
+    expect(pureOf(base)).toBe(false);
+    expect(pureOf({ ...base, pure: true } as typeof base)).toBe(true);
   });
 });

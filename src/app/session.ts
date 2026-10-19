@@ -19,6 +19,7 @@ import { RopeSystem } from '../game/rope';
 import { nextHint } from '../game/solver';
 import { clipPoint } from '../game/holds';
 import type { HudRunInfo } from '../ui/ui';
+import { isPureMode } from '../input/pure';
 import { LIMB_WORD, SimDriver } from './driver';
 import type { Services } from './services';
 import { Timeline } from './timeline';
@@ -176,13 +177,14 @@ export class ClimbSession {
     ui.show('hud', { run });
     renderer.setCameraMode('follow');
     audio.play('whoosh', { volume: 0.5 });
+    // Pure climbing: the count is heard, not shown
     for (let n = 3; n >= 1; n--) {
-      ui.hud.callout(String(n), 'neutral');
+      if (!isPureMode()) ui.hud.callout(String(n), 'neutral');
       audio.countdownStep(n);
       await this.timeline.wait(COUNT_STEP);
       if (this.finished) return this.result;
     }
-    ui.hud.callout('GO!', 'good');
+    if (!isPureMode()) ui.hud.callout('GO!', 'good');
     audio.countdownStep(0);
 
     this.phase = 'climbing';
@@ -241,7 +243,7 @@ export class ClimbSession {
         break;
       case 'dyno-catch':
         // a full double-hand dyno is a moment; deadpoints are everyday moves and stay quiet
-        if (this.dynoKind === 'dyno' && this.phase === 'climbing') this.svc.ui.hud.callout('DYNO!', 'good');
+        if (this.dynoKind === 'dyno' && this.phase === 'climbing' && !isPureMode()) this.svc.ui.hud.callout('DYNO!', 'good');
         this.dynoKind = null;
         break;
       case 'top':
@@ -291,7 +293,7 @@ export class ClimbSession {
     if (this.hint && this.hint.draw && this.hint.id === id) this.clearHint();
     const anchor = this.rope.quickdraws[this.rope.quickdraws.length - 1];
     if (anchor && anchor.id === id) return; // the 'top' event follows
-    this.svc.ui.hud.callout('CLIPPED', 'good');
+    if (!isPureMode()) this.svc.ui.hud.callout('CLIPPED', 'good'); // Pure: the carabiner's snap says it
   }
 
   private async onSend(): Promise<void> {
@@ -517,7 +519,8 @@ export class ClimbSession {
   }
 
   private toggleOverview(): void {
-    if (this.phase !== 'climbing' || this.paused) return;
+    // Pure climbing has no route-reading overview (and no LOOK button)
+    if (this.phase !== 'climbing' || this.paused || (isPureMode() && !this.overview)) return;
     this.overview = !this.overview;
     this.svc.controls.cancelDrag();
     this.svc.renderer.setCameraMode(this.overview ? 'preview' : 'follow');
@@ -525,7 +528,7 @@ export class ClimbSession {
   }
 
   private useHint(): void {
-    if (this.phase !== 'climbing' || this.paused) return;
+    if (this.phase !== 'climbing' || this.paused || isPureMode()) return; // Pure climbing: no help
     const { ui, renderer, audio } = this.svc;
     if (this.cfg.hints.left <= 0) {
       ui.hud.toast('NO HINTS LEFT THIS RUN');

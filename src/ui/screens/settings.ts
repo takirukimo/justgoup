@@ -7,15 +7,16 @@ import { button, el, label, stagger } from '../dom';
 import { chiralLockup } from '../logo';
 import { header, screenRoot, segmented, sliderRow, toggleRow, topoLayer } from '../parts';
 import type { ScreenView, UICtx } from '../screen';
+import { pureOf, type SettingsExt } from '../../input/pure';
 
 type P = ScreenProps['settings'];
 
 export function createSettings(ctx: UICtx, props: P): ScreenView<P> {
   const root = screenRoot('settings', 'scr-panel');
-  let s: Settings = { ...props.profile.settings };
-  const commit = (patch: Partial<Settings>): void => {
+  let s: SettingsExt = { ...props.profile.settings };
+  const commit = (patch: Partial<SettingsExt>): void => {
     s = { ...s, ...patch };
-    ctx.commitSettings(s);
+    ctx.commitSettings(s as Settings);
   };
 
   const section = (title: string, i: number, ...rows: HTMLElement[]): HTMLElement =>
@@ -54,20 +55,40 @@ export function createSettings(ctx: UICtx, props: P): ScreenView<P> {
     },
   });
 
+  // Assist visuals have nothing to show in Pure climbing: the row says so (and stays settable)
+  const assistRow = toggleRow({ label: 'Assist visuals', sub: 'Limb labels, reach arcs, grip colours', icon: 'target', value: s.assist, onChange: (v) => commit({ assist: v }) });
+  const assistSub = assistRow.querySelector('.row-sub');
+  const paintAssist = (pure: boolean): void => {
+    assistRow.classList.toggle('is-muted', pure);
+    if (assistSub) assistSub.textContent = pure ? 'Hidden while Pure climbing is on' : 'Limb labels, reach arcs, grip colours';
+  };
+  const pureRow = toggleRow({
+    label: 'Pure climbing',
+    sub: 'No HUD, no hints. Just you, the wall and your body.',
+    icon: 'pure',
+    value: pureOf(s),
+    onChange: (v) => {
+      commit({ pure: v });
+      paintAssist(v);
+    },
+  });
+  pureRow.classList.add('row-pure');
+  paintAssist(pureOf(s));
+
   const body = el(
     'div',
     'set-body scroll',
+    section('CLIMB', 1, pureRow, assistRow),
     section(
       'AUDIO',
-      1,
+      2,
       sliderRow({ label: 'Sound effects', icon: 'sound', value: s.sfx, onInput: (v) => commit({ sfx: v }) }),
       sliderRow({ label: 'Music', icon: 'music', value: s.music, onInput: (v) => commit({ music: v }) }),
     ),
     section(
       'FEEL',
-      2,
+      3,
       toggleRow({ label: 'Haptics', sub: 'Vibrate on grabs, slips and falls', icon: 'haptic', value: s.haptics, onChange: (v) => commit({ haptics: v }) }),
-      toggleRow({ label: 'Assist visuals', sub: 'Limb labels, reach arcs, grip colours', icon: 'target', value: s.assist, onChange: (v) => commit({ assist: v }) }),
       toggleRow({
         label: 'Reduced motion',
         sub: 'Calmer camera and interface animation',
@@ -79,8 +100,8 @@ export function createSettings(ctx: UICtx, props: P): ScreenView<P> {
         },
       }),
     ),
-    section('GRAPHICS', 3, el('div', 'row row-seg', el('span', 'row-txt', el('span', 'row-lbl', 'Quality'), el('span', 'row-sub', 'Auto adapts to your device')), quality.el)),
-    section('DATA', 4, el('div', 'row row-danger', reset)),
+    section('GRAPHICS', 4, el('div', 'row row-seg', el('span', 'row-txt', el('span', 'row-lbl', 'Quality'), el('span', 'row-sub', 'Auto adapts to your device')), quality.el)),
+    section('DATA', 5, el('div', 'row row-danger', reset)),
     stagger(
       el(
         'section',
@@ -97,7 +118,7 @@ export function createSettings(ctx: UICtx, props: P): ScreenView<P> {
         ),
         label(`© ${new Date().getFullYear()} ${BRAND.name} ${BRAND.sub}`, 'cr-copy'),
       ),
-      5,
+      6,
     ),
   );
 
