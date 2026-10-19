@@ -3422,6 +3422,11 @@ export interface HoldInfo {
   size: number;
   /** Height of the hold above the wall surface (m). */
   depth: number;
+  /**
+   * Optional: how far (m, along the wall surface) the drawn hold sits from the sim's hold (a hold slid
+   * back from a roof lip, render/holds.ts foldClampY): a hand / foot on it follows the drawn hold.
+   */
+  dy?: number;
 }
 
 interface HandShape {
@@ -3487,7 +3492,7 @@ export class ClimberModel extends THREE.Group {
   private holdLookup: ((id: string, out: HoldInfo) => boolean) | null = null;
   private ropeAnchor = new THREE.Vector3();
   private hasRopeAnchor = false;
-  private holdInfo: HoldInfo[] = [0, 1, 2, 3].map(() => ({ type: 'edge' as HoldType, angle: -Math.PI / 2, size: 0.06, depth: 0.03 }));
+  private holdInfo: HoldInfo[] = [0, 1, 2, 3].map(() => ({ type: 'edge' as HoldType, angle: -Math.PI / 2, size: 0.06, depth: 0.03, dy: 0 }));
   private time = 0;
   private phase: ClimberState['phase'] | null = null;
   private phaseT = 0;
@@ -4067,7 +4072,11 @@ export class ClimberModel extends THREE.Group {
     const info = this.lookupHold(L.holdId, s);
     let depth = L.depth;
     if (L.holdId && info) depth = Math.max(L.depth, info.depth * 0.58 + 0.012);
-    frame.toWorld(L.pos, depth, this.v0);
+    if (L.holdId && info && info.dy) {
+      this.p2.x = L.pos.x;
+      this.p2.y = L.pos.y + info.dy;
+      frame.toWorld(this.p2, depth, this.v0);
+    } else frame.toWorld(L.pos, depth, this.v0);
     let shape: HandShape = SHAPE_FREE;
     hg.jointTarget = false;
     hg.lift = 0;
@@ -4382,7 +4391,11 @@ export class ClimberModel extends THREE.Group {
     // dyno: both hands and the feet leave the wall; the legs trail below, toes pointed
     const trailing = onWallF && state.airborne === true && L.holdId === null && !L.smearing && !L.dragging && L.footMode !== 'flag';
     this.trailK[s] += ((trailing ? 1 : 0) - this.trailK[s]) * (snap ? 1 : dampK(trailing ? 14 : 6, d));
-    frame.toWorld(L.pos, depth, this.v0);
+    if (L.holdId && info && info.dy) {
+      this.p2.x = L.pos.x;
+      this.p2.y = L.pos.y + info.dy;
+      frame.toWorld(this.p2, depth, this.v0);
+    } else frame.toWorld(L.pos, depth, this.v0);
     fg.jointTarget = false;
     fg.autoPoint = true;
     const dir = fg.dir;

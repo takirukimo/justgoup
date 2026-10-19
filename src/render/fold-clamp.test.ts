@@ -29,12 +29,13 @@ describe('foldClampY (render-side lip clamp)', () => {
     expect(ys + 0.07).toBeLessThanOrEqual(3.2 - 0.005);
   });
 
-  it('keeps a hold over the lip (and above an inside corner) clear of the fold below it', () => {
+  it('keeps a hold over the lip clear of the fold below it, and leaves inside corners alone', () => {
     const f = frame();
     const y = foldClampY({ y: 3.21, angle: -Math.PI / 2 }, 0.05, 0.035, f);
     expect(y - 0.035).toBeGreaterThanOrEqual(3.2 + 0.005);
-    const yc = foldClampY({ y: 2.01, angle: -Math.PI / 2 }, 0.05, 0.035, f);
-    expect(yc - 0.035).toBeGreaterThanOrEqual(2 + 0.005);
+    // vertical → roof is an inside corner (the wall steepens): a hold may sit into it
+    expect(foldClampY({ y: 2.01, angle: -Math.PI / 2 }, 0.05, 0.035, f)).toBe(2.01);
+    expect(foldClampY({ y: 1.99, angle: -Math.PI / 2 }, 0.05, 0.035, f)).toBe(1.99);
   });
 
   it('never moves a hold more than 12 cm', () => {

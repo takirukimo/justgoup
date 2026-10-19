@@ -133,6 +133,8 @@ export class GameRenderer implements RendererAPI {
   private cueAmt = 0;
   /** Smoothed Pure-mode strain desaturation. */
   private desat = 0;
+  /** The problem's holds by id (the drawn copies may sit slid back from a roof lip). */
+  private srcHolds = new Map<string, HoldDef>();
   /** Steini (belaying on a lead tower) casts the key light's shadow only while the climber is near. */
   private guideCasts = true;
   /** Smoothed cost of ClimberModel.pose() (ms) for QA. */
@@ -257,6 +259,9 @@ export class GameRenderer implements RendererAPI {
       out.size = h.size;
       // a hold bolted onto a volume stands off the wall by the volume's face height there
       out.depth = (this.wall.holds.geoms.get(id)?.depth ?? h.size * 0.5) + (this.wall.holds.mounts.get(id)?.lift ?? 0);
+      // a hold slid back from a roof lip (drawn copy vs the problem's hold): the limb follows the drawing
+      const src = this.srcHolds.get(id);
+      out.dy = src ? h.y - src.y : 0;
       return true;
     });
     this.climber.setCueGain(this.pure ? 1.4 : 1);
@@ -487,6 +492,7 @@ export class GameRenderer implements RendererAPI {
   loadBoulder(b: BoulderDef): void {
     const first = !this.boulder;
     this.boulder = { ...b, holds: b.holds.slice() };
+    this.srcHolds = new Map(this.boulder.holds.map((h) => [h.id, h] as const));
     this.highlights.clear();
     this.wall.build(this.boulder, this.preset, { gradeText: `V${b.grade}`, name: b.name });
     this.configureCaveLights(this.boulder);
@@ -505,6 +511,7 @@ export class GameRenderer implements RendererAPI {
   updateHolds(holds: HoldDef[]): void {
     if (!this.boulder) return;
     this.boulder = { ...this.boulder, holds: holds.slice() };
+    this.srcHolds = new Map(this.boulder.holds.map((h) => [h.id, h] as const));
     this.wall.updateHolds(this.boulder.holds);
     this.highlights.refresh();
   }

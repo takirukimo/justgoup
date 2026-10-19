@@ -949,11 +949,13 @@ const FOLD_GAP = 0.006;
 const FOLD_MAX_SHIFT = 0.12;
 
 /**
- * Render-side clamp for holds next to a fold (a roof lip, the edge of a kicker, an inside corner): a
- * hold is bolted flat to its own panel, so a footprint reaching past the fold would stick out into
- * the air beyond a convex lip (or into the next panel at an inside corner). The hold slides back
- * along its panel until its footprint ends just short of the fold (at most FOLD_MAX_SHIFT); a panel
- * shorter than the hold keeps it centred. Returns the surface y to draw the hold at.
+ * Render-side clamp for holds next to a convex fold (a roof lip, the top of a steep section easing
+ * off, a slab bulge): a hold is bolted flat to its own panel, so a footprint reaching past such a
+ * fold would stick out into the air beyond the lip. The hold slides back along its panel until its
+ * footprint ends just short of the fold (at most FOLD_MAX_SHIFT); a panel shorter than the hold keeps
+ * it centred. Inside corners (the wall steepening) are left alone: a hold sitting into the corner
+ * reads naturally there, and the sim's contact point stays exactly on the drawn hold.
+ * Returns the surface y to draw the hold at.
  */
 export function foldClampY(h: Pick<HoldDef, 'y' | 'angle'>, halfX: number, halfY: number, frame: WallFrame): number {
   if (!frame.folded) return h.y;
@@ -965,8 +967,10 @@ export function foldClampY(h: Pick<HoldDef, 'y' | 'angle'>, halfX: number, halfY
   const ey = Math.abs(Math.sin(rot)) * halfX + Math.abs(Math.cos(rot)) * halfY;
   const prev = spans[i - 1];
   const next = spans[i + 1];
-  const lo = prev && Math.abs(prev.angle - sp.angle) >= FOLD_MIN ? sp.y0 + FOLD_GAP + ey : -Infinity;
-  const hi = next && Math.abs(next.angle - sp.angle) >= FOLD_MIN ? sp.y1 - FOLD_GAP - ey : Infinity;
+  // convex: going up, the wall eases off (the panel above is less steep than this one, or this one
+  // is less steep than the panel below)
+  const lo = prev && prev.angle - sp.angle >= FOLD_MIN ? sp.y0 + FOLD_GAP + ey : -Infinity;
+  const hi = next && sp.angle - next.angle >= FOLD_MIN ? sp.y1 - FOLD_GAP - ey : Infinity;
   let y = h.y;
   if (lo > hi) y = (sp.y0 + sp.y1) / 2;
   else y = Math.min(hi, Math.max(lo, y));
