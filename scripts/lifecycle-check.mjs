@@ -6,6 +6,7 @@
 //   3. WebGL context lost → "graphics paused" card, climb paused; restored → scene rebuilt
 //   4. phone turned sideways → "turn upright" card, climb paused
 //   5. long-press / iOS pinch gestures are cancelled outside text fields
+//   6. editor: a hold placed right before the tab is hidden is in the saved draft (autosave flushed)
 import { chromium } from 'playwright-core';
 import { mkdirSync } from 'node:fs';
 
@@ -193,6 +194,38 @@ try {
   await page.evaluate(() => history.back());
   await page.waitForTimeout(800);
   ok((await screen()) === 'title' && (await page.evaluate(() => window.__jgu.app.current)) === 'menu', `back on the title is not swallowed by the game (history ${len})`);
+
+  // ── 6. editor draft survives an app switch right after an edit ──
+  await page.locator('#ui button', { hasText: 'CREATE' }).first().tap();
+  await waitFor(() => window.__jgu.app.current === 'editor' && window.__jgu.editor.isOpen, 'editor', 60000);
+  await page.waitForTimeout(2500);
+  const before = await page.evaluate(() => window.__jgu.editor.getDraft().holds.length);
+  // tap the wall and hide the tab in the same task: the 300 ms debounced autosave has not run yet
+  const saved = await page.evaluate(() => {
+    const r = window.__jgu.renderer;
+    const p = r.wallToScreen({ x: 0.9, y: 1.7 });
+    const rect = r.canvas.getBoundingClientRect();
+    const s = document.querySelector('.ed-surface');
+    const at = { clientX: p.x + rect.left, clientY: p.y + rect.top, pointerId: 7, pointerType: 'touch', bubbles: true, isPrimary: true };
+    s.dispatchEvent(new PointerEvent('pointerdown', at));
+    s.dispatchEvent(new PointerEvent('pointerup', at));
+    const n = window.__jgu.editor.getDraft().holds.length;
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    const stored = JSON.parse(localStorage.getItem('jgu.editor.draft') ?? 'null');
+    return { n, stored: stored?.draft?.holds?.length ?? -1 };
+  });
+  ok(saved.n === before + 1 && saved.stored === saved.n, `a hold placed just before the app switch is in the saved draft (${before} → ${saved.n}, stored ${saved.stored})`);
+  await setHidden(false);
+  await page.waitForTimeout(500);
+  // Steini's first-visit editor tip sits over the top bar: tap it away, then close the editor
+  for (let k = 0; k < 4 && (await page.$('.guide-layer.on')); k++) {
+    await page.tap('.gb-card').catch(() => undefined);
+    await page.waitForTimeout(700);
+  }
+  await page.tap('.ed-x');
+  await waitFor(() => window.__jgu.app.current === 'menu', 'editor closed', 60000);
 } catch (err) {
   ok(false, `lifecycle run aborted: ${err.message}`);
   await shot('aborted').catch(() => undefined);
