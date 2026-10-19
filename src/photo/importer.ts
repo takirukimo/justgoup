@@ -131,6 +131,7 @@ export class PhotoImporter {
   // Claude
   private claude: SampleAccess | null = null;
   private claudeHidden = false;
+  private claudeTries = 0;
   private asking: AbortController | null = null;
   private askProgress = 0;
   private vision: { base: PhotoHold[]; local: ImportHold[]; result: VisionResult } | null = null;
@@ -400,6 +401,16 @@ export class PhotoImporter {
   private renderSheet(): void {
     const s = this.sheet;
     s.textContent = '';
+    const n = this.included().length;
+    const label: Record<Step, string> = {
+      photo: 'Photo to route',
+      frame: 'Your photo, with the wall framed by four corners',
+      color: 'The straightened wall: tap a hold of your problem’s colour',
+      holds: `The straightened wall with ${n} holds outlined`,
+      roles: `The problem’s ${n} holds, start and top marked`,
+      wall: 'The problem on the wall, in 3D',
+    };
+    this.canvas.setAttribute('aria-label', label[this.step]);
     const head = (title: string, hint: string): HTMLElement => el('div', 'ph-head', el('h2', 'ph-title', title), el('p', 'ph-hint', hint));
     switch (this.step) {
       case 'photo': {
@@ -481,7 +492,10 @@ export class PhotoImporter {
           this.scheduleDetect();
         });
         const sens = el('label', 'ph-sens', el('span', 'ph-lbl', 'SENSITIVITY'), slider, val);
-        s.append(head(title, 'Tap a hold to drop it, or an empty spot to add one.'), sens);
+        s.append(head(title, 'Tap a hold to drop it, or an empty spot to add one.'));
+        const scale = this.scaleWarning();
+        if (scale) s.appendChild(el('p', 'ph-err ph-warn', icon('warn', 'ph-err-ic'), el('span', null, scale)));
+        s.appendChild(sens);
         if (this.claude && !this.claudeHidden) s.appendChild(this.claudeBlock());
         else if (this.claudeNote) s.appendChild(this.noteEl());
         const next = button({ label: 'NEXT', variant: 'primary', cls: 'ph-next', icon: 'arrow', iconAfter: true, disabled: n === 0, onTap: () => this.go('roles') });
@@ -551,6 +565,19 @@ export class PhotoImporter {
     }
   }
 
+  /**
+   * Research §5.1 sanity check: the median hold should be 8–25 cm. Far off means the corners do not span
+   * the wall from floor to top (or the photo is of a board / a detail).
+   */
+  private scaleWarning(): string {
+    const inc = this.included().filter((h) => h.kind === 'hold');
+    if (inc.length < 4) return '';
+    const m = [...inc.map((h) => h.major / this.ppm())].sort((a, b) => a - b)[inc.length >> 1];
+    if (m < 0.045) return 'Holds look tiny: do the corners frame just the wall, floor to top?';
+    if (m > 0.32) return 'Holds look huge: drag the corners out to the whole wall, floor to top.';
+    return '';
+  }
+
   private segmented(options: { id: string; label: string }[], value: string, onChange: (v: string) => void): HTMLElement {
     const wrap = el('div', 'ph-seg');
     wrap.setAttribute('role', 'radiogroup');
@@ -591,7 +618,7 @@ export class PhotoImporter {
       if (this.claudeNote) wrap.appendChild(this.noteEl());
       return wrap;
     }
-    const b = button({ label: 'ENHANCE WITH CLAUDE', variant: 'glass', cls: 'ph-claude-go', onTap: () => void this.enhance() });
+    const b = button({ label: this.claudeTries ? 'ASK CLAUDE AGAIN' : 'ENHANCE WITH CLAUDE', variant: 'glass', cls: 'ph-claude-go', onTap: () => void this.enhance() });
     b.prepend(svg(IC.sparkle));
     wrap.append(b, el('p', 'ph-claude-note', 'Sends this straightened photo to Claude on your account.'));
     if (this.claudeNote) wrap.appendChild(this.noteEl());
@@ -889,8 +916,10 @@ export class PhotoImporter {
       this.asking = null;
       const copy = visionErrorCopy(e instanceof VisionError ? e : (e as SampleError));
       if (copy) {
+        this.claudeTries++;
         this.claudeNote = { title: copy.title, body: copy.body, bad: true };
-        if (copy.hide) this.claudeHidden = true;
+        // research §5.2: one manual retry, never a loop
+        if (copy.hide || !copy.retry || this.claudeTries >= 2) this.claudeHidden = true;
       }
       if (this.step === 'holds') this.renderSheet();
     }

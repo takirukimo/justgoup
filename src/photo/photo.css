@@ -350,6 +350,10 @@
   font: 500 13.5px/1.35 var(--f-ui);
   color: var(--c-bad-ink);
 }
+.ph-warn {
+  color: var(--c-warn);
+  font-size: 13px;
+}
 .ph-err-ic {
   width: 18px;
   height: 18px;
