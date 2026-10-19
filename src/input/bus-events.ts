@@ -1,14 +1,5 @@
-// Bus messages owned by the INPUT + UI modules, added to the shared AppEvents map by declaration
-// merging (additive: src/core/events.ts stays untouched; the typed bus accepts these keys anywhere
-// this file is part of the program, which is every build since tsconfig includes src/).
+// The INPUT + UI bus messages ('ui:chalk', 'input:dyno') now live in the shared AppEvents map
+// (src/core/events.ts). This module only re-exports that map so existing side-effect imports
+// (`import './bus-events'`) keep compiling; new code imports from src/core/events directly.
 
-export {};
-
-declare module '../core/events' {
-  interface AppEvents {
-    /** HUD CHALK button: dip this hand into the chalk bag (LimbControls → sim.chalkUp). */
-    'ui:chalk': { hand: 'LH' | 'RH' };
-    /** A two-finger flick on the hip handle threw (or tried to throw) a double-hand dyno. */
-    'input:dyno': { holdId: string; power: number; thrown: boolean };
-  }
-}
+export type { AppEvents } from '../core/events';

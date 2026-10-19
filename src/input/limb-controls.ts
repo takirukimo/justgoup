@@ -28,7 +28,7 @@
 //     static reach closest to the aim direction, previewed with two arcs), and a flick toward it
 //     releases sim.dyno('both', holdId, power); a slow lift cancels. A one-finger hip drag hints
 //     "DYNO · 2 FINGERS + FLICK" the first few times a double dyno is on;
-//   • HUD CHALK buttons arrive as 'ui:chalk' on the bus (bus-events.ts) → sim.chalkUp(hand); C on a
+//   • HUD CHALK buttons arrive as 'ui:chalk' on the bus (core/events.ts) → sim.chalkUp(hand); C on a
 //     keyboard chalks the armed (else the greasier) hand;
 //   • Pure mode (pure.ts): handles, leaders, labels, reach envelope and highlights are hidden; a
 //     finger landing near a hand / foot / the hips picks that limb and shows only a faint ring.

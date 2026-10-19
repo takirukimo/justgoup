@@ -31,6 +31,8 @@ export interface AppEvents {
   'ui:set-name': { name: string };
   'ui:leaderboard-tab': { mode: LeaderboardMode };
   'ui:community-refresh': { sort: 'new' | 'popular' };
+  /** HUD CHALK button: dip this hand into the chalk bag (LimbControls → sim.chalkUp). */
+  'ui:chalk': { hand: 'LH' | 'RH' };
 
   // ── Input gestures (limb controls) ──
   'input:drag-start': { limb: LimbId };
@@ -39,6 +41,8 @@ export interface AppEvents {
   'input:hip-start': void;
   'input:hip-end': void;
   'input:blocked': { limb: LimbId; reason: string }; // tutorial gating etc.
+  /** A two-finger flick on the hip handle threw (or tried to throw) a double-hand dyno. */
+  'input:dyno': { holdId: string; power: number; thrown: boolean };
 
   // ── Sim events re-broadcast by the session each step ──
   'sim:event': SimEvent;
