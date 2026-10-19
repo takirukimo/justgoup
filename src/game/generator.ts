@@ -75,82 +75,21 @@ function routeName(rng: Rng): string {
 
 // ═══════════════════════════════ tables ═══════════════════════════════
 
-/** Lead setter: evaluations without a new high point before it jumps back, and how far (m) below the high point. */
-const LEAD_STUCK = 320;
-const LEAD_JUMP = 1.3;
-
 /** Minimum gap (m) between a quickdraw's clip point and the edge of any route hold. */
 const CLIP_CLEARANCE = 0.07;
 
 const HAND_TYPES: readonly HoldType[] = ['jug', 'edge', 'crimp', 'sloper', 'pinch', 'pocket'];
 
-/**
- * Lead towers are set as one hold set, like a real setter's route (research §3.3 / §3.5): jugs + edges,
- * crimps + pockets, or slopers + pinches (and now and then a classic mix). The theme decides every graded
- * hold, what a "better" hold is (a crimp gets easier as a deep pocket or an incut edge, not as a generic
- * edge), and the good holds of the start, the clips and the easy moves (horns on a slopers + pinches tower,
- * deep pockets and incut rails on a crimps + pockets one). Rests before the crux, the lip of the roof and
- * the top stay real jugs. Boulders keep 'classic' (their archetype picks the hold mix).
- */
-export type LeadTheme = 'classic' | 'jugs-edges' | 'crimps-pockets' | 'slopers-pinches';
-export const LEAD_THEMES: readonly LeadTheme[] = ['classic', 'jugs-edges', 'crimps-pockets', 'slopers-pinches'];
-type Theme = LeadTheme;
-
-/**
- * Graded hand holds of a themed tower, [jug, edge, crimp, sloper, pinch, pocket] at V0, V3, V6, V9, V12
- * (interpolated between): each keeps about the mean grip of the classic mix at its grade (easy towers are
- * still mostly jugs, the theme shows in the rest), so a themed tower sets as reliably as a classic one.
- */
-const THEME_MIX: Record<Exclude<Theme, 'classic'>, readonly (readonly number[])[]> = {
-  'jugs-edges': [
-    [3.6, 1.2, 0, 0, 0.1, 0],
-    [2.2, 2.6, 0, 0.1, 0.3, 0.1],
-    [1.1, 3.2, 0.3, 0.1, 0.4, 0.2],
-    [0.6, 3.2, 0.8, 0.15, 0.4, 0.2],
-    [0.4, 3.2, 1.2, 0.2, 0.4, 0.2],
-  ],
-  'crimps-pockets': [
-    [3.2, 0.6, 0, 0, 0, 1.6],
-    [1.7, 1.0, 0.5, 0, 0, 1.8],
-    [0.9, 0.7, 1.4, 0, 0.1, 1.7],
-    [0.45, 0.6, 2.1, 0.05, 0.1, 1.5],
-    [0.3, 0.5, 2.4, 0.05, 0.1, 1.4],
-  ],
-  'slopers-pinches': [
-    [3.2, 0.3, 0, 0.6, 1.6, 0],
-    [1.6, 0.4, 0, 1.0, 2.0, 0],
-    [0.8, 0.4, 0, 1.4, 2.2, 0.05],
-    [0.45, 0.4, 0.05, 1.6, 2.2, 0.05],
-    [0.3, 0.4, 0.1, 1.7, 2.2, 0.05],
-  ],
-};
-
-/** THEME_MIX of a theme at grade g (a fresh array). */
-function themeMix(th: Exclude<Theme, 'classic'>, g: number): number[] {
-  const k = THEME_MIX[th];
-  const f = clamp(g, 0, 12) / 3;
-  const i = Math.min(3, Math.floor(f));
-  const t = f - i;
-  return k[i].map((v, j) => v + (k[i + 1][j] - v) * t);
-}
-
-/** Good holds (start, clips, easy moves) of a themed tower: [type, weight, easy-grade weight]. */
-const THEME_GOOD: Record<Exclude<Theme, 'classic'>, readonly (readonly [HoldType, number, number])[]> = {
-  'jugs-edges': [
-    ['jug', 2, 3],
-    ['edge', 1, 0.6],
-  ],
-  'crimps-pockets': [
-    ['jug', 0.8, 1.6],
-    ['pocket', 1.7, 1.3],
-    ['edge', 0.6, 0.6],
-  ],
-  'slopers-pinches': [
-    ['jug', 0.7, 1.4],
-    ['pinch', 1.6, 1.4],
-    // (big friendly slopers only on the near-vertical start panel: goodType)
-    ['sloper', 0.9, 0.7],
-  ],
+/** Lead routes get a hold theme ([jug, edge, crimp, sloper, pinch, pocket] multipliers): varied hold sets. */
+type Theme = 'classic' | 'crimpy' | 'pinchy' | 'slopey' | 'pockets' | 'juggy';
+// (strong enough that a themed route's dominant hand hold is its theme, not the ubiquitous edge)
+const THEME_W: Record<Theme, readonly number[]> = {
+  classic: [1, 1, 1, 1, 1, 1],
+  crimpy: [0.75, 1.1, 2.8, 0.6, 0.7, 0.7],
+  pinchy: [0.85, 0.65, 0.55, 1, 3, 0.55],
+  slopey: [0.85, 0.65, 0.55, 3.2, 1.1, 0.55],
+  pockets: [0.85, 0.7, 0.7, 0.65, 0.75, 3.4],
+  juggy: [1.9, 1, 0.6, 0.7, 1, 0.7],
 };
 
 const SIZE: Record<HoldType, [number, number]> = {
@@ -217,11 +156,6 @@ interface Params {
   line: Line;
   profile: ProfileSpec | null;
   theme: Theme;
-  /**
-   * How strictly the theme is set (1 = fully; a retried tower that got stuck eases it toward the classic
-   * mix, so it keeps its flavour instead of falling back to the ladder).
-   */
-  themeK: number;
   /** Hand holds may be bolted onto route volumes (GEN.holdsOnVolumes / GenerateOptions.holdsOnVolumes). */
   mounts: boolean;
 }
@@ -373,113 +307,10 @@ class Builder {
   }
 
   handType(y: number): HoldType {
-    const th = this.p.theme;
-    if (th === 'classic') return this.rng.weighted(HAND_TYPES, handTypeWeights(this.p.grade, this.angleAt(y), this.p.style));
-    // a themed tower: the theme's mix for the grade band, steered by the panel (slopers and crimps die on
-    // steep panels, jugs and pinches take over there: a roof crux of a slopers + pinches tower is pinches)
-    const g = this.p.grade;
-    const w = themeMix(th, g);
-    // a roof (≥ 38°) is set with the big holds every set has there: half the classic steep mix
-    const kk = this.angleAt(y) >= 38 ? Math.min(this.p.themeK, 0.5) : this.p.themeK;
-    if (kk < 1) {
-      // an eased retry: blend toward the classic mix (both normalised)
-      const c = handTypeWeights(g, this.angleAt(y), this.p.style);
-      const sw = w.reduce((a, v) => a + v, 0) || 1;
-      const sc = c.reduce((a, v) => a + v, 0) || 1;
-      for (let i = 0; i < w.length; i++) w[i] = (kk * w[i]) / sw + ((1 - kk) * c[i]) / sc;
-    }
-    const s = Math.max(0, this.angleAt(y)) / 40;
-    w[0] *= 1 + 1.2 * s;
-    w[1] *= 1 + 0.3 * s;
-    w[2] *= Math.max(0.05, 1 - 0.65 * s);
-    w[3] *= Math.max(0.05, 1 - 0.75 * s);
-    w[4] *= 1 + 0.5 * s;
-    w[5] *= 1 + 0.1 * s;
+    const w = handTypeWeights(this.p.grade, this.angleAt(y), this.p.style);
+    const tw = THEME_W[this.p.theme];
+    for (let i = 0; i < w.length; i++) w[i] *= tw[i];
     return this.rng.weighted(HAND_TYPES, w);
-  }
-
-  /** A good hold of the tower's theme at surface height y (start zone, easy moves): a jug on a classic route. */
-  goodType(y: number): HoldType {
-    const th = this.p.theme;
-    if (th === 'classic' || (this.p.themeK < 1 && this.rng.chance(1 - this.p.themeK))) return 'jug';
-    const opts = THEME_GOOD[th];
-    const easy = this.p.grade <= 2;
-    // a good sloper is a big friendly dome on a near-vertical panel; steeper, it is a sloper no more
-    const flat = this.angleAt(y) <= 12;
-    return this.rng.weighted(
-      opts.map((o) => o[0]),
-      opts.map((o) => (o[0] === 'sloper' && !flat ? 0 : easy ? o[2] : o[1])),
-    );
-  }
-
-  /**
-   * Product details that make a themed tower's hold read as its set, by how good the hold must be
-   * (Cand mode): good holds are deep 4-finger pockets, incut rails and horns, better ones a finger or a few
-   * mm more and a friendlier lip, graded slopers friendly enough for a 10–30° tower. Classic routes and
-   * boulders are left as dressHold made them. Mutates and returns h.
-   */
-  themeHold(h: HoldDef, mode0: 'jug' | 'good' | 'better' | 'grade'): HoldDef {
-    const th = this.p.theme;
-    if (th === 'classic' || mode0 === 'jug') return h;
-    const rng = this.dressRng;
-    const g = this.p.grade;
-    // a steep panel (the headwall's roof) gets the set's big versions: huecos, horns, deep rails
-    const mode = this.angleAt(h.y) >= 38 ? (mode0 === 'grade' ? 'better' : 'good') : mode0;
-    switch (h.type) {
-      case 'pocket': {
-        const f = h.fingers ?? 3;
-        if (mode === 'good') {
-          h.fingers = 4;
-          h.size = r3(Math.max(h.size, rng.range(0.056, 0.062)));
-          h.edgeDepthMm = Math.round(rng.range(26, 32));
-        } else if (mode === 'better') {
-          h.fingers = Math.min(4, f + 1) as 1 | 2 | 3 | 4;
-          h.edgeDepthMm = Math.round(Math.max(h.edgeDepthMm ?? 20, rng.range(22, 28)));
-        } else {
-          // a tower is climbed on its pockets for 15 m: mostly three-finger ones, twos from V5, monos rare
-          h.fingers = (g <= 4 ? rng.weighted([3, 4], [2, 1]) : g <= 8 ? rng.weighted([2, 3, 4], [1, 2, 0.8]) : rng.weighted([1, 2, 3], [0.25, 1.6, 1.6])) as 1 | 2 | 3 | 4;
-        }
-        break;
-      }
-      case 'edge':
-        if (mode === 'good' || mode === 'better') {
-          // incut, deep: a rail on the good ones of an edge-themed set
-          if (mode === 'good' && rng.chance(th === 'slopers-pinches' ? 0.2 : 0.55)) h.shape = 'rail';
-          else if (h.shape === 'dual-tex' || h.shape === 'wood') delete h.shape;
-          h.edgeDepthMm = Math.round(mode === 'good' ? rng.range(25, 30) : Math.max(h.edgeDepthMm ?? 20, rng.range(20, 26)));
-          h.lipAngle = Math.round(mode === 'good' ? rng.range(12, 22) : Math.max(h.lipAngle ?? 0, rng.range(4, 14)));
-        } else if (th === 'jugs-edges' && !h.shape && rng.chance(0.18)) h.shape = 'rail';
-        break;
-      case 'crimp':
-        // a tower's crimps: 9–16 mm by grade (a 15 m route is climbed on them, not one move), micros at the
-        // hard end; the better ones incut
-        if (mode === 'grade') {
-          if (g >= 9 && !h.shape && rng.chance(0.25)) {
-            h.shape = 'micro';
-            h.edgeDepthMm = Math.round(rng.range(8, 10));
-          } else h.edgeDepthMm = Math.round(lerp(16, 10, clamp((g - 3) / 7, 0, 1)) + rng.range(-1.5, 1.5));
-        } else {
-          if (h.shape === 'micro') delete h.shape;
-          h.edgeDepthMm = Math.round(rng.range(14, 18));
-          h.lipAngle = Math.round(rng.range(8, 16));
-        }
-        break;
-      case 'pinch':
-        if (mode === 'good') h.shape = 'horn';
-        else if (mode === 'better' ? rng.chance(0.55) : th === 'slopers-pinches' && g <= 6 && rng.chance(0.18)) h.shape = 'horn';
-        else if (h.shape === 'wood' && th === 'slopers-pinches') delete h.shape;
-        break;
-      case 'sloper':
-        // slopers on a tower: big friendly domes (lip −12 … −26° by grade; research −20 … −40 for one
-        // boulder move) — a sloper set is climbed for 15 m, a third of it on 10–30° panels
-        h.lipAngle = Math.round(clamp(lerp(-14, -26, clamp(g / 11, 0, 1)) + rng.range(-3, 3) + (mode === 'grade' ? 0 : mode === 'better' ? 6 : 10), -30, -6));
-        h.size = r3(Math.max(h.size, rng.range(0.1, 0.125)));
-        if (h.shape === 'dual-tex' || h.shape === 'wood') delete h.shape;
-        if (!h.shape && rng.chance(0.35)) h.shape = 'macro';
-        break;
-      default:
-    }
-    return h;
   }
 
   footType(y: number): HoldType {
@@ -601,26 +432,6 @@ class Builder {
   }
 
   private upgrade(t: HoldType): HoldType {
-    const th = this.p.theme;
-    if (th !== 'classic' && (this.p.themeK >= 1 || this.rng.chance(this.p.themeK))) {
-      // a better hold of the same set: a crimp eases into a deep pocket or an incut edge, a sloper into a
-      // pinch, a pinch into a horn (themeHold) — never into the generic edge every tower used to fill up on
-      const hard = this.p.grade >= 8;
-      const rng = this.rng;
-      switch (th) {
-        case 'crimps-pockets':
-          if (t === 'crimp' || t === 'sloper') return rng.chance(0.65) ? 'pocket' : 'edge';
-          if (t === 'pocket') return rng.chance(0.65) ? 'pocket' : 'edge';
-          if (t === 'edge') return hard || rng.chance(0.6) ? 'pocket' : 'jug';
-          return hard ? 'edge' : 'jug';
-        case 'slopers-pinches':
-          if (t === 'jug') return 'jug';
-          if (t === 'pinch') return hard || rng.chance(0.7) ? 'pinch' : 'jug';
-          if (t === 'sloper') return rng.chance(0.4) ? 'sloper' : 'pinch';
-          return 'pinch';
-        default:
-      }
-    }
     if (this.p.grade >= 8) {
       if (t === 'crimp' || t === 'pocket') return 'edge';
       if (t === 'sloper') return 'pinch';
@@ -691,12 +502,8 @@ class Builder {
     if (!restJug && p.grade >= 4 && gains.length > 3 && rng.chance(p.awkward * 0.22) && this.leadZone(highY) !== 'start') {
       const ty = Math.max(cur.y + 0.2, highY - 0.1) + rng.range(0, 0.12);
       const tx = this.clampX(other.x + side * rng.range(0.22, 0.42));
-      // (an undercling of the tower's set: a pinch on slopers + pinches, an edge or a pocket on crimps + pockets)
-      let type: HoldType = rng.chance(0.5) ? 'edge' : 'pinch';
-      if (p.theme === 'slopers-pinches') type = 'pinch';
-      else if (p.theme === 'crimps-pockets' && type === 'pinch') type = 'pocket';
-      const uc = this.themeHold(this.temp('hand', type, tx, ty, holdSize(type, p.t, rng), HALF_PI + rng.range(-0.35, 0.35)), 'better');
-      out.push({ li, hold: uc, fresh: true, maxT: this.maxT });
+      const type: HoldType = rng.chance(0.5) ? 'edge' : 'pinch';
+      out.push({ li, hold: this.temp('hand', type, tx, ty, holdSize(type, p.t, rng), HALF_PI + rng.range(-0.35, 0.35)), fresh: true, maxT: this.maxT });
     }
     for (let k = 0; k < gains.length; k++) {
       const zone = this.leadZone(highY + p.gain * gains[k]);
@@ -711,32 +518,29 @@ class Builder {
       // hard grades try more same-grade holds before settling for better ones
       const gradeTries = p.grade >= 5 ? 5 : 3;
       const hard = p.grade >= 5;
-      // 'jug' is a real jug (rests, the roof's lip); 'good' a good hold of the tower's theme (a jug on
-      // classic routes and boulders)
-      let mode: 'jug' | 'good' | 'better' | 'grade';
+      let mode: 'jug' | 'better' | 'grade';
       if (restJug || zone === 'rest') mode = 'jug';
       else if (this.atLip(ty)) mode = k === 0 || g <= 0.74 ? 'jug' : 'better';
-      else if (zone === 'start') mode = g <= 0.62 ? 'good' : 'better';
+      else if (zone === 'start') mode = g <= 0.62 ? 'jug' : 'better';
       else if (zone === 'crux') mode = k >= gradeTries + 2 ? 'better' : 'grade';
-      else if (bump) mode = hard ? 'grade' : 'good';
-      else if (g <= 0.5 || (g <= 0.62 && !hard)) mode = hard ? 'better' : 'good';
+      else if (bump) mode = hard ? 'grade' : 'jug';
+      else if (g <= 0.5 || (g <= 0.62 && !hard)) mode = hard ? 'better' : 'jug';
       else mode = k >= gradeTries ? 'better' : 'grade';
-      const easy = mode === 'jug' || mode === 'good';
-      let type: HoldType = mode === 'jug' ? 'jug' : mode === 'good' ? this.goodType(ty) : mode === 'better' ? this.upgrade(this.handType(ty)) : this.handType(ty);
+      let type: HoldType = mode === 'jug' ? 'jug' : mode === 'better' ? this.upgrade(this.handType(ty)) : this.handType(ty);
       let size = holdSize(type, p.t, rng);
       // compression: some of the squeezes are route volumes the hands press on
-      if (squeeze && !easy && rng.chance(0.22)) {
+      if (squeeze && mode !== 'jug' && rng.chance(0.22)) {
         type = 'volume';
         size = rng.range(0.16, 0.26);
       }
       let angle = this.classicAngle();
       const awkward = zone === 'crux' ? Math.min(0.9, p.awkward * 1.5) : zone === 'start' ? 0 : p.awkward;
-      if (squeeze && !easy) angle = this.facing(li, tx, ty, cur);
+      if (squeeze && mode !== 'jug') angle = this.facing(li, tx, ty, cur);
       else if (mode === 'grade' && rng.chance(awkward)) angle = this.facing(li, tx, ty, cur);
       if (this.gap(tx, ty, type === 'volume' ? size : 0.07) < 0.03) tx = this.clampX(tx + side * (type === 'volume' ? size + 0.1 : 0.16));
       // holds bolted onto a route volume: squeezes on compression, now and then on mixed / steep problems
-      const vol = p.mounts && !easy && type !== 'volume' && rng.chance(this.mountChance()) ? this.mountVolume(tx, ty, angle, size) : null;
-      out.push({ li, hold: this.themeHold(this.temp('hand', type, tx, ty, size, angle), mode), fresh: true, maxT: this.maxT, vol: vol ?? undefined });
+      const vol = p.mounts && mode !== 'jug' && type !== 'volume' && rng.chance(this.mountChance()) ? this.mountVolume(tx, ty, angle, size) : null;
+      out.push({ li, hold: this.temp('hand', type, tx, ty, size, angle), fresh: true, maxT: this.maxT, vol: vol ?? undefined });
     }
   }
 
@@ -1020,13 +824,6 @@ class Builder {
     // ── the climb: depth-first over candidate moves, backtracking out of dead ends ──
     let budget = p.rope ? 2400 : trav ? 900 : this.prof ? 1100 : 650;
     const stack: Frame[] = [this.frame()];
-    // Lead: the long tower gets stuck where it gets hard (the roof crux, the lip). Plain backtracking
-    // then spends the whole budget on the last few moves below the dead end; instead, after
-    // LEAD_STUCK evaluations without a new high point, the setter jumps back ≈ LEAD_JUMP m below the
-    // highest hands and sets the approach to the crux anew (deterministic: counts only).
-    let bestY = -Infinity;
-    let sinceBest = 0;
-    const handY = (f: Frame): number => Math.max(f.slots[0]!.y, f.slots[1]!.y);
     while (stack.length) {
       const top = stack[stack.length - 1];
       const a = this.slots[0]!;
@@ -1034,14 +831,6 @@ class Builder {
       if (a.role === 'top' && b === a) {
         this.top = a;
         return true;
-      }
-      if (p.rope && sinceBest > LEAD_STUCK && stack.length > 2) {
-        sinceBest = 0;
-        const floor = bestY - LEAD_JUMP;
-        while (stack.length > 2 && handY(stack[stack.length - 1]) > floor) stack.pop();
-        // the frame jumped back to tries its next candidate (its current one led into the dead end)
-        this.restore(stack[stack.length - 1]);
-        continue;
       }
       if (top.idx >= top.cands.length || budget <= 0) {
         stack.pop();
@@ -1053,7 +842,6 @@ class Builder {
       // closest to the grade's target (easy grades stay relaxed, hard grades live near the limit).
       const first = top.cands[top.idx++];
       budget--;
-      sinceBest++;
       const r0 = this.evalCand(first);
       if (!r0) continue;
       let c = first;
@@ -1099,11 +887,6 @@ class Builder {
         }
       }
       stack.push(this.frame());
-      const hy = Math.max(this.slots[0]!.y, this.slots[1]!.y);
-      if (hy > bestY + 1e-9) {
-        bestY = hy;
-        sinceBest = 0;
-      }
     }
     return false;
   }
@@ -1267,17 +1050,7 @@ function lineFor(style: RouteStyle, rope: boolean, rng: Rng): Line {
   }
 }
 
-/**
- * The hold set of a lead tower (LeadTheme), from the route's seed: every retry of a route keeps it, so the
- * tower the player sees is the set its seed promised. Easy towers lean on jugs + edges.
- */
-export function leadTheme(seed: number, grade: number): LeadTheme {
-  const g = clamp(Math.round(Number.isFinite(grade) ? grade : 0), 0, 12);
-  const rng = new Rng(new Rng((Number.isFinite(seed) ? Math.floor(seed) : 1) >>> 0).fork(0x7e3e).int(1, 0x7fffffff));
-  return rng.weighted(LEAD_THEMES, [0.55, g <= 3 ? 1.5 : 1.05, g <= 1 ? 0.6 : 1.15, g <= 1 ? 0.7 : 1.1]);
-}
-
-function paramsFor(grade: number, angle: number, rope: boolean, ease: number, style: RouteStyle, profile: ProfileSpec | null, rng: Rng, mounts = false, theme: Theme = 'classic'): Params {
+function paramsFor(grade: number, angle: number, rope: boolean, ease: number, style: RouteStyle, profile: ProfileSpec | null, rng: Rng, mounts = false): Params {
   const g = clamp(Math.round(grade), 0, 12);
   const t = g / 12;
   const p: Params = {
@@ -1293,8 +1066,7 @@ function paramsFor(grade: number, angle: number, rope: boolean, ease: number, st
     line: lineFor(style, rope, rng.fork(0x11e)),
     profile,
     mounts,
-    theme: rope ? theme : 'classic',
-    themeK: 1,
+    theme: rope ? new Rng(rng.fork(0x7e3e).int(1, 0x7fffffff)).weighted(['classic', 'crimpy', 'pinchy', 'slopey', 'pockets', 'juggy'] as const, [2, g >= 4 ? 1.2 : 0.4, 1, g >= 3 ? 1 : 0.4, g >= 3 ? 0.8 : 0.3, g <= 4 ? 1.2 : 0.5]) : 'classic',
   };
   switch (style) {
     case 'slab':
@@ -1458,10 +1230,7 @@ export function generateCandidate(opts: GenerateOptions, attempt: number): Bould
     if (ease && style !== 'slab') angle = Math.min(angle, style === 'overhang' || style === 'compression' ? 25 : 20);
   }
   angle = clamp(angle, -15, 45);
-  const params = paramsFor(grade, angle, rope, ease, style, profile, rng, mountsOn(opts), rope ? leadTheme(seed, grade) : 'classic');
-  // a tower that got stuck twice eases its theme on the next tries (it keeps the set's flavour)
-  if (rope) params.themeK = attempt < 2 ? 1 : attempt < 4 ? 0.65 : attempt < 6 ? 0.4 : 0.2;
-  const b = new Builder(rng, params, color);
+  const b = new Builder(rng, paramsFor(grade, angle, rope, ease, style, profile, rng, mountsOn(opts)), color);
   if (!b.buildRoute()) return null;
   b.buildExtraFeet();
   if (rope) b.buildQuickdraws();
