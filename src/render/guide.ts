@@ -32,6 +32,8 @@ const SIGN = [-1, 1] as const;
 const UPV = new THREE.Vector3(0, 1, 0);
 /** Ankle height over the mats for the approach shoes (the sole clears the pad surface). */
 const ANKLE = 0.082;
+/** A target spot further than this (m) from the last one places the guide there at once. */
+export const JUMP_M = 1;
 
 const dampK = (lambda: number, dt: number): number => (dt <= 0 ? 1 : 1 - Math.exp(-lambda * dt));
 const sstep01 = (e0: number, e1: number, x: number): number => {
@@ -94,6 +96,8 @@ export class GuideModel extends THREE.Group {
   private twist = 0;
   private lean = 0;
   private initialized = false;
+  /** Where the guide stood last frame (world, on the mats): a jump of more than JUMP_M is a scene change. */
+  private lastO = new THREE.Vector3();
   private blinkT = 1.5;
   private hasLook = false;
   // guide frame
@@ -129,10 +133,15 @@ export class GuideModel extends THREE.Group {
       this.pose = g.pose;
       this.poseT = 0;
     } else this.poseT += d;
-    const snap = !this.initialized || dt <= 0;
     const pad = GAME.padHeight;
     // ── guide frame: feet on the mats, facing the camera side, turned toward what he looks at ──
     this.O.set(frame.origin.x + g.x, pad, frame.origin.z + g.depth);
+    // a new spot more than JUMP_M away is a scene change (title → tutorial, a new wall, the belay
+    // stance): he is simply there, standing on his final side, instead of sliding across the mats
+    const jumped = this.initialized && this.lastO.distanceToSquared(this.O) > JUMP_M * JUMP_M;
+    this.lastO.copy(this.O);
+    const snap = !this.initialized || dt <= 0 || jumped;
+    if (jumped) this.poseT = 0;
     if (g.lookAt) frame.toWorld(g.lookAt, 0, this.lookW);
     else this.lookW.set(this.O.x + 0.4, pad + 1.6, this.O.z + 4);
     // facing yaw: 0 = +Z (toward the camera). Belay faces the wall/climber.

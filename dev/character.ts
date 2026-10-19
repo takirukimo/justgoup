@@ -267,6 +267,17 @@ function portraitsView(): void {
     fig.append(img, cap);
     host.appendChild(fig);
   }
+  if (!only || only === 'guide') {
+    // Steini's speech-bubble card: the white CHIRAL SPORTS INSTRUCTOR tee
+    const fig = document.createElement('figure');
+    if (only) fig.style.width = '100%';
+    const img = document.createElement('img');
+    img.src = renderPortrait(gl, 'ibex', size, 'instructor');
+    const cap = document.createElement('figcaption');
+    cap.textContent = 'Steini (instructor)';
+    fig.append(img, cap);
+    host.appendChild(fig);
+  }
 }
 
 let poseScene: PoseScene | null = null;

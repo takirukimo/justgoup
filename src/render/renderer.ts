@@ -720,6 +720,15 @@ export class GameRenderer implements RendererAPI {
     return renderPortrait(this.gl, head, size);
   }
 
+  /**
+   * Optional (UI): Steini's card for his speech bubble and tips — the bare ibex in the white CHIRAL
+   * SPORTS INSTRUCTOR tee, the same bust framing as portrait() (which shows the player's black tee).
+   */
+  guidePortrait(size?: number): string {
+    if (this.lost) return '';
+    return renderPortrait(this.gl, 'ibex', size, 'instructor');
+  }
+
   /** True between 'webglcontextlost' and 'webglcontextrestored'. */
   get contextLost(): boolean {
     return this.lost;

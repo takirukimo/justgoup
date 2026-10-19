@@ -13,7 +13,8 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import type { HeadId } from '../core/types';
-import { ClimberModel, createBodyGoal, type BodyGoal } from './climber';
+import { ClimberModel, createBodyGoal, type BodyGoal, type BodyRig } from './climber';
+import { GuideModel } from './guide';
 
 const cache = new Map<string, string>();
 let envTex: THREE.Texture | null = null;
@@ -30,14 +31,34 @@ const CARD_H = 0.55;
 /** Minimum headroom above the silhouette (fraction of the card). */
 const HEADROOM = 0.05;
 
-/** One shared bust (body + head) per renderer: the body is built once, heads swap in. */
-let bust: { model: ClimberModel; goal: BodyGoal; owner: THREE.WebGLRenderer } | null = null;
+/**
+ * Who the card shows: the player's climber (the black CHIRAL SPORTS tee, any head) or Steini the
+ * instructor (the white CHIRAL SPORTS INSTRUCTOR tee and his bare ibex head), for his speech bubble.
+ */
+export type PortraitOutfit = 'climber' | 'instructor';
 
-function bustFor(renderer: THREE.WebGLRenderer, head: HeadId): { model: ClimberModel; goal: BodyGoal } {
+interface Bust {
+  model: THREE.Object3D & { rig: BodyRig; dispose(): void };
+  goal: BodyGoal;
+  owner: THREE.WebGLRenderer;
+}
+
+/** One shared bust (body + head) per renderer and outfit: the body is built once, heads swap in. */
+let bust: Bust | null = null;
+let guideBust: Bust | null = null;
+
+function bustFor(renderer: THREE.WebGLRenderer, head: HeadId, outfit: PortraitOutfit): Bust {
+  if (outfit === 'instructor') {
+    if (!guideBust || guideBust.owner !== renderer) {
+      guideBust?.model.dispose();
+      guideBust = { model: new GuideModel(), goal: createBodyGoal(), owner: renderer };
+    }
+    return guideBust;
+  }
   if (!bust || bust.owner !== renderer) {
     bust?.model.dispose();
     bust = { model: new ClimberModel({ head, colorway: 'basalt', chalk: 'classic' }), goal: createBodyGoal(), owner: renderer };
-  } else bust.model.setSkin(head, 'basalt', 'classic');
+  } else (bust.model as ClimberModel).setSkin(head, 'basalt', 'classic');
   return bust;
 }
 
@@ -94,8 +115,10 @@ function environment(renderer: THREE.WebGLRenderer): THREE.Texture {
   return envTex;
 }
 
-export function renderPortrait(renderer: THREE.WebGLRenderer, head: HeadId, size = 256): string {
-  const key = `${head}:${size}`;
+export function renderPortrait(renderer: THREE.WebGLRenderer, head: HeadId, size = 256, outfit: PortraitOutfit = 'climber'): string {
+  // Steini is always the ibex, in his instructor tee
+  if (outfit === 'instructor') head = 'ibex';
+  const key = `${outfit === 'instructor' ? 'guide' : head}:${size}`;
   const hit = cache.get(key);
   if (hit) return hit;
   const S = Math.min(2048, Math.round(size * 2));
@@ -117,7 +140,7 @@ export function renderPortrait(renderer: THREE.WebGLRenderer, head: HeadId, size
   scene.add(key1, fill, rimA, rimB, top, new THREE.HemisphereLight('#d7dde4', '#2a2420', 0.22));
 
   const f = FRAMING[head] ?? {};
-  const { model, goal } = bustFor(renderer, head);
+  const { model, goal } = bustFor(renderer, head, outfit);
   const yaw = f.yaw ?? VIEW_YAW;
   // the body faces −Z: view from (sin yaw, ·, −cos yaw) so the face turns toward the card's right
   const viewDir = new THREE.Vector3(Math.sin(yaw), Math.sin(VIEW_PITCH), -Math.cos(yaw)).normalize();
