@@ -26,8 +26,17 @@ type P = ScreenProps['hud'];
 /**
  * RunInfo plus optional HUD-only hints the app may pass.
  * clipReady: a quickdraw is within a free hand's reach right now (shows "CLIP!").
+ * chalk: chalk matters on this climb (the sim's ClimberSim.chalkMatters): each forearm column is
+ *        its hand's CHALK button with a grip chip (FRESH / WORN / GREASY). Off in every boulder mode
+ *        (owner decision: nobody chalks up mid-boulder), where the columns are pump gauges only.
+ *        Default: on for lead ('rope'), off otherwise.
  */
-export type HudRunInfo = RunInfo & { clipReady?: boolean };
+export type HudRunInfo = RunInfo & { clipReady?: boolean; chalk?: boolean };
+
+/** Does this climb show the CHALK buttons and grip chips? */
+export function chalkShown(run: HudRunInfo): boolean {
+  return run.chalk ?? run.mode === 'rope';
+}
 
 /** Fallback when the app does not pass `clipReady`: harness-relative distance at which a draw is reachable. */
 export const CLIP_REACH_M = 1.0;
@@ -148,6 +157,8 @@ export class HudView implements ScreenView<P> {
   private hintCount = el('span', 'hint-count t-num');
   private eyeBtn: HTMLButtonElement;
   private overview = false;
+  /** Chalk matters on this climb (lead): the forearm columns are CHALK buttons with grip chips. */
+  private chalkOn = true;
 
   // last-written caches (avoid redundant DOM writes)
   private q = {
@@ -168,6 +179,7 @@ export class HudView implements ScreenView<P> {
     name: '',
     grade: -1,
     mode: '',
+    chalk: -1,
   };
 
   constructor(_ctx: UICtx, props: P) {
@@ -275,7 +287,9 @@ export class HudView implements ScreenView<P> {
       el('span', 'fa-chalk', icon('chalk', 'fa-bag'), word),
     );
     btn.type = 'button';
-    btn.addEventListener('click', () => bus.emit('ui:chalk', { hand }));
+    btn.addEventListener('click', () => {
+      if (this.chalkOn) bus.emit('ui:chalk', { hand });
+    });
     const v: ArmView = { hand, btn, fill, pct, word, flash, q: { pump: -1, pct: -1, st: 'calm', word: 'FRESH', act: '', can: -1, invite: -1, aria: '' } };
     this.armAria(v, 0, 'FRESH');
     return v;
@@ -283,7 +297,7 @@ export class HudView implements ScreenView<P> {
 
   private armAria(a: ArmView, pct: number, word: string): void {
     const side = a.hand === 'LH' ? 'Left' : 'Right';
-    const aria = `${side} forearm pump ${pct}%, chalk ${word.toLowerCase()}. Tap to chalk up.`;
+    const aria = this.chalkOn ? `${side} forearm pump ${pct}%, chalk ${word.toLowerCase()}. Tap to chalk up.` : `${side} forearm pump ${pct}%`;
     if (aria !== a.q.aria) {
       a.q.aria = aria;
       a.btn.setAttribute('aria-label', aria);
@@ -327,7 +341,7 @@ export class HudView implements ScreenView<P> {
       toggle(a.btn, 'is-shaking', chip.act === 'shake');
       q.act = chip.act;
     }
-    const can = canChalk(s, a.hand) ? 1 : 0;
+    const can = this.chalkOn && canChalk(s, a.hand) ? 1 : 0;
     if (can !== q.can) {
       q.can = can;
       toggle(a.btn, 'can', can === 1);
@@ -376,6 +390,19 @@ export class HudView implements ScreenView<P> {
       const rope = run.mode === 'rope';
       toggle(this.el, 'is-rope', rope);
       toggle(this.el, 'is-tutorial', run.mode === 'tutorial');
+    }
+    const chalk = chalkShown(run) ? 1 : 0;
+    if (chalk !== q.chalk) {
+      q.chalk = chalk;
+      this.chalkOn = chalk === 1;
+      // boulders: pump gauges only (no CHALK button, no grip chip); lead keeps the chalk mechanic
+      toggle(this.el, 'no-chalk', !this.chalkOn);
+      for (const a of this.arms) {
+        // a plain gauge: no tap sound, no press state, not focusable
+        a.btn.disabled = !this.chalkOn;
+        a.q.aria = '';
+        this.armAria(a, Math.max(0, a.q.pct), a.q.word.split('|')[0] || 'FRESH');
+      }
     }
     if (run.score !== q.score) {
       const up = Number.isFinite(q.score) && run.score > q.score;

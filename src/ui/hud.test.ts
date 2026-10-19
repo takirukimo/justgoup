@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ClimberState, LimbId, LimbSnapshot } from '../core/types';
 import { SIM } from '../config/tuning';
-import { armState, canChalk, chalkChip } from './screens/hud';
+import { armState, canChalk, chalkChip, chalkShown } from './screens/hud';
 
 function limb(id: LimbId, extra: Partial<LimbSnapshot> = {}): LimbSnapshot {
   return { id, holdId: 'h', pos: { x: 0, y: 1 }, anchor: { x: 0, y: 1.2 }, depth: 0.03, dragging: false, load: 0.3, stress: 0.5, capacity: 0.6, reachRatio: 0.6, smearing: false, shake: 0, busy: false, ...extra };
@@ -58,5 +58,14 @@ describe('HUD forearm columns', () => {
     // not in flight, not before / after the climb
     expect(canChalk(state({ airborne: true }), 'LH')).toBe(false);
     expect(canChalk(state({ phase: 'idle' }), 'RH')).toBe(false);
+  });
+
+  it('CHALK buttons and grip chips only where chalk matters: lead yes, every boulder mode no', () => {
+    const run = { score: 0, streak: 0, boulderName: 'x', grade: 3 };
+    expect(chalkShown({ ...run, mode: 'rope' })).toBe(true);
+    for (const mode of ['boulder', 'daily', 'community', 'test', 'tutorial'] as const) expect(chalkShown({ ...run, mode }), mode).toBe(false);
+    // the session passes the sim's own answer (ClimberSim.chalkMatters), which wins
+    expect(chalkShown({ ...run, mode: 'boulder', chalk: true })).toBe(true);
+    expect(chalkShown({ ...run, mode: 'rope', chalk: false })).toBe(false);
   });
 });

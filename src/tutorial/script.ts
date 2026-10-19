@@ -253,18 +253,22 @@ export const SHAKE_OUT = {
   skip: L('We’ll leave it. Remember: pumped? Shake out on a big hold.', 'happy'),
 } as const;
 
-/** Chalk beat before the top: dip a hand into the bag (drag it to the hips, or tap its forearm gauge). */
+/**
+ * Chalk beat before the top. The tutorial is a boulder, where hands don't sweat in any noticeable way
+ * (owner decision: nobody has to chalk up mid-boulder): the beat teaches the gesture as a habit and
+ * says where it matters, on long lead routes (where a forearm gauge tap chalks up too).
+ */
 export const CHALK = {
-  /** `word` is what the HUD shows for that hand's chalk (FRESH / WORN / GREASY). */
+  /** `word` is what that hand's grip reads (FRESH / WORN / GREASY; always FRESH on a boulder). */
   instruct: (hand: LimbId, word: 'FRESH' | 'WORN' | 'GREASY'): Line =>
     word === 'FRESH'
-      ? L(`Before the top, chalk up. Drag your ${LIMB_NAME[hand]} down to the bag at your hips.`, 'point')
+      ? L(`On long lead routes, hands sweat. Practise: drag your ${LIMB_NAME[hand]} to the chalk bag.`, 'point')
       : L(`Your ${side(hand)} hand reads ${word}. Sweaty skin slips. Drag it to your chalk bag.`, 'warn'),
-  nudge: (hand: LimbId): Line => L(`Drag the ${ringOf(hand)} onto the chalk bag at your hips, or tap its forearm gauge.`, 'point'),
+  nudge: (hand: LimbId): Line => L(`Drag the ${ringOf(hand)} onto the chalk bag at your hips.`, 'point'),
   miss: L('Not quite. The chalk bag hangs behind your hips.', 'think'),
   dipping: L('Dip, dip… fresh chalk.', 'happy'),
-  success: L('Fresh chalk, better grip. Slopers and crimps feel it most.', 'cheer'),
-  skip: L('We’ll leave it. Greasy hand? Tap its forearm gauge to chalk up.', 'happy'),
+  success: L('That’s chalking up. Boulders barely need it; on lead it saves your grip.', 'cheer'),
+  skip: L('We’ll leave it. On lead, chalk up when a hand reads GREASY.', 'happy'),
 } as const;
 
 function cap(t: string): string {

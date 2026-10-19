@@ -38,6 +38,17 @@ describe('tips match the wall', () => {
     expect([...dyno].some((t) => /dyno|throw/i.test(t))).toBe(true);
   });
 
+  it('chalk advice is for lead routes only (on a boulder nobody needs to chalk up mid-climb)', () => {
+    const CHALK_TIP = /sweaty|to chalk up|chalk before/i;
+    for (let seed = 0; seed < 400; seed++) {
+      expect(randomTip(seed, 'boulder', { wallAngle: 0 })).not.toMatch(CHALK_TIP);
+      expect(tipFor('slip', seed, 'boulder', { wallAngle: 0 })).not.toMatch(CHALK_TIP);
+      expect(tipFor('pump', seed, 'boulder', { wallAngle: 30 })).not.toMatch(CHALK_TIP);
+    }
+    const lead = new Set(Array.from({ length: 400 }, (_, i) => randomTip(i, 'rope', { wallAngle: 5 })));
+    expect([...lead].some((t) => CHALK_TIP.test(t))).toBe(true);
+  });
+
   it('teaches the new moves: chalk, shake-outs, hooks, flags', () => {
     const all = TIPS.join(' ');
     expect(all).toMatch(/chalk up/i);

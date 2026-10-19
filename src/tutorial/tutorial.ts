@@ -103,7 +103,7 @@ export interface TutorialStatus {
    * Set during a beat that isn't a plain move onto `lesson.holdId`:
    *  'stand-up'  the rescue's "stand up on that foot" (hips only; `lesson` is the foot + hold),
    *  'shake-out' let `lesson.limb` hang by the side (the sim's shake-out lane) and let go,
-   *  'chalk'     dip `lesson.limb` into the chalk bag (drag it to the hips, or tap its forearm gauge).
+   *  'chalk'     dip `lesson.limb` into the chalk bag (drag it to the hips; on lead a forearm gauge tap works too).
    * (`lesson.holdId` is the hold that hand is on for the last two.)
    */
   beat: TutorialBeat | null;

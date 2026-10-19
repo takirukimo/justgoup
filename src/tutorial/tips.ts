@@ -67,10 +67,11 @@ const TIP_DEFS: readonly Tip[] = [
   T('Clipping takes a hand. Feet solid first, then reach for the draw.', 'rope', 'feet'),
   T('Grüezi from the mats: same move, less effort. Hips in, arms long.', 'hips', 'arms'),
   T('Your feet carry the weight only when your body is above them.', 'feet', 'balance'),
-  // Phase B moves: chalk, shake-outs, hooks, flags, throws
-  T('Sweaty fingers? Drag a hand down to your hip to chalk up.', 'holds', 'pump'),
+  // Phase B moves: chalk, shake-outs, hooks, flags, throws. Chalk matters on lead only (a boulder is
+  // too short for hands to sweat noticeably), so the chalk tips are lead tips.
+  T('Sweaty fingers on a long route? Drag a hand down to your hip to chalk up.', 'rope', 'pump'),
   T('Drop a hand down by your side to shake it out. One arm at a time.', 'pump', 'arms'),
-  T('Chalk before the crux, not in the middle of it.', 'pump', 'reading'),
+  T('Chalk before the crux, not in the middle of it.', 'rope', 'pump'),
   T('Steep wall? Put a foot high out to the side and hook your heel.', 'feet', 'steep'),
   T('No foothold for the swing? Flag a leg out wide as a counterweight.', 'balance', 'feet'),
   T('Out of reach? Flick the hand toward the hold to throw for it.', 'dyno', 'mind'),

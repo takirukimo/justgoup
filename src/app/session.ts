@@ -157,6 +157,10 @@ export class ClimbSession {
     this.listen();
     this.syncRun(true);
     run.hintsLeft = this.cfg.hints.left;
+    // chalk matters on lead only (owner decision): boulder HUDs drop the CHALK buttons + grip chips
+    const matters = (this.sim as { chalkMatters?: boolean }).chalkMatters;
+    run.chalk = typeof matters === 'boolean' ? matters : b.mode === 'rope';
+    this.naturalChalkUp();
     renderer.setViewInsets(PREVIEW_INSETS.top, PREVIEW_INSETS.bottom);
     renderer.setCameraMode('preview', { instant: true });
     ui.show('preview', { boulder: b, run: { ...run }, tip: this.cfg.tip });
@@ -193,6 +197,23 @@ export class ClimbSession {
     controls.setEnabled(!this.paused);
     bus.emit('game:climb-start', { boulder: b });
     return this.result;
+  }
+
+  /**
+   * The climber chalks up while the player reads the route, like everyone does at the foot of a
+   * boulder: one hand, then the other (sim.chalkUp works before the start: cosmetic, no clock, nothing
+   * can slip). Each dip is ~1 s, so even a quick TAP TO START is past it before GO.
+   */
+  private naturalChalkUp(): void {
+    if (typeof this.sim.chalkUp !== 'function') return;
+    const dip = (hand: 'LH' | 'RH', at: number): void => {
+      void this.timeline.wait(at).then(() => {
+        if (this.finished || this.phase !== 'preview' || this.sim.getState().phase !== 'idle') return;
+        this.sim.chalkUp(hand);
+      });
+    };
+    dip('RH', 1.1);
+    dip('LH', 2.6);
   }
 
   // ═══════════════════════════════ per frame ═══════════════════════════════

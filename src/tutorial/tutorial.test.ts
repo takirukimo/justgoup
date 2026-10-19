@@ -279,7 +279,8 @@ describe('runTutorial', () => {
     expect(phaseB.chalkDone).toBe(1);
     expect(r.lines.some((l) => l.text.startsWith('Shake it out'))).toBe(true);
     expect(r.lines.some((l) => l.text.startsWith('That’s a shake-out. Rest'))).toBe(true);
-    expect(r.lines.some((l) => l.text.startsWith('Fresh chalk, better grip'))).toBe(true);
+    expect(r.lines.some((l) => l.text.startsWith('On long lead routes, hands sweat'))).toBe(true);
+    expect(r.lines.some((l) => l.text.startsWith('That’s chalking up.'))).toBe(true);
     expect(r.lines.some((l) => /Not quite|Lower, right down/.test(l.text))).toBe(false); // a careful player never misses them
     // every lesson line is short enough to read mid-move
     for (const l of r.lines) if (!l.waitForTap) expect(l.text.split(/\s+/).length, l.text).toBeLessThanOrEqual(16);
