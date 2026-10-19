@@ -5,10 +5,11 @@
 
 import type { BoulderDef, HoldDef, HoldShape, HoldType } from '../core/types';
 import { ROUTE_COLORS } from '../config/brand';
-import { GAME } from '../config/tuning';
+import { GAME, SIM } from '../config/tuning';
 import { extentOf, sizeRange } from '../editor/catalog';
 import { capsuleGap, clampToBounds, holdBounds } from '../editor/model';
 import { startPlacement } from '../game/holds';
+import { angleAt, profileOf } from '../game/wall-profile';
 import { cleanWall, presetById, presetWall, setWall, WALL_PRESETS, type WallPreset } from '../editor/walls';
 import { hexToLab } from './color';
 import type { Lab, PhotoHold } from './types';
@@ -37,6 +38,15 @@ export const ROUTE = {
   gameScale: 1.8,
   /** Default wall (research: most gym boulder walls lean out a little). */
   defaultPreset: 'gentle',
+  /**
+   * Feet on overhangs: where no foot can smear (panel steeper than SIM.smearMaxAngle) the climber needs
+   * a hold every so often for its feet. A gap longer than gapFeet.gap (m) along the line, within
+   * gapFeet.corridor (m) of it, gets a small route-coloured foot chip gapFeet.step above the last
+   * foothold (gyms set feet on overhangs, or the problem is "any feet": a photo sees only the hand line,
+   * or the chips are too small to detect). Tuned on the synthetic photos over every wall preset: imported
+   * problems with a beta 31/56 → 49/56, no wall that had one lost it.
+   */
+  gapFeet: { gap: 0.55, step: 0.45, corridor: 0.8, side: 0.22, max: 6 },
 } as const;
 
 /** What the importer guesses a hold is. */
@@ -284,6 +294,8 @@ export interface BuildOptions {
    * problems are "any feet"; the game's climber needs something to stand on). Default true.
    */
   startFeet?: boolean;
+  /** Add foot chips in long foot gaps on panels too steep to smear (ROUTE.gapFeet). Default true. */
+  gapFeet?: boolean;
 }
 
 const r3 = (v: number): number => Math.round(v * 1000) / 1000;
@@ -294,7 +306,7 @@ export function buildBoulder(o: BuildOptions): BoulderDef {
 }
 
 /** buildBoulder, also reporting the start footholds it had to add. */
-export function buildWithReport(o: BuildOptions): { boulder: BoulderDef; addedFeet: number } {
+export function buildWithReport(o: BuildOptions): { boulder: BoulderDef; addedFeet: number; startFeet: number; gapFeet: number } {
   const wall = wallFor(o.presetId);
   const placed = placeHolds(o.holds, o.rectW, o.rectH, wall.length);
   const seed = o.seed ?? 1 + Math.floor(Math.random() * 0x7ffffffe);
@@ -336,8 +348,77 @@ export function buildWithReport(o: BuildOptions): { boulder: BoulderDef; addedFe
     b.holds.push(h);
   });
   settle(b);
-  const addedFeet = o.startFeet === false ? 0 : addStartFeet(b, seed);
-  return { boulder: b, addedFeet };
+  const startFeet = o.startFeet === false ? 0 : addStartFeet(b, seed);
+  const gapFeet = o.gapFeet === false ? 0 : addGapFeet(b, seed);
+  return { boulder: b, addedFeet: startFeet + gapFeet, startFeet, gapFeet };
+}
+
+/**
+ * Foot chips in the long foot gaps of the steep stretches (ROUTE.gapFeet): from just under the start up
+ * to a body length under the top, along the hand line (interpolated between the hand holds), each chip
+ * gapFeet.step above the foothold under the gap, alternating sides of the line.
+ */
+export function addGapFeet(b: BoulderDef, seed: number): number {
+  const G = ROUTE.gapFeet;
+  const prof = profileOf(b);
+  const steep = (y: number): boolean => (prof ? angleAt(prof, y) : b.wallAngle) > SIM.smearMaxAngle;
+  const hands = b.holds.filter((h) => h.role !== 'foot' && h.type !== 'volume').sort((a, c) => a.y - c.y);
+  if (hands.length < 2) return 0;
+  const sp = startPlacement(b);
+  const byId = new Map(b.holds.map((h) => [h.id, h] as const));
+  const startYs = [sp[0], sp[1]].map((id) => (id ? byId.get(id)?.y : undefined)).filter((y): y is number => y !== undefined);
+  const startY = startYs.length ? Math.min(...startYs) : hands[0].y;
+  const top = hands[hands.length - 1];
+  const lineX = (y: number): number => {
+    if (y <= hands[0].y) return hands[0].x;
+    for (let i = 1; i < hands.length; i++) {
+      if (y > hands[i].y) continue;
+      const a = hands[i - 1];
+      const c = hands[i];
+      return a.x + ((c.x - a.x) * (y - a.y)) / Math.max(1e-6, c.y - a.y);
+    }
+    return top.x;
+  };
+  const lo = Math.max(GAME.padHeight + 0.12, startY - 1.1);
+  const hi = top.y - 0.9;
+  let added = 0;
+  let side = 1;
+  while (added < G.max) {
+    const feet = b.holds
+      .filter((h) => h.type !== 'volume' && Math.abs(h.x - lineX(h.y)) < G.corridor)
+      .map((h) => h.y)
+      .sort((a, c) => a - c);
+    let prev = lo - 0.01;
+    for (const f of feet) if (f <= lo) prev = Math.max(prev, f);
+    let at: number | null = null;
+    for (const f of [...feet.filter((y) => y > lo), hi + G.gap + 0.01]) {
+      if (f - prev > G.gap && prev + G.step <= hi && steep(prev + G.step)) {
+        at = prev + G.step;
+        break;
+      }
+      prev = Math.max(prev, f);
+    }
+    if (at === null) break;
+    const h: HoldDef = {
+      id: `f${b.holds.length + 1}`,
+      x: r3(lineX(at) + side * G.side),
+      y: r3(at),
+      type: 'foot',
+      shape: 'chip',
+      size: 0.028,
+      angle: -Math.PI / 2,
+      role: 'foot',
+      color: b.color,
+      seed: (Math.imul(seed ^ (131 + added), 2654435761) >>> 1) % 0x7ffffff0 || 1,
+    };
+    while (byId.has(h.id)) h.id = `f${Number(h.id.slice(1)) + 1}`;
+    byId.set(h.id, h);
+    b.holds.push(h);
+    side = -side;
+    added++;
+  }
+  if (added) settle(b);
+  return added;
 }
 
 /**
@@ -437,4 +518,42 @@ export function settle(b: BoulderDef): void {
     }
     if (!moved) break;
   }
+}
+
+// ───────────────────────────── wall presets ─────────────────────────────
+
+/** A preset's defining angle: its steepest panel (+ overhang, − slab). */
+export function presetAngle(p: WallPreset): number {
+  const w = presetWall(p);
+  return w.panels.reduce((a, b) => (Math.abs(b.angle) > Math.abs(a.angle) ? b : a), w.panels[0]).angle;
+}
+
+/**
+ * The other presets to try when a problem has no beta on this one: nearest in steepness first, a steeper
+ * wall counted twice as far (the same holds rarely go on a steeper wall), multi-panel walls a little later.
+ */
+export function altWalls(presetId: string): string[] {
+  const cur = presetById(presetId);
+  const a0 = cur ? presetAngle(cur) : 0;
+  return WALL_PRESETS.filter((p) => p.id !== presetId)
+    .map((p) => {
+      const a = presetAngle(p);
+      return { id: p.id, d: Math.abs(a - a0) * (a > a0 ? 2 : 1) + (presetWall(p).panels.length > 2 ? 3 : 0) };
+    })
+    .sort((x, y) => x.d - y.d)
+    .map((x) => x.id);
+}
+
+/** The preset closest to a wall angle Claude read off the photo. */
+export function nearestPreset(angle: number): string {
+  let best: string = ROUTE.defaultPreset;
+  let bd = Infinity;
+  for (const p of WALL_PRESETS) {
+    const d = Math.abs(presetAngle(p) - angle) + (presetWall(p).panels.length > 2 ? 4 : 0);
+    if (d < bd) {
+      bd = d;
+      best = p.id;
+    }
+  }
+  return best;
 }

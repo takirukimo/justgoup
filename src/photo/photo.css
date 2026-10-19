@@ -728,7 +728,22 @@
   color: var(--c-good);
 }
 .ph-beta.is-none {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
   color: var(--c-warn);
+}
+.ph-beta-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ph-beta-line .ph-spin {
+  margin-left: auto;
+}
+.ph-beta-use {
+  min-height: 44px;
+  font-size: 14px;
 }
 
 /* WALL: the 3D gym shows through the stage */

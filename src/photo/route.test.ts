@@ -3,10 +3,13 @@ import { draftFromSample, validateDraft } from '../editor/model';
 import { hexToLab, grayWorldGains, samplePatch, toLab } from './color';
 import { CV, detectBlobs, distanceMap, excludeSet, wallColor } from './cv';
 import { quadAspect, rectSize, warpQuad } from './geometry';
-import { buildBoulder, buildWithReport, guessHold, guessRoles, placeHolds, routeColorFor, wallFor, type PlacedHold } from './route';
+import { altWalls, buildBoulder, buildWithReport, guessHold, guessRoles, nearestPreset, placeHolds, presetAngle, ROUTE, routeColorFor, wallFor, type PlacedHold } from './route';
+import { presetById, WALL_PRESETS } from '../editor/walls';
+import { angleAt, profileOf } from '../game/wall-profile';
+import { SIM } from '../config/tuning';
 import { startPlacement } from '../game/holds';
 import { planBetaDetailed } from '../game/solver';
-import { synthPhoto } from './synth';
+import { synthPhoto, type SynthOptions } from './synth';
 import type { PhotoBlob, PhotoHold } from './types';
 
 const H = (o: Partial<PhotoHold> & { x: number; y: number; major: number; minor?: number }): PhotoHold => ({
@@ -145,11 +148,12 @@ describe('photo → BoulderDef', () => {
       const placed = placeHolds(holds, w, h, wall.length);
       const mpp = wall.length / h;
       const roles = guessRoles(placed, tapes.map((t) => ({ x: (t.x - w / 2) * mpp, y: wall.length - t.y * mpp })));
-      const b = buildBoulder({ holds, rectW: w, rectH: h, starts: roles.starts, top: roles.top, presetId, color: '#F2C230', name: 'Yellow Snapshot', seed: 42 });
+      const r = buildWithReport({ holds, rectW: w, rectH: h, starts: roles.starts, top: roles.top, presetId, color: '#F2C230', name: 'Yellow Snapshot', seed: 42 });
+      const b = r.boulder;
       expect(b.mode).toBe('boulder');
       expect(b.width).toBe(4.6);
       expect(b.height).toBe(wall.length);
-      expect(b.holds.length).toBe(holds.length);
+      expect(b.holds.length).toBe(holds.length + r.addedFeet);
       if (wall.panels.length > 1) expect(b.profile?.length).toBe(wall.panels.length);
       const check = validateDraft(draftFromSample(b));
       expect(check.ok, `${presetId}: ${check.headline}`).toBe(true);
@@ -189,4 +193,93 @@ describe('photo → BoulderDef', () => {
       expect(planBetaDetailed(b, { maxMs: 4000 }), `seed ${seed}`).not.toBeNull();
     }
   }, 30000);
+});
+
+/** The importer's pipeline on a synthetic photo (the dev harness's sizes): a build per wall preset. */
+function imported(o: SynthOptions) {
+  const s = synthPhoto({ photoW: 900, photoH: 1200, ppm: 200, ...o });
+  const seed = o.seed ?? 1;
+  const { w, h } = rectSize(quadAspect(s.quad, s.photo.width, s.photo.height), 960);
+  const rect = warpQuad(s.photo, s.quad, w, h);
+  const lab = toLab(rect, grayWorldGains(rect));
+  const route = s.holds.filter((hd) => hd.route && hd.r > 0.05)[0];
+  const sample = samplePatch(lab, ((route.x + 2.3) / 4.6) * w, ((4.5 - route.y) / 4.5) * h)!;
+  const res = detectBlobs(lab, distanceMap(lab, [sample], excludeSet(wallColor(lab), [sample], [])), { sensitivity: CV.defaultSensitivity, ppm: h / 4.5 });
+  const holds: PhotoHold[] = res.blobs.filter((b) => b.kind === 'hold').map((b) => ({ ...b }));
+  const tapes = res.blobs.filter((b) => b.kind === 'tape');
+  const build = (presetId: string, gapFeet = true) => {
+    const wall = wallFor(presetId);
+    const placed = placeHolds(holds, w, h, wall.length);
+    const mpp = wall.length / h;
+    const roles = guessRoles(placed, tapes.map((t) => ({ x: (t.x - w / 2) * mpp, y: wall.length - t.y * mpp })));
+    return buildWithReport({ holds, rectW: w, rectH: h, starts: roles.starts, top: roles.top, presetId, color: '#F2C230', name: 'Snap', seed, gapFeet });
+  };
+  return { build };
+}
+
+describe('feet on overhangs (no smearing past SIM.smearMaxAngle)', () => {
+  it('a long foot gap on a steep stretch gets foot chips along the line; vertical walls get none', () => {
+    // a ladder of hand holds from 1.5 m with two start feet under it, nothing for the feet above
+    const holds: PhotoHold[] = [];
+    for (let k = 0; k < 9; k++) holds.push(H({ x: 400 + (k % 2 ? 60 : -60), y: 900 - 1.5 * 200 - k * 0.3 * 200, major: 0.12 * 200 }));
+    const steep = buildWithReport({ holds, rectW: 800, rectH: 900, starts: [0], top: 8, presetId: ROUTE.defaultPreset, color: '#F2C230', name: 'Ladder', seed: 7 });
+    expect(steep.startFeet).toBe(2);
+    expect(steep.gapFeet).toBeGreaterThanOrEqual(1);
+    expect(steep.addedFeet).toBe(steep.startFeet + steep.gapFeet);
+    const prof = profileOf(steep.boulder);
+    const chips = steep.boulder.holds.filter((h) => h.type === 'foot');
+    expect(chips.length).toBe(steep.addedFeet);
+    for (const c of chips) {
+      expect(c.role).toBe('foot');
+      expect(c.color).toBe('#F2C230');
+      expect(Math.abs(c.x)).toBeLessThan(1.2);
+    }
+    // the gap chips sit on the steep panel, between the start feet and a body length under the top
+    const top = steep.boulder.holds.find((h) => h.role === 'top')!;
+    const gapChips = chips.filter((c) => c.y > 1.0);
+    expect(gapChips.length).toBe(steep.gapFeet);
+    for (const c of gapChips) {
+      expect(angleAt(prof!, c.y)).toBeGreaterThan(SIM.smearMaxAngle);
+      expect(c.y).toBeLessThan(top.y - 0.85);
+    }
+    expect(validateDraft(draftFromSample(steep.boulder)).ok).toBe(true);
+    // a vertical wall takes smears: start feet only
+    const vert = buildWithReport({ holds, rectW: 800, rectH: 900, starts: [0], top: 8, presetId: 'vertical', color: '#F2C230', name: 'Ladder', seed: 7 });
+    expect(vert.gapFeet).toBe(0);
+    const off = buildWithReport({ holds, rectW: 800, rectH: 900, starts: [0], top: 8, presetId: ROUTE.defaultPreset, color: '#F2C230', name: 'Ladder', seed: 7, gapFeet: false });
+    expect(off.gapFeet).toBe(0);
+  });
+
+  it('imported photo problems are climbable on the default (overhanging) wall, and not without the chips', () => {
+    let without = 0;
+    // dev/photo.html's first two samples
+    for (const o of [
+      { seed: 3, view: 'below', route: '#F2C230', wall: 'charcoal' },
+      { seed: 5, view: 'left', route: '#2F6FEB', wall: 'grey', volume: 'route', touching: true, tapeTouch: true },
+    ] as SynthOptions[]) {
+      const seed = o.seed;
+      const imp = imported(o);
+      const r = imp.build(ROUTE.defaultPreset);
+      expect(r.gapFeet, `seed ${seed}`).toBeGreaterThan(0);
+      expect(validateDraft(draftFromSample(r.boulder)).ok).toBe(true);
+      expect(planBetaDetailed(draftFromSample(r.boulder), { maxMs: 4000 }), `seed ${seed}`).not.toBeNull();
+      if (planBetaDetailed(draftFromSample(imp.build(ROUTE.defaultPreset, false).boulder), { maxMs: 4000 })) without++;
+    }
+    expect(without).toBe(0);
+  }, 60000);
+});
+
+describe('wall presets', () => {
+  it('other walls come nearest in steepness first, flatter first on a tie', () => {
+    const order = altWalls('gentle');
+    expect(order).not.toContain('gentle');
+    expect(order.length).toBe(WALL_PRESETS.length - 1);
+    const a0 = presetAngle(presetById('gentle')!);
+    const d = order.slice(0, 3).map((id) => Math.abs(presetAngle(presetById(id)!) - a0));
+    expect(d[0]).toBeLessThanOrEqual(d[2]);
+    // the first suggestion from an overhang is the next flatter or next steeper single wall, never a slab
+    expect(presetAngle(presetById(order[0])!)).toBeGreaterThanOrEqual(0);
+    expect(nearestPreset(0)).toBe('vertical');
+    expect(presetAngle(presetById(nearestPreset(40))!)).toBeGreaterThanOrEqual(35);
+  });
 });

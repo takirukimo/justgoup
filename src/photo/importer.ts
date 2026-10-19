@@ -12,12 +12,12 @@ import type { BoulderDef, HoldType } from '../core/types';
 import { BRAND } from '../config/brand';
 import { button, el, fromMarkup, setText, toggle } from '../ui/dom';
 import { icon } from '../ui/icons';
-import { WALL_PRESETS, WALL_TYPE_LABEL, wallTypeOf, presetWall, sideView, type WallPreset } from '../editor/walls';
+import { WALL_PRESETS, WALL_TYPE_LABEL, wallTypeOf, presetById, presetWall, sideView, type WallPreset } from '../editor/walls';
 import { colorName, labToHex } from './color';
 import { CV, inHull } from './cv';
 import { PhotoEngine } from './engine';
 import { applyH, defaultQuad, quadAspect, quadValid, rectSize, rectToPhoto } from './geometry';
-import { buildWithReport, guessRoles, placeHolds, routeColorFor, ROUTE, wallFor } from './route';
+import { altWalls, buildWithReport, guessRoles, nearestPreset, placeHolds, routeColorFor, ROUTE, wallFor } from './route';
 import { Analyzer } from '../editor/analyzer';
 import { gradeLabel } from '../game/grades';
 import { resolveSample, type SampleAccess, type SampleError } from './sample';
@@ -42,6 +42,10 @@ export const IMPORT = {
   maxZoom: 6,
   /** Slider → detection debounce (ms). */
   detectDebounce: 140,
+  /** Beta reader budget per wall (ms, in the analyzer's worker). */
+  betaMs: 900,
+  /** Other walls tried when the chosen one has no beta. */
+  altWalls: 6,
 } as const;
 
 interface Swatch {
@@ -150,6 +154,8 @@ export class PhotoImporter {
   private analyzer: Analyzer | null = null;
   private betaTicket = 0;
   beta: { state: 'idle' | 'reading' | 'ok' | 'none'; grade: number | null } = { state: 'idle', grade: null };
+  /** When the chosen wall has no beta: the nearest wall that has one (searching, found, or none). */
+  alt: { state: 'idle' | 'searching' | 'found' | 'none'; id: string; grade: number | null } = { state: 'idle', id: '', grade: null };
 
   // view
   private zoom = 1;
@@ -536,18 +542,11 @@ export class PhotoImporter {
           const t = WALL_TYPE_LABEL[wallTypeOf(presetWall(p))].toUpperCase();
           const chip = el('button', `ph-wall${p.id === this.presetId ? ' on' : ''}`, presetGlyph(p), el('span', 'ph-wall-t', t), el('span', 'ph-wall-v', p.label));
           chip.type = 'button';
+          chip.dataset.id = p.id;
           chip.setAttribute('role', 'radio');
           chip.setAttribute('aria-checked', String(p.id === this.presetId));
           chip.setAttribute('aria-label', `${t} ${p.label}`);
-          chip.addEventListener('click', () => {
-            this.presetId = p.id;
-            this.presetTouched = true;
-            for (const c of list.children) {
-              toggle(c, 'on', c === chip);
-              c.setAttribute('aria-checked', String(c === chip));
-            }
-            this.updatePreview();
-          });
+          chip.addEventListener('click', () => this.pickWall(p.id));
           list.appendChild(chip);
         }
         const c = this.routeColor();
@@ -940,7 +939,12 @@ export class PhotoImporter {
       const out = local.filter((l) => !keep.some((k) => Math.hypot(k.x - l.x, k.y - l.y) < 2)).map((l) => ({ ...l, included: false }));
       this.holds = [...keep, ...out];
       if (!this.rolesTouched && (m.starts.length || m.top !== null)) {
-        this.starts = m.starts.map((i) => ({ x: m.holds[i].x, y: m.holds[i].y }));
+        // Claude's starts only where the game's climber can start (standing): a sit start low on the
+        // wall leaves the starts to the local guess, Claude's top stays
+        const wall = wallFor(this.presetId);
+        const placed = placeHolds(m.holds, this.rectW, this.rectH, wall.length);
+        const standing = m.starts.filter((i) => placed[i].y >= ROUTE.startMinY);
+        this.starts = standing.map((i) => ({ x: m.holds[i].x, y: m.holds[i].y }));
         this.top = m.top !== null ? { x: m.holds[m.top].x, y: m.holds[m.top].y } : null;
         this.rolesFromClaude = true;
       }
@@ -956,18 +960,20 @@ export class PhotoImporter {
   // ═══════════════════════════════ START / TOP ═══════════════════════════════
 
   private prepareRoles(): void {
-    if (this.rolesTouched || this.rolesFromClaude) {
-      const r = this.resolveRoles();
-      if (r.starts.length || r.top !== null) return;
-    }
+    const kept = this.rolesTouched || this.rolesFromClaude ? this.resolveRoles() : { starts: [], top: null };
+    // the player's (or Claude's) marks stay; whatever is missing is guessed
+    if (this.rolesTouched && (kept.starts.length || kept.top !== null)) return;
+    if (kept.starts.length && kept.top !== null) return;
     const inc = this.included();
     const wall = wallFor(this.presetId);
     const placed = placeHolds(inc, this.rectW, this.rectH, wall.length);
     const mpp = wall.length / this.rectH;
     const tapes = this.holds.filter((h) => h.kind === 'tape').map((t) => ({ x: (t.x - this.rectW / 2) * mpp, y: wall.length - t.y * mpp }));
     const g = guessRoles(placed, tapes);
-    this.starts = g.starts.map((i) => ({ x: inc[i].x, y: inc[i].y }));
-    this.top = g.top !== null ? { x: inc[g.top].x, y: inc[g.top].y } : null;
+    const top = kept.top ?? g.top;
+    const starts = kept.starts.length ? kept.starts : g.starts.filter((i) => i !== top);
+    this.starts = starts.map((i) => ({ x: inc[i].x, y: inc[i].y }));
+    this.top = top !== null ? { x: inc[top].x, y: inc[top].y } : null;
   }
 
   /** Start / top marks → indices into included(). */
@@ -1029,26 +1035,32 @@ export class PhotoImporter {
   // ═══════════════════════════════ WALL ═══════════════════════════════
 
   private build(): BoulderDef {
-    const inc = this.included();
-    const { starts, top } = this.resolveRoles();
-    const c = this.routeColor();
-    const r = buildWithReport({ holds: inc, rectW: this.rectW, rectH: this.rectH, starts, top, presetId: this.presetId, color: c.hex, name: `${c.name} Snapshot` });
+    const r = this.buildFor(this.presetId);
     this.addedFeet = r.addedFeet;
     if (this.beta.state === 'ok' && this.beta.grade !== null) r.boulder.grade = this.beta.grade;
     return r.boulder;
+  }
+
+  private buildFor(presetId: string): { boulder: BoulderDef; addedFeet: number } {
+    const inc = this.included();
+    const { starts, top } = this.resolveRoles();
+    const c = this.routeColor();
+    return buildWithReport({ holds: inc, rectW: this.rectW, rectH: this.rectH, starts, top, presetId, color: c.hex, name: `${c.name} Snapshot` });
   }
 
   /** Can the game's climber get up it on this wall? (the editor's beta reader, in its worker) */
   private checkBeta(b: BoulderDef): void {
     const ticket = ++this.betaTicket;
     this.beta = { state: 'reading', grade: null };
+    this.alt = { state: 'idle', id: '', grade: null };
     this.renderBeta();
     this.analyzer ??= new Analyzer();
     this.analyzer
-      .solve(b, 900)
+      .solve(b, IMPORT.betaMs)
       .then((r) => {
         if (ticket !== this.betaTicket || this.finished) return;
         this.beta = r.moves ? { state: 'ok', grade: r.grade } : { state: 'none', grade: null };
+        if (!r.moves) void this.findAltWall(ticket);
       })
       .catch(() => {
         if (ticket === this.betaTicket) this.beta = { state: 'idle', grade: null };
@@ -1058,16 +1070,75 @@ export class PhotoImporter {
       });
   }
 
+  /**
+   * No beta on the chosen wall: try the walls closest in steepness (flatter first on a tie) until one
+   * has a beta, so the WALL step always offers a way on (never a dead end).
+   */
+  private async findAltWall(ticket: number): Promise<void> {
+    this.alt = { state: 'searching', id: '', grade: null };
+    this.renderBeta();
+    for (const id of altWalls(this.presetId).slice(0, IMPORT.altWalls)) {
+      if (ticket !== this.betaTicket || this.finished || !this.analyzer) return;
+      let ok = false;
+      let grade: number | null = null;
+      try {
+        const r = await this.analyzer.solve(this.buildFor(id).boulder, IMPORT.betaMs);
+        ok = !!r.moves;
+        grade = r.grade;
+      } catch {
+        /* a failed read is not a beta */
+      }
+      if (ticket !== this.betaTicket || this.finished) return;
+      if (ok) {
+        this.alt = { state: 'found', id, grade };
+        this.renderBeta();
+        return;
+      }
+    }
+    this.alt = { state: 'none', id: '', grade: null };
+    this.renderBeta();
+  }
+
   private renderBeta(): void {
     const box = this.sheet.querySelector('.ph-beta');
     if (!box) return;
     box.textContent = '';
     box.className = `ph-beta is-${this.beta.state}`;
+    const wallName = (id: string): string => {
+      const p = presetById(id);
+      return p ? `${WALL_TYPE_LABEL[wallTypeOf(presetWall(p))]} ${p.label}`.toUpperCase() : id.toUpperCase();
+    };
     if (this.beta.state === 'reading') box.append(el('i', 'ph-spin'), el('span', null, 'READING THE BETA'));
     else if (this.beta.state === 'ok') box.append(icon('check', 'ph-beta-ic'), el('span', null, `CLIMBABLE${this.beta.grade !== null ? ' · ' + gradeLabel(this.beta.grade) : ''}`));
-    else if (this.beta.state === 'none') box.append(icon('warn', 'ph-beta-ic'), el('span', null, 'NO BETA YET · TRY A FLATTER WALL OR BIGGER HOLDS IN THE EDITOR'));
+    else if (this.beta.state === 'none') {
+      const line = el('div', 'ph-beta-line', icon('warn', 'ph-beta-ic'));
+      box.appendChild(line);
+      if (this.alt.state === 'searching') line.append(el('span', null, `NO BETA ON THIS WALL · TRYING OTHER WALLS`), el('i', 'ph-spin'));
+      else if (this.alt.state === 'found') {
+        const id = this.alt.id;
+        line.appendChild(el('span', null, `NO BETA ON THIS WALL YET · CLIMBABLE ON ${wallName(id)}${this.alt.grade !== null ? ' · ' + gradeLabel(this.alt.grade) : ''}`));
+        const use = button({ label: `USE ${wallName(id)}`, variant: 'glass', cls: 'ph-beta-use', icon: 'arrow', iconAfter: true, onTap: () => this.pickWall(id) });
+        box.appendChild(use);
+      } else line.appendChild(el('span', null, 'NO BETA YET · CREATE IT, THEN GIVE IT BIGGER HOLDS OR MORE FEET IN THE EDITOR'));
+    }
     const feet = this.sheet.querySelector('.ph-sum-feet');
-    if (feet) setText(feet, this.addedFeet ? ` · +${this.addedFeet} START FOOTHOLD${this.addedFeet === 1 ? '' : 'S'}` : '');
+    if (feet) setText(feet, this.addedFeet ? ` · +${this.addedFeet} FOOTHOLD${this.addedFeet === 1 ? '' : 'S'} ADDED` : '');
+  }
+
+  /** Select a wall preset (chip tap or the beta reader's suggestion) and preview it. */
+  private pickWall(id: string): void {
+    this.presetId = id;
+    this.presetTouched = true;
+    const list = this.sheet.querySelector('.ph-walls');
+    if (list) {
+      for (const c of list.children) {
+        const on = (c as HTMLElement).dataset.id === id;
+        toggle(c, 'on', on);
+        c.setAttribute('aria-checked', String(on));
+        if (on) c.scrollIntoView({ inline: 'center', block: 'nearest', behavior: this.reduced() ? 'auto' : 'smooth' });
+      }
+    }
+    this.updatePreview();
   }
 
   private routeColor(): { name: string; hex: string } {
@@ -1648,22 +1719,6 @@ function spotlight(rect: HTMLCanvasElement, mask: Uint8Array): HTMLCanvasElement
   for (let i = 0; i < mask.length; i++) d[i * 4 + 3] = mask[i] ? 255 : 0;
   g.putImageData(img, 0, 0);
   return c;
-}
-
-/** The preset closest to a wall angle Claude read off the photo. */
-export function nearestPreset(angle: number): string {
-  let best = ROUTE.defaultPreset as string;
-  let bd = Infinity;
-  for (const p of WALL_PRESETS) {
-    const w = presetWall(p);
-    const main = w.panels.reduce((a, b) => (Math.abs(b.angle) > Math.abs(a.angle) ? b : a), w.panels[0]);
-    const d = Math.abs(main.angle - angle) + (w.panels.length > 2 ? 4 : 0);
-    if (d < bd) {
-      bd = d;
-      best = p.id;
-    }
-  }
-  return best;
 }
 
 /** Decode an image file with its EXIF orientation applied, downscaled to `long` px on its long edge. */
