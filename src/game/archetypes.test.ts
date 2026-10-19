@@ -298,9 +298,12 @@ describe('archetypes — the bot sends every one of them', () => {
 });
 
 describe('archetypes — holds bolted onto volumes (GEN.holdsOnVolumes)', () => {
-  it('ships OFF (the renderer seats them on the volume face later); without it no hold is mounted', () => {
-    expect(GEN.holdsOnVolumes).toBe(false);
-    for (const b of some('compression', false, [4, 9])) expect(b.holds.some((h) => h.onVolume)).toBe(false);
+  it('ships ON (the renderer seats them on the volume face); without it no hold is mounted', { timeout: 120_000 }, () => {
+    expect(GEN.holdsOnVolumes).toBe(true);
+    const mounted = (holdsOnVolumes?: boolean) =>
+      [4, 9].map((g, k) => generateBoulder({ seed: 4242 + k * 131 + g, grade: g, style: 'compression', ...(holdsOnVolumes === undefined ? {} : { holdsOnVolumes }) })).some((b) => b.holds.some((h) => h.onVolume));
+    expect(mounted()).toBe(true);
+    expect(mounted(false)).toBe(false);
   });
 
   it('compression squeezes sit on route volumes; a foot by the hold takes it, on top of the volume the volume', { timeout: 200_000 }, () => {

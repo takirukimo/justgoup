@@ -85,8 +85,10 @@ describe('generator — determinism + structure', () => {
       expect(deco.length).toBeGreaterThanOrEqual(40);
       expect(deco.length).toBeLessThanOrEqual(90);
       expect(deco.every((h) => h.color !== b.color)).toBe(true);
-      // wall volumes (deco or route feet); compression problems add hand volumes on top
-      const volumes = b.holds.filter((h) => h.type === 'volume' && h.role !== 'hand');
+      // wall volumes (deco or route feet); compression problems add hand volumes on top, and route volumes
+      // that carry a bolted-on hand hold (GEN.holdsOnVolumes) come with that hold's move
+      const carriers = new Set(b.holds.map((h) => h.onVolume).filter((v) => v !== undefined));
+      const volumes = b.holds.filter((h) => h.type === 'volume' && h.role !== 'hand' && !carriers.has(h.id));
       expect(volumes.length).toBeGreaterThanOrEqual(1);
       expect(volumes.length).toBeLessThanOrEqual(4);
       for (const h of b.holds) {
@@ -188,15 +190,18 @@ describe('generator — determinism + structure', () => {
     for (let i = 0; i < mix.length; i++) for (let j = i + 1; j < mix.length; j++) spread = Math.max(spread, mix[i].reduce((a, v, t) => a + Math.abs(v - mix[j][t]), 0));
     expect(spread).toBeGreaterThanOrEqual(0.3);
     // the crux (55–75 % of the height) is set on poorer holds than the start (below 4.2 m)
+    // (each hold judged on the panel it is bolted to: a folded tower's wallAngle is its steepest panel)
     const mean = (pick: (r: (typeof routes)[number], y: number) => boolean) => {
       let sum = 0;
       let n = 0;
-      for (const r of routes)
+      for (const r of routes) {
+        const prof = profileOf(r);
         for (const h of r.holds)
           if (h.role === 'hand' && pick(r, h.y)) {
-            sum += nominalCapacity(h, true, r.wallAngle);
+            sum += nominalCapacity(h, true, prof ? angleAt(prof, h.y) : r.wallAngle);
             n++;
           }
+      }
       return sum / Math.max(1, n);
     };
     expect(mean((_r, y) => y < 4.2)).toBeGreaterThan(mean((r, y) => y > 0.55 * r.height && y < 0.75 * r.height));

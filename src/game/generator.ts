@@ -17,7 +17,8 @@
 // positive clip hold under every draw, and varied lines (meander / zigzag / diagonal) and hold themes.
 // On a multi-angle wall a steep panel is never relaxed (a strain floor by panel angle), the holds over a
 // lip are the crux's reward, and with GEN.holdsOnVolumes the squeezes of compression problems (and a few
-// holds of mixed / steep ones) are bolted onto route volumes (HoldDef.onVolume).
+// holds of the other boulders, most on mixed / steep ones) are bolted onto route volumes (HoldDef.onVolume;
+// boulders only: a lead tower keeps its faces clear for the bolt line and the clipping stances).
 
 import type { BoulderDef, HoldDef, HoldRole, HoldType, LimbId, QuickdrawDef, RouteStyle } from '../core/types';
 import type { GenerateOptions } from '../core/contracts';
@@ -1106,8 +1107,11 @@ const deriveSeed = (seed: number, attempt: number): number => (attempt === 0 ? s
 /** Multi-angle profiles for these options (GenerateOptions.profiles, else the GEN.profiles switch). */
 const profilesOn = (opts: GenerateOptions): boolean => (opts.profiles ?? GEN.profiles) === true && opts.wallAngle === undefined;
 
-/** Hand holds bolted onto route volumes for these options (GenerateOptions.holdsOnVolumes, else GEN.holdsOnVolumes). */
-const mountsOn = (opts: GenerateOptions): boolean => (opts.holdsOnVolumes ?? GEN.holdsOnVolumes) === true;
+/**
+ * Hand holds bolted onto route volumes for these options (GenerateOptions.holdsOnVolumes, else
+ * GEN.holdsOnVolumes). Boulders only: lead towers keep their faces clear for the bolt line.
+ */
+const mountsOn = (opts: GenerateOptions): boolean => opts.mode !== 'rope' && (opts.holdsOnVolumes ?? GEN.holdsOnVolumes) === true;
 
 /**
  * The archetype a boulder gets: GenerateOptions.style, else the Send Train rotation (opts.run), else a

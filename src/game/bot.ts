@@ -228,7 +228,15 @@ export class BetaBot {
       }
       case 'hold': {
         if (!st) break;
-        if (this.opts.useHips) sim.setHipTarget({ x: st.reachPose.px, y: st.reachPose.py });
+        if (this.opts.useHips) {
+          // the live body can settle a few cm short of the planned reach pose (its dynamics balance where
+          // the static plan doesn't quite): when the hand still comes up short, pull the hips on past
+          // the pose by that lag, as a player drags the hip handle further
+          const k = clamp((this.t - 0.15) / 0.4, 0, 1) * 1.5;
+          const lx = clamp(st.reachPose.px - s.pelvis.x, -0.12, 0.12) * k;
+          const ly = clamp(st.reachPose.py - s.pelvis.y, -0.12, 0.12) * k;
+          sim.setHipTarget({ x: st.reachPose.px + lx, y: st.reachPose.py + ly });
+        }
         sim.dragTo(limb, this.target);
         const ok = this.hold ? sim.snapCandidate(limb, this.target)?.id === this.hold.id : true;
         if (ok || this.t > 1.0) {
