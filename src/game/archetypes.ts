@@ -311,8 +311,9 @@ export function leadProfile(grade: number, rng: Rng, length: number): ProfileSpe
   const crux = spec[3][1];
   const finish = lerp(14, 28, steep) + rng.range(-3, 3);
   if (crux - finish > 25) spec.push([rng.range(0.8, 1.1), (crux + finish) / 2]);
-  const used = spec.reduce((a, s) => a + s[0], 0);
-  spec.push([Math.max(1.5, length - used), finish]);
+  // the finish panel lands the surface exactly on `length` (stack rounds each panel to mm)
+  const used = spec.reduce((a, s) => a + r3(s[0]), 0);
+  spec.push([Math.max(1.5, r3(length - used)), finish]);
   return stack(spec, 'TOWER');
 }
 

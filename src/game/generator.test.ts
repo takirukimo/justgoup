@@ -5,7 +5,7 @@ import { dailyBoulder, dailyGrade, generateBoulder, generateRopeRoute, todayKey,
 import { planBeta, planBetaDetailed } from './solver';
 import { nominalCapacity, usableByHand } from './holds';
 import { leadProfile } from './archetypes';
-import { angleAt, profileOf } from './wall-profile';
+import { angleAt, profileOf, wallTopHeight } from './wall-profile';
 import { Rng } from '../core/rng';
 import { ClimberSim } from './climber-sim';
 import { autoClimb } from './bot';
@@ -50,7 +50,12 @@ describe('generator — determinism + structure', () => {
       expect(b.mode).toBe('boulder');
       expect(b.grade).toBe(grade);
       expect(b.width).toBe(GAME.boulderWall.width);
-      expect(b.height).toBe(GAME.boulderWall.height);
+      if (b.profile) {
+        // a folded wall (GEN.profiles): the sim's y runs along the surface, which is longer than the wall
+        // is tall; it never stands taller than the flat boulder wall
+        expect(b.height).toBeGreaterThan(b.profile[b.profile.length - 1].y0);
+        expect(wallTopHeight(profileOf(b)!)).toBeLessThanOrEqual(GAME.boulderWall.height + 0.01);
+      } else expect(b.height).toBe(GAME.boulderWall.height);
       expect(b.name.length).toBeGreaterThan(3);
       const ids = new Set(b.holds.map((h) => h.id));
       expect(ids.size).toBe(b.holds.length);
@@ -151,25 +156,37 @@ describe('generator — determinism + structure', () => {
       expect(anchor.y).toBeGreaterThan(top.y);
       expect(anchor.y - top.y).toBeLessThan(0.6);
       expect(top.y).toBeGreaterThan(r.height - 1.0);
-      // clipping stances: most draws sit at chest height under a positive hand hold beside them
+      // clipping stances: most draws sit at chest height under a positive hand hold beside them (judged on
+      // the panel the hold is bolted to: a folded tower's wallAngle is its steepest panel)
+      const prof = profileOf(r);
+      const at = (y: number) => (prof ? angleAt(prof, y) : r.wallAngle);
       let clipHolds = 0;
       for (const d of q.slice(0, -1))
-        if (r.holds.some((h) => usableByHand(h) && h.role !== 'top' && h.y - d.y >= 0.2 && h.y - d.y <= 0.75 && Math.abs(h.x - d.x) < 0.5 && nominalCapacity(h, true, r.wallAngle) >= 0.5)) clipHolds++;
+        if (r.holds.some((h) => usableByHand(h) && h.role !== 'top' && h.y - d.y >= 0.2 && h.y - d.y <= 0.75 && Math.abs(h.x - d.x) < 0.5 && nominalCapacity(h, true, at(h.y)) >= 0.5)) clipHolds++;
       expect(clipHolds / (q.length - 1)).toBeGreaterThanOrEqual(0.7);
     }
   });
 
   it('lead routes vary: wall angles, lines and hold sets differ between seeds', { timeout: 120_000 }, () => {
-    const routes = [0, 1, 2, 3, 4, 5].map((k) => generateRopeRoute({ seed: 900 + k * 37, grade: 5 }));
-    expect(new Set(routes.map((r) => r.wallAngle)).size).toBeGreaterThanOrEqual(2);
-    const mix = routes.map((r) => {
+    const mixOf = (r: ReturnType<typeof generateRopeRoute>) => {
       const hands = r.holds.filter((h) => h.role === 'hand');
       const share = (t: string) => hands.filter((h) => h.type === t).length / hands.length;
       return ['jug', 'edge', 'crimp', 'sloper', 'pinch', 'pocket'].map(share);
-    });
-    // the dominant non-jug hold type is not the same on every route
-    const dominant = mix.map((m) => m.slice(1).indexOf(Math.max(...m.slice(1))));
+    };
+    // flat towers: the hold theme shows as the dominant non-jug hold type, which is not the same on every route
+    const flat = [0, 1, 2, 3, 4, 5].map((k) => generateRopeRoute({ seed: 900 + k * 37, grade: 5, profiles: false }));
+    expect(new Set(flat.map((r) => r.wallAngle)).size).toBeGreaterThanOrEqual(2);
+    const dominant = flat.map(mixOf).map((m) => m.slice(1).indexOf(Math.max(...m.slice(1))));
     expect(new Set(dominant).size).toBeGreaterThanOrEqual(2);
+    // the shipped profiled towers: the headwall / roof angles differ, and so do the hold mixes (the steep
+    // panels favour jugs and pinches on every theme, so the mix is compared as a whole)
+    const routes = [0, 1, 2, 3, 4, 5].map((k) => generateRopeRoute({ seed: 900 + k * 37, grade: 5 }));
+    expect(routes.every((r) => r.profile !== undefined)).toBe(true);
+    expect(new Set(routes.map((r) => r.wallAngle)).size).toBeGreaterThanOrEqual(2);
+    const mix = routes.map(mixOf);
+    let spread = 0;
+    for (let i = 0; i < mix.length; i++) for (let j = i + 1; j < mix.length; j++) spread = Math.max(spread, mix[i].reduce((a, v, t) => a + Math.abs(v - mix[j][t]), 0));
+    expect(spread).toBeGreaterThanOrEqual(0.3);
     // the crux (55–75 % of the height) is set on poorer holds than the start (below 4.2 m)
     const mean = (pick: (r: (typeof routes)[number], y: number) => boolean) => {
       let sum = 0;

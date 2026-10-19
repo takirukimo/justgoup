@@ -28,11 +28,17 @@ function some(style: RouteStyle, profiles = false, grades = [1, 4, 7, 10]): Boul
 }
 
 describe('archetypes — the wall and the line each style claims', () => {
-  it('the multi-angle switch ships OFF (the renderer folds panels later); profile styles fall back', () => {
-    expect(GEN.profiles).toBe(false);
+  it('the multi-angle switch ships ON (the renderer folds the panels); without it profile styles fall back', () => {
+    expect(GEN.profiles).toBe(true);
     expect(availableStyles(false)).not.toContain('cave');
     expect(availableStyles(true)).toContain('cave');
-    const b = generateBoulder({ seed: 7, grade: 6, style: 'cave' });
+    // the shipped default: a cave is a folded wall with a roof
+    const c = generateBoulder({ seed: 7, grade: 6, style: 'cave' });
+    expect(c.style).toBe('cave');
+    expect(c.profile!.length).toBeGreaterThanOrEqual(3);
+    expect(c.wallAngle).toBeGreaterThanOrEqual(65);
+    // profiles off (per problem): the closest flat relative, a steep overhang
+    const b = generateBoulder({ seed: 7, grade: 6, style: 'cave', profiles: false });
     expect(b.profile).toBeUndefined();
     expect(b.style).toBe('overhang');
     expect(b.wallAngle).toBeGreaterThanOrEqual(25);
@@ -200,7 +206,7 @@ describe('archetypes — rotation (Send Train) and the daily problem', () => {
     const seq: string[] = [];
     for (let i = 0; i < 5; i++) {
       const b = generateBoulder({ seed: 3000 + i * 17, grade: Math.min(12, i), run: { seed: 4711, index: i } });
-      expect(b.style).toBe(runStyle(4711, i, false));
+      expect(b.style).toBe(runStyle(4711, i, GEN.profiles));
       seq.push(b.style!);
     }
     for (let i = 1; i < seq.length; i++) expect(seq[i]).not.toBe(seq[i - 1]);
@@ -223,13 +229,15 @@ describe('archetypes — rotation (Send Train) and the daily problem', () => {
     expect(dailyStyle(days[6], true)).toBe('cave');
     for (const k of days.slice(0, 7)) {
       const b = dailyBoulder(k);
-      expect(b.style).toBe(dailyStyle(k, false));
+      // the daily problem follows the shipped switch (profiles ON: Sunday is a cave)
+      expect(b.style).toBe(dailyStyle(k, GEN.profiles));
       expect(b.grade).toBe(dailyGrade(k));
       const label = wallLabel(b);
       if (b.style === 'slab') expect(label.kind).toBe('SLAB');
       if (b.style === 'traverse') expect(label.style).toBe('TRAVERSE');
       if (b.style === 'dyno') expect(label.style).toBe('DYNO');
       if (b.style === 'compression') expect(label.style).toBe('COMPRESSION');
+      if (b.style === 'cave') expect(label.style).toBe('CAVE');
     }
   });
 });
