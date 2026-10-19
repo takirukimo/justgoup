@@ -2100,7 +2100,17 @@ export class LimbControls implements LimbControlsAPI {
       tagOn = true;
     } else if (c && this.homo.map(c.x, c.y, this.s0)) {
       const other = state.limbs[IDS[idx ^ 1]];
-      const type = c.role === 'top' && idx < 2 ? 'TOP' : other.holdId === c.id && !other.dragging ? 'MATCH' : TYPE_WORD[c.type];
+      // in a special stance the grab is the way out: a hand sits up out of a bat hang, a foot steps out of a figure 4
+      const type =
+        state.special === 'bat' && idx < 2
+          ? 'SIT UP'
+          : state.special === 'figure4' && idx >= 2
+            ? 'STEP OUT'
+            : c.role === 'top' && idx < 2
+              ? 'TOP'
+              : other.holdId === c.id && !other.dragging
+                ? 'MATCH'
+                : TYPE_WORD[c.type];
       this.setTagText(this.candTag, qualityWord(this.quality), type, qualityColor(this.quality));
       const rpx = holdRadius(c) * this.homo.scaleAt(c.x, c.y, this.s2, this.s3);
       this.placeTag(this.candTag, this.s0.x, this.s0.y, rpx, h.x, h.y);
