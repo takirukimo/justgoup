@@ -175,6 +175,7 @@ import {
   type StaticsParams,
 } from './statics';
 import { Forearm } from './forearm';
+import { fig4Capacity, fig4HandOf, fig4LegReaches, fig4Pose } from './figure4';
 
 /**
  * ClimberSim construction options: the shared SimOptions plus Phase B body-model settings (kept out of
@@ -570,6 +571,18 @@ export class ClimberSim implements ClimberSimAPI {
   /** Chest depth off the wall (m) in the hang (the spine points out of the wall under a roof). */
   private batChestDepth = 0;
   private readonly batInfo = { fatigue: 0, blend: 0 };
+  /** Figure 4: the holding hand (0 / 1) and the leg over its arm (3 / 2), −1 when none; 0..1 press-up blend. */
+  private f4Hand = -1;
+  private f4Leg = -1;
+  private f4Blend = 0;
+  /** −1 pressing up / holding, +1 stepping down out of it onto the foot that went back on (f4Out). */
+  private f4Dir = -1;
+  private readonly f4Out: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
+  private f4OutDepth = 0;
+  private readonly f4From: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
+  private f4FromDepth = 0;
+  private readonly f4Target: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
+  private readonly f4Info: { hand: 'LH' | 'RH'; leg: 'LF' | 'RF'; blend: number } = { hand: 'LH', leg: 'RF', blend: 0 };
   private readonly flightInfo: FlightInfo = { kind: 'deadpoint', limbs: [], holdId: '', t: 0, apexIn: 0, power: 1 };
 
   constructor(boulder: BoulderDef, opts: ClimberSimOptions = {}) {
@@ -668,10 +681,8 @@ export class ClimberSim implements ClimberSimAPI {
     this.stats.maxPump = 0;
     this.stats.batHangs = 0;
     this.stats.figure4s = 0;
-    this.special = null;
+    this.clearSpecial();
     this.batFatigue = 0;
-    this.batDir = 0;
-    this.batBlend = 0;
     const place = startPlacement(this.boulder);
     this.placeLimbs(place, true);
     this.settle(1.6);
@@ -741,6 +752,8 @@ export class ClimberSim implements ClimberSimAPI {
     if (L.busy || L.dragging) return false;
     // in a bat hang the feet hold the climber (moving one drops them); a sit-up is in progress
     if (this.special === 'bat' && (i >= 2 || this.batDir > 0)) return false;
+    // in a figure 4 the leg is over the holding arm: that hand stays (and nothing moves while stepping out of it)
+    if (this.special === 'figure4' && (i === this.f4Hand || this.f4Dir > 0)) return false;
     if (this.special === 'bat') L.shakeOut = false;
     const held = L.hold;
     const wasAttached = !!held || L.smear;
@@ -815,10 +828,37 @@ export class ClimberSim implements ClimberSimAPI {
       return out;
     }
 
-    if (!hold && i < 2 && opts?.velocity && !this.flight) {
+    if (!hold && i < 2 && opts?.velocity && !this.flight && !this.special) {
       // a committed flick toward a hold beyond the static reach throws a deadpoint / dyno
       const thrown = this.flickThrow(i, p, opts.velocity);
       if (thrown) return thrown;
+    }
+    if (this.special === 'figure4' && i >= 2) {
+      // in a figure 4: a foot on a hold (or smearing) ends it; dropped over nothing the leg hooks the arm again
+      // (the figure-4 leg) or hangs (the other one)
+      if (hold) {
+        this.attach(i, hold);
+        this.stats.moves++;
+        out.push({ type: 'grab', limb, holdId: hold.id, quality: this.predictGrip(limb, hold.id) });
+        if (L.mode && L.mode !== 'edge') out.push({ type: 'technique', limb, technique: L.mode as 'heel' | 'toe' | 'drop' | 'cam' });
+        this.exitFig4();
+      } else if (this.smearableAt(p.y) && this.smearSpot(i, p.x, p.y) && this.smearableAt(this.smearTmp.y)) {
+        this.attachSmear(i, this.smearTmp.x, this.smearTmp.y);
+        this.stats.moves++;
+        out.push({ type: 'smear', limb });
+        this.exitFig4();
+      } else {
+        if (i === this.f4Leg) L.mode = 'figure4';
+        out.push({ type: 'return', limb, holdId: null });
+      }
+      this.syncState();
+      return out;
+    }
+    if (this.special === null && i >= 2 && this.figure4Candidate(limb, p) !== null && (!hold || hold === this.limbs[fig4HandOf(i)].hold)) {
+      // the foot dropped onto the opposite holding hand / forearm: hook the leg over it
+      this.figure4(limb as 'LF' | 'RF');
+      for (const e of this.events.splice(0)) out.push(e);
+      return out;
     }
     if (this.special === 'bat' && i < 2) {
       // in the hang: a hand onto a hold sits up onto it; over nothing it hangs (shakes out) again
@@ -907,6 +947,7 @@ export class ClimberSim implements ClimberSimAPI {
   chalkUp(hand: 'LH' | 'RH'): boolean {
     const i = LIMB_INDEX[hand];
     if (i > 1 || (this.phase !== 'climbing' && this.phase !== 'idle') || this.flight) return false;
+    if (this.special === 'figure4' && i === this.f4Hand) return false;
     const L = this.limbs[i];
     if (L.busy || L.dragging) return false;
     const held = L.hold;
@@ -945,6 +986,7 @@ export class ClimberSim implements ClimberSimAPI {
   shakeOut(hand: 'LH' | 'RH'): boolean {
     const i = LIMB_INDEX[hand];
     if (i > 1 || this.phase !== 'climbing' || this.flight) return false;
+    if (this.special === 'figure4' && i === this.f4Hand) return false;
     const L = this.limbs[i];
     if (L.busy || L.dragging || L.shakeOut) return false;
     if (!this.canShakeOut(i)) return false;
@@ -1070,7 +1112,7 @@ export class ClimberSim implements ClimberSimAPI {
    * hand on a hold for a deadpoint, a target a double dyno can't share).
    */
   dyno(limb: 'LH' | 'RH' | 'both', holdId: string, power = 1): SimEvent[] {
-    if (this.phase !== 'climbing' || this.flight) return [];
+    if (this.phase !== 'climbing' || this.flight || this.special) return [];
     const h = this.holdById.get(holdId);
     if (!h || !usableByHand(h)) return [];
     const hands = limb === 'both' ? [0, 1] : [LIMB_INDEX[limb]];
@@ -1833,6 +1875,294 @@ export class ClimberSim implements ClimberSimAPI {
     }
   }
 
+  // ═══════════════════════════════ advanced moves: figure 4 ═══════════════════════════════
+
+  /** Back to no special stance (no events). */
+  private clearSpecial(): void {
+    this.special = null;
+    this.batDir = 0;
+    this.batBlend = 0;
+    if (this.f4Leg >= 0 && this.limbs[this.f4Leg].mode === 'figure4') this.limbs[this.f4Leg].mode = null;
+    this.f4Hand = this.f4Leg = -1;
+    this.f4Blend = 0;
+    this.f4Dir = -1;
+  }
+
+  /**
+   * Could leg `leg` (2 LF / 3 RF) hook over the opposite arm into a figure 4 right now? That hand holds a
+   * positive hold (figure4.fig4Capacity ≥ SIM.fig4MinCap at its pump / chalk), its contact is within the
+   * leg's reach above the hip (fig4LegReaches), the climber is climbing (no flight, no other special stance).
+   */
+  private canFigure4(leg: number): boolean {
+    if (this.phase !== 'climbing' || this.flight || this.special || leg < 2) return false;
+    const k = fig4HandOf(leg);
+    const H = this.limbs[k];
+    const L = this.limbs[leg];
+    if (!H.hold || H.dragging || H.busy || L.busy) return false;
+    if (fig4Capacity(H.hold, this.angleAtY(H.cy), this.assist, this.handPump[k], this.handFric[k], this.strength) < SIM.fig4MinCap) return false;
+    this.frameNow();
+    return fig4LegReaches(this.ax[leg], this.ay[leg], H.cx, H.cy);
+  }
+
+  /**
+   * Figure 4 (advanced moves): hook leg `leg` over the opposite holding arm and press the body up on it. Both
+   * feet come off ('release' each); the free hand then reaches ≈0.3–0.45 m higher (figure4.fig4Pose). The
+   * holding forearm carries ≈SIM.fig4Load BW locked off (pumpy, × SIM.fig4Pump). Ends ('special-end',
+   * 'foot') when a foot goes back on a hold, or in a slip / fall. Events: 'release'…, 'technique'
+   * ('figure4'). false (nothing changes) when canFigure4 is false.
+   */
+  figure4(leg: 'LF' | 'RF'): boolean {
+    const li = LIMB_INDEX[leg];
+    if (!this.canFigure4(li)) return false;
+    const k = fig4HandOf(li);
+    for (let i = 2; i < 4; i++) {
+      const L = this.limbs[i];
+      L.dragging = false;
+      if (L.hold || L.smear) this.events.push({ type: 'release', limb: LIMB_IDS[i], holdId: L.hold ? L.hold.id : null });
+      if (L.hold) L.prevHold = L.hold;
+      L.hold = null;
+      L.smear = false;
+      L.flag = false;
+      L.camHold = null;
+      L.slipT = 0;
+      L.overloaded = false;
+      L.sfx = L.sfy = 0;
+      L.mode = i === li ? 'figure4' : null;
+    }
+    const H = this.limbs[k];
+    if (H.shakeOut) this.endShakeOut(k);
+    this.special = 'figure4';
+    this.f4Hand = k;
+    this.f4Leg = li;
+    this.f4Blend = 0;
+    this.f4Dir = -1;
+    this.f4From.px = this.P.x;
+    this.f4From.py = this.P.y;
+    this.f4From.cx = this.C.x;
+    this.f4From.cy = this.C.y;
+    this.f4FromDepth = this.depth;
+    fig4Pose(this.f4From, H.cx, H.cy, k, this.f4Target);
+    this.hipTarget = null;
+    this.postureOn = false;
+    this.stanceHand = -1;
+    this.noHandsT = 0;
+    this.stats.figure4s++;
+    this.events.push({ type: 'technique', limb: leg, technique: 'figure4' });
+    this.syncState();
+    return true;
+  }
+
+  /**
+   * Which hand's arm foot `limb` released at p would hook into a figure 4 (input preview): the opposite hand,
+   * when it can (canFigure4) and p is within SIM.fig4Snap of its hand or forearm (hand → elbow, hanging
+   * below the hold toward the shoulder). null otherwise.
+   */
+  figure4Candidate(limb: LimbId, p: Vec2): 'LH' | 'RH' | null {
+    const li = LIMB_INDEX[limb];
+    if (li < 2 || !this.canFigure4(li)) return null;
+    const k = fig4HandOf(li);
+    const H = this.limbs[k];
+    // the forearm: from the hand toward the elbow (≈ BODY.forearm from the grip, on the way to the shoulder)
+    let ex = this.ax[k] - H.cx;
+    let ey = this.ay[k] - H.cy;
+    const el = Math.hypot(ex, ey) || 1;
+    ex /= el;
+    ey /= el;
+    const len = Math.min(BODY.forearm + BODY.handLen, el);
+    const t = clamp((p.x - H.cx) * ex + (p.y - H.cy) * ey, 0, len);
+    const d = Math.hypot(p.x - (H.cx + ex * t), p.y - (H.cy + ey * t));
+    return d <= SIM.fig4Snap ? LIMB_IDS[k] as 'LH' | 'RH' : null;
+  }
+
+  /** One fixed step of the figure 4: kinematic body pressed up on the holding arm, the hand carries it. */
+  private fig4Step(h: number): void {
+    this.time += h;
+    this.updateBusy(h);
+    if (this.special !== 'figure4') return;
+    const ease = (t: number): number => t * t * (3 - 2 * t);
+    const k = this.f4Hand;
+    const H = this.limbs[k];
+    const O = this.limbs[1 - k];
+    if (!H.hold) {
+      // the holding hand came off: no figure 4 without it
+      this.endFig4('slip');
+      return;
+    }
+    const opx = this.P.x;
+    const opy = this.P.y;
+    const ocx = this.C.x;
+    const ocy = this.C.y;
+    const exiting = this.f4Dir > 0;
+    this.f4Blend = exiting ? Math.max(0, this.f4Blend - h / SIM.fig4Exit) : Math.min(1, this.f4Blend + h / SIM.fig4Swing);
+    const e = ease(this.f4Blend);
+    // pressing up: from the stance it started in to the figure 4; stepping out: from the stance the foot
+    // went back on (f4Out) to the figure 4, unwinding
+    const F = exiting ? this.f4Out : this.f4From;
+    const fd = exiting ? this.f4OutDepth : this.f4FromDepth;
+    const T = this.f4Target;
+    const sway = Math.sin(this.time * 1.7) * 0.006 * e;
+    this.P.x = F.px + (T.px - F.px) * e + sway;
+    this.P.y = F.py + (T.py - F.py) * e;
+    this.C.x = F.cx + (T.cx - F.cx) * e + sway;
+    this.C.y = F.cy + (T.cy - F.cy) * e;
+    this.depth = fd + (SIM.fig4Depth - fd) * e;
+    this.Pv.x = (this.P.x - opx) / h;
+    this.Pv.y = (this.P.y - opy) / h;
+    this.Cv.x = (this.C.x - ocx) / h;
+    this.Cv.y = (this.C.y - ocy) / h;
+    const u = this.frameNow();
+    const rx = u.y;
+    const ry = -u.x;
+    // the other hand: a hold out of its reach from the pressed-up body lets go
+    if (O.hold && !O.dragging && envEvalOn(this.prof, 1 - k, this.ax[1 - k], this.ay[1 - k], u.x, u.y, O.cx, O.cy).excess > 0.1) {
+      this.events.push({ type: 'release', limb: LIMB_IDS[1 - k], holdId: O.hold.id });
+      O.prevHold = O.hold;
+      O.hold = null;
+      O.slipT = 0;
+      O.overloaded = false;
+      this.forearms[1 - k].release();
+      this.refreshMatch();
+    }
+    const side = k === 0 ? 1 : -1;
+    for (let i = 0; i < 4; i++) {
+      const L = this.limbs[i];
+      const ls = i === 0 || i === 2 ? -1 : 1;
+      if (L.hold) {
+        L.px = damp(L.px, L.cx, 30, h);
+        L.py = damp(L.py, L.cy, 30, h);
+        L.depth = damp(L.depth, i < 2 ? 0.03 : 0.02, 14, h);
+      } else if (L.dragging) {
+        const c = envClampOn(this.prof, i, this.ax[i], this.ay[i], u.x, u.y, L.tx, L.ty, 0);
+        L.px = damp(L.px, c.x, 30, h);
+        L.py = damp(L.py, c.y, 30, h);
+        L.depth = damp(L.depth, 0.12, 14, h);
+      } else if (L.busy && L.busyKind === 'chalk') {
+        L.px = damp(L.px, this.P.x - u.x * 0.1, 16, h);
+        L.py = damp(L.py, this.P.y - u.y * 0.1, 16, h);
+        L.depth = damp(L.depth, this.depth + 0.14, 12, h);
+      } else if (i === this.f4Leg) {
+        // the knee over the forearm near the elbow, the shin hanging past the arm's far side
+        L.px = damp(L.px, H.cx - side * 0.2, 12, h);
+        L.py = damp(L.py, H.cy - 0.5, 12, h);
+        L.depth = damp(L.depth, this.depth + 0.12, 10, h);
+      } else {
+        // the free leg hangs, the free arm rests by the side
+        const down = i < 2 ? 0.42 : 0.82;
+        L.px = damp(L.px, this.ax[i] - u.x * down + rx * ls * 0.06, 9, h);
+        L.py = damp(L.py, this.ay[i] - u.y * down + ry * ls * 0.06, 9, h);
+        L.depth = damp(L.depth, this.depth * 0.6 + 0.06, 6, h);
+      }
+    }
+    // loads: the holding hand carries the body (the other hand a share once it holds); stepping out, the
+    // stance's statics take over as the body comes down onto the foot
+    this.buildContacts();
+    const oShare = this.contacts[1 - k] ? SIM.fig4OtherShare : 0;
+    let stat: StanceEval | null = null;
+    if (exiting) {
+      this.syncPose();
+      const prm = this.prmScratch;
+      prm.reachLimb = -1;
+      prm.maxPelvisY = Infinity;
+      for (let i = 0; i < 2; i++) this.capPumpF[i] = pumpCapFactor(this.handPump[i]);
+      stat = evaluateStance(this.f4Out, this.contacts, prm, this.evScratch);
+    }
+    let worst = 0;
+    for (let i = 0; i < 4; i++) {
+      const L = this.limbs[i];
+      if (!this.contacts[i]) {
+        L.load = L.stress = L.cap = 0;
+        continue;
+      }
+      const a = this.angleAtY(L.cy);
+      let cap: number;
+      let load: number;
+      if (i === k) {
+        cap = fig4Capacity(L.hold!, a, this.assist, this.handPump[i], this.handFric[i], this.strength);
+        load = SIM.fig4Load * (1 - oShare);
+      } else if (i < 2) {
+        cap = fig4Capacity(L.hold!, a, this.assist, this.handPump[i], this.handFric[i], this.strength) / SIM.fig4Grip;
+        load = oShare;
+      } else {
+        cap = stat ? stat.cap[i] : 0.5;
+        load = 0;
+      }
+      if (stat) {
+        // weighted toward the figure 4 while the body is still up on the arm
+        cap = cap * e + stat.cap[i] * (1 - e);
+        load = load * e + stat.load[i] * (1 - e);
+      } else if (i === k) load = load * e + (1 - e) * L.load;
+      L.cap = Math.max(cap, 0.01);
+      L.load = load;
+      L.stress = L.load / L.cap;
+      L.sfx = L.sfy = 0;
+      if (L.stress > worst) worst = L.stress;
+      L.shake = damp(L.shake, smoothstep(0.75, 1.3, L.stress), 10, h);
+    }
+    for (let i = 0; i < 2; i++) this.capPumpF[i] = pumpCapFactor(this.handPump[i]);
+    this.tension = damp(this.tension, worst, 8, h);
+    this.shakeAmt = damp(this.shakeAmt, smoothstep(0.6, 1.3, this.tension), 8, h);
+    this.balance = 0;
+    this.barnAmt = 0;
+    this.yaw = damp(this.yaw, 0.25 * side * e, 4, h);
+    if (this.tension > this.stats.maxTension) this.stats.maxTension = this.tension;
+    this.updateForearms(h);
+    if (this.phase !== 'climbing') return;
+    if (exiting && this.f4Blend <= 0) {
+      this.endFig4('foot');
+      return;
+    }
+    this.updateSlips(h);
+    if (this.phase === 'climbing' && this.special === 'figure4') this.checkTop(h);
+  }
+
+  /**
+   * A foot went back on a hold in the figure 4: step down out of it onto the stance it now has (the statics'
+   * best pose for the hands + feet on, SIM.fig4Exit s), then 'special-end' ('foot').
+   */
+  private exitFig4(): void {
+    if (this.special !== 'figure4' || this.f4Dir > 0) return;
+    this.f4Dir = 1;
+    // the pressed-up pose the step-out unwinds from (exactly where the body is now)
+    this.f4Target.px = this.P.x;
+    this.f4Target.py = this.P.y;
+    this.f4Target.cx = this.C.x;
+    this.f4Target.cy = this.C.y;
+    this.f4Blend = 1;
+    this.buildContacts();
+    const prm = this.prmScratch;
+    prm.reachLimb = -1;
+    prm.maxPelvisY = Infinity;
+    this.syncPose();
+    const out = this.f4Out;
+    optimizePose(this.contacts, prm, this.pose, out, this.evScratch, 70);
+    evaluateStance(out, this.contacts, prm, this.evScratch);
+    this.f4OutDepth = this.evScratch.depth;
+    const L = this.limbs[this.f4Leg];
+    if (L.mode === 'figure4') L.mode = null;
+  }
+
+  /** Panel angle (degrees) at wall-local height y. */
+  private angleAtY(y: number): number {
+    return this.prof ? angleAt(this.prof, y) : this.boulder.wallAngle;
+  }
+
+  /** The figure 4 is over (stepped out onto a foot, or the holding hand came off): the normal body takes over from here. */
+  private endFig4(reason: 'foot' | 'slip'): void {
+    if (this.special !== 'figure4') return;
+    this.events.push({ type: 'special-end', special: 'figure4', reason });
+    this.clearSpecial();
+    this.Pv.x = this.Pv.y = this.Cv.x = this.Cv.y = 0;
+    const l = Math.hypot(this.C.x - this.P.x, this.C.y - this.P.y) || 1;
+    this.leanUx = (this.C.x - this.P.x) / l;
+    this.leanUy = (this.C.y - this.P.y) / l;
+    this.lean = 0;
+    this.posture.px = this.P.x;
+    this.posture.py = this.P.y;
+    this.postureOn = true;
+    for (const L of this.limbs) L.age = Math.max(L.age, SOFT_ATTACH);
+    this.retarget();
+  }
+
   // ═══════════════════════════════ queries ═══════════════════════════════
 
   snapCandidate(limb: LimbId, p: Vec2): HoldDef | null {
@@ -2010,6 +2340,7 @@ export class ClimberSim implements ClimberSimAPI {
       L.dragging = false;
     }
     this.flight = null;
+    this.clearSpecial();
     this.placeLimbs(place, false);
     this.settle(0.8);
     this.phase = 'climbing';
@@ -2802,6 +3133,7 @@ export class ClimberSim implements ClimberSimAPI {
       case 'topped':
         if (this.flight) this.flyStep(h);
         else if (this.special === 'bat') this.batStep(h);
+        else if (this.special === 'figure4') this.fig4Step(h);
         else this.climbStep(h, 1);
         break;
       case 'falling':
@@ -3491,7 +3823,8 @@ export class ClimberSim implements ClimberSimAPI {
         f *= 1 + FA.lockoffCost * bend;
         f += FA.barnCost * barn;
       }
-      fa.step(h, { f, gripping, shaking: L.shakeOut || L.busyKind === 'chalk', drainScale: drain, boost: this.special === 'bat' && !gripping ? SIM.batShakeBoost : 1 });
+      const d4 = this.special === 'figure4' && i === this.f4Hand ? SIM.fig4Pump : 1;
+      fa.step(h, { f, gripping, shaking: L.shakeOut || L.busyKind === 'chalk', drainScale: drain * d4, boost: this.special === 'bat' && !gripping ? SIM.batShakeBoost : 1 });
       if (this.invincible) {
         if (fa.w < 1 - SIM.pumpInvincibleCap) fa.w = 1 - SIM.pumpInvincibleCap;
         fa.exhausted = false;
@@ -3635,9 +3968,7 @@ export class ClimberSim implements ClimberSimAPI {
     }
     if (this.special) {
       this.events.push({ type: 'special-end', special: this.special, reason: reason === 'slip' ? 'slip' : 'fall' });
-      this.special = null;
-      this.batDir = 0;
-      this.batBlend = 0;
+      this.clearSpecial();
     }
     this.events.push({ type: 'fall', reason });
     this.phase = 'falling';
@@ -3904,6 +4235,7 @@ export class ClimberSim implements ClimberSimAPI {
    */
   private chestDepth(): number {
     if (this.special === 'bat') return this.batChestDepth;
+    if (this.special === 'figure4') return this.depth + 0.07;
     if (this.phase === 'climbing' || this.phase === 'idle' || this.phase === 'topped') {
       if (!this.flight) return chestDepthFor(this.depth, steepness(Math.max(0, this.gs)));
     }
@@ -3954,6 +4286,12 @@ export class ClimberSim implements ClimberSimAPI {
       this.batInfo.blend = this.batBlend;
       s.bat = this.batInfo;
     } else s.bat = null;
+    if (this.special === 'figure4') {
+      this.f4Info.hand = this.f4Hand === 0 ? 'LH' : 'RH';
+      this.f4Info.leg = this.f4Leg === 2 ? 'LF' : 'RF';
+      this.f4Info.blend = this.f4Blend;
+      s.figure4 = this.f4Info;
+    } else s.figure4 = null;
     this.updateLayers();
     for (let i = 0; i < 4; i++) {
       const L = this.limbs[i];
@@ -3974,7 +4312,7 @@ export class ClimberSim implements ClimberSimAPI {
       o.shake = L.shake;
       o.busy = L.busy;
       if (i >= 2) {
-        o.footMode = L.flag ? 'flag' : (L.hold || L.smear) && !L.dragging ? L.mode ?? 'edge' : undefined;
+        o.footMode = L.flag ? 'flag' : (L.hold || L.smear) && !L.dragging ? L.mode ?? 'edge' : L.mode === 'figure4' && !L.dragging ? 'figure4' : undefined;
         const cam = L.mode === 'cam' && !!L.hold && !L.dragging;
         o.camHoldId = cam && L.camHold ? L.camHold.id : null;
         if (cam) {

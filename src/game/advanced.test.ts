@@ -186,3 +186,119 @@ describe('bat hang', () => {
     expect(v.canBatHang()).toBe(false);
   });
 });
+
+describe('figure 4', () => {
+  /** Vertical wall: LH / RH on two start jugs at ≈2 m, feet on two jugs, `extra` holds. */
+  const wall = (extra: HoldDef[] = [], lh: HoldDef = hold('s1', -0.2, 2.0, 'jug', 0.11, 'start')): BoulderDef =>
+    makeBoulder(
+      [lh, hold('s2', 0.25, 2.05, 'jug', 0.11, 'start'), hold('f1', -0.25, 0.75, 'jug', 0.08, 'foot'), hold('f2', 0.3, 0.8, 'jug', 0.08, 'foot'), hold('t', 0, 4.1, 'jug', 0.12, 'top'), ...extra],
+      { startFeet: { LF: 'f1', RF: 'f2' } },
+    );
+  const grabs = (b: BoulderDef, fig4: boolean): boolean => {
+    const sim = new ClimberSim(b, { sweat: 0 });
+    sim.start();
+    run(sim, 1);
+    if (fig4) {
+      expect(sim.figure4('RF')).toBe(true);
+      run(sim, 0.8);
+    }
+    const ev = moveLimb(sim, 'RH', 'hi');
+    run(sim, 0.5, ev);
+    return sim.getState().limbs.RH.holdId === 'hi' && quiet(ev);
+  };
+
+  it('the leg over the holding arm presses the body up: the free hand reaches 0.3+ m higher than standing up into the reach', () => {
+    // the highest hold the right hand gets from the stance (the body follows the reach) …
+    let normal = 0;
+    for (let y = 2.6; y <= 3.4; y += 0.05) if (grabs(wall([hold('hi', 0.3, y, 'jug', 0.08, 'hand')]), false)) normal = y;
+    expect(normal).toBeGreaterThan(2.6);
+    // … and from the figure 4 (left hand holding, right leg over the left arm)
+    let fig4 = 0;
+    for (let y = normal; y <= normal + 0.7; y += 0.05) if (grabs(wall([hold('hi', 0.3, y, 'jug', 0.08, 'hand')]), true)) fig4 = y;
+    expect(fig4 - normal).toBeGreaterThanOrEqual(0.25);
+    expect(fig4 - normal).toBeLessThanOrEqual(0.5);
+  });
+
+  it("state, events and the end: both feet off, 'figure4' on the leg; a foot back on a hold ends it", () => {
+    const sim = new ClimberSim(wall([hold('hi', 0.3, 3.05, 'jug', 0.08, 'hand'), hold('g', -0.3, 1.45, 'jug', 0.08, 'foot')]), { sweat: 0 });
+    sim.start();
+    run(sim, 1);
+    const ev: SimEvent[] = [];
+    const y0 = sim.getState().pelvis.y;
+    expect(sim.figure4('RF')).toBe(true);
+    run(sim, 1, ev);
+    let s = sim.getState();
+    expect(ev.some((e) => e.type === 'technique' && e.technique === 'figure4' && e.limb === 'RF')).toBe(true);
+    expect(ev.filter((e) => e.type === 'release').map((e) => (e as { limb: string }).limb).sort()).toEqual(['LF', 'RF']);
+    expect(s.special).toBe('figure4');
+    expect(s.figure4).toEqual({ hand: 'LH', leg: 'RF', blend: 1 });
+    expect(s.limbs.RF.footMode).toBe('figure4');
+    expect(s.limbs.RF.holdId).toBeNull();
+    expect(s.limbs.LF.holdId).toBeNull();
+    expect(s.pelvis.y).toBeGreaterThan(y0 + 0.4);
+    // the holding hand can't let go (the leg is over it)
+    expect(sim.beginDrag('LH')).toBe(false);
+    moveLimb(sim, 'RH', 'hi', ev);
+    run(sim, 0.5, ev);
+    expect(sim.getState().limbs.RH.holdId).toBe('hi');
+    expect(sim.getState().special).toBe('figure4');
+    // a foot back on a hold: over
+    moveLimb(sim, 'LF', 'g', ev);
+    run(sim, 1, ev);
+    s = sim.getState();
+    expect(ev.some((e) => e.type === 'special-end' && e.special === 'figure4' && e.reason === 'foot')).toBe(true);
+    expect(s.special ?? null).toBeNull();
+    expect(s.figure4 ?? null).toBeNull();
+    expect(s.limbs.LF.holdId).toBe('g');
+    expect(s.limbs.RF.footMode).not.toBe('figure4');
+    expect(quiet(ev)).toBe(true);
+    expect(sim.getStats().figure4s).toBe(1);
+  });
+
+  it('it is pumpy: the holding forearm drains much faster than in the stance', () => {
+    const f4 = new ClimberSim(wall(), { sweat: 0 });
+    const ctrl = new ClimberSim(wall(), { sweat: 0 });
+    for (const s of [f4, ctrl]) {
+      s.start();
+      run(s, 1);
+    }
+    f4.figure4('RF');
+    run(f4, 0.6);
+    // the free hand comes off (reaching): the holding arm carries the body alone
+    f4.beginDrag('RH');
+    ctrl.beginDrag('RH');
+    run(f4, 4);
+    run(ctrl, 4);
+    expect(f4.getState().limbs.LH.load).toBeGreaterThan(0.6);
+    expect(f4.forearm('LH').pump).toBeGreaterThan(ctrl.forearm('LH').pump + 0.08);
+    expect(f4.getState().special).toBe('figure4');
+  });
+
+  it('needs a positive hold and the opposite leg; dropping that foot onto the holding forearm hooks it', () => {
+    // an edge doesn't hold a figure 4
+    const edge = new ClimberSim(wall([], hold('s1', -0.2, 2.0, 'edge', 0.05, 'start')), { sweat: 0 });
+    edge.start();
+    run(edge, 1);
+    expect(edge.figure4('RF')).toBe(false);
+    expect(edge.getState().limbs.RF.holdId).toBe('f2');
+    // the foot handle dropped just below the left hand (on the forearm)
+    const sim = new ClimberSim(wall(), { sweat: 0 });
+    sim.start();
+    run(sim, 1);
+    const lh = sim.getState().limbs.LH.pos;
+    const p = { x: lh.x + 0.03, y: lh.y - 0.12 };
+    sim.beginDrag('RF');
+    for (let k = 0; k < 20; k++) {
+      sim.dragTo('RF', p);
+      run(sim, 1 / 60);
+    }
+    expect(sim.figure4Candidate('RF', p)).toBe('LH');
+    // the left foot (same side as the hand) doesn't
+    expect(sim.figure4Candidate('LF', p)).toBeNull();
+    const ev = sim.endDrag('RF');
+    run(sim, 1, ev);
+    expect(ev.some((e) => e.type === 'technique' && e.technique === 'figure4')).toBe(true);
+    expect(sim.getState().special).toBe('figure4');
+    expect(sim.getState().figure4!.hand).toBe('LH');
+  });
+});

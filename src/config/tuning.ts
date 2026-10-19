@@ -299,6 +299,35 @@ export const SIM = {
   batSitUpPump: 0.04,
   /** With no hand on and both feet able to bat-hang, the climber falls back into the hang after this (s). */
   batAutoAfter: 0.5,
+  // ── Figure 4 (advanced moves): the leg hooked over the opposite holding arm, the body pressed up on it ──
+  /** Load on the holding hand in a figure 4 (BW; the knee on the arm and the body against the wall share a little). */
+  fig4Load: 0.75,
+  /** × the hand's capacity for a straight-down pull on its hold: the arm is locked, the leg presses it onto the hold. */
+  fig4Grip: 1.15,
+  /** A figure 4 needs a positive hold: the holding hand's figure-4 capacity (above) at least this (BW). */
+  fig4MinCap: 0.82,
+  /** The pelvis presses up to this far (m) below the holding hand (the climber sits on the arm, the hold at the hip)… */
+  fig4Drop: 0.03,
+  /**
+   * …rising at most this much (m) from where the move started. From a stance the free hand then reaches
+   * ≈0.3–0.45 m higher than it could by standing up into the reach.
+   */
+  fig4Rise: 0.75,
+  /** Pelvis offset (m) from the holding hand toward the free side (the thigh crosses over the arm). */
+  fig4Side: 0.14,
+  /** Pelvis wall distance (m) in the figure 4 (pressed in). */
+  fig4Depth: 0.16,
+  /** Seconds the body takes to press up into the figure 4, and to step down out of it onto a foot. */
+  fig4Swing: 0.6,
+  fig4Exit: 0.45,
+  /** × the holding forearm's W′ drain while in the figure 4 (a locked-off, one-arm position: pumpy). */
+  fig4Pump: 1.5,
+  /** Share of the weight the other hand takes once it holds a hold too. */
+  fig4OtherShare: 0.35,
+  /** The leg reaches over the arm only with the holding hand within this (m) of its hip joint, above the hip. */
+  fig4LegReach: 1.15,
+  /** A foot dropped within this (m) of the holding hand / forearm hooks over it (figure4Candidate). */
+  fig4Snap: 0.2,
   // ── High feet (shared sim + render spec, v0.2 playtest: "feet should go above hip height") ──
   /**
    * A foot target more than this (m) above its hip joint (body frame) is a high step / high hook: it needs a
