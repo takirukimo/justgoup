@@ -37,6 +37,10 @@ declare global {
       open(n?: number): Promise<void>;
       /** PNG data URL of a generated sample photo (for file-input QA; it becomes the truth for holdScreen). */
       samplePng(n: number): Promise<string>;
+      /** PNG data URL of a photo generated from these options (bad-photo QA); it becomes the truth. */
+      synthPng(o: SynthOptions, scale?: number): Promise<string>;
+      /** Screen point (css px, page coords) of a wall point (m: x from the centre, y up) in the current view. */
+      wallScreen(x: number, y: number): { x: number; y: number } | null;
       /** Screen point (css px, page coords) of a generated truth hold in the current step's view. */
       holdScreen(i: number): { x: number; y: number } | null;
       /** Screen points of the photo's true wall corners (FRAME step). */
@@ -80,6 +84,8 @@ const state: NonNullable<Window['__photo']> = {
   result: undefined,
   open,
   samplePng,
+  synthPng,
+  wallScreen,
   holdScreen,
   trueCorners,
   claudeCalls: 0,
@@ -181,6 +187,28 @@ function makeSample(n: number): SynthResult {
 async function samplePng(n: number): Promise<string> {
   state.synth = makeSample(n);
   return photoCanvas(state.synth).toDataURL('image/png');
+}
+
+async function synthPng(o: SynthOptions, scale = 1): Promise<string> {
+  state.synth = synthPhoto({ photoW: 900, photoH: 1200, ppm: 200, ...o });
+  const c = photoCanvas(state.synth);
+  if (scale === 1) return c.toDataURL('image/png');
+  // a downscaled copy (a thumbnail); the truth's corners scale with it
+  const d = document.createElement('canvas');
+  d.width = Math.max(1, Math.round(c.width * scale));
+  d.height = Math.max(1, Math.round(c.height * scale));
+  d.getContext('2d')!.drawImage(c, 0, 0, d.width, d.height);
+  state.synth = { ...state.synth, quad: state.synth.quad.map((p) => ({ x: p.x * scale, y: p.y * scale })) as SynthResult['quad'] };
+  return d.toDataURL('image/png');
+}
+
+function wallScreen(x: number, y: number): { x: number; y: number } | null {
+  const imp = state.importer;
+  const s = state.synth;
+  if (!imp || !s) return null;
+  const p = imp.toScreen({ x: ((x + s.wallW / 2) / s.wallW) * imp.rectW, y: ((s.wallH - y) / s.wallH) * imp.rectH });
+  const r = (document.querySelector('.ph-stage') as HTMLElement).getBoundingClientRect();
+  return { x: r.left + p.x, y: r.top + p.y };
 }
 
 function holdScreen(i: number): { x: number; y: number } | null {

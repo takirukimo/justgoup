@@ -16,7 +16,8 @@ import { WALL_PRESETS, WALL_TYPE_LABEL, wallTypeOf, presetById, presetWall, side
 import { colorName, labToHex } from './color';
 import { CV, inHull } from './cv';
 import { PhotoEngine } from './engine';
-import { applyH, defaultQuad, quadAspect, quadValid, rectSize, rectToPhoto } from './geometry';
+import { applyH, defaultQuad, quadArea, quadAspect, quadValid, rectSize, rectToPhoto } from './geometry';
+import { colorAdvice, decodeAdvice, frameAdvice, holdsAdvice, holdsReady, photoAdvice, rolesAdvice, SENSITIVITY_STEP, type Advice, type AdviceAction } from './advice';
 import { altWalls, buildWithReport, guessRoles, nearestPreset, placeHolds, routeColorFor, ROUTE, wallFor } from './route';
 import { Analyzer } from '../editor/analyzer';
 import { gradeLabel } from '../game/grades';
@@ -114,6 +115,10 @@ export class PhotoImporter {
   private photo: HTMLCanvasElement | null = null;
   quad: Quad | null = null;
   private photoError = '';
+  /** A warning about the picked photo itself (small, panorama), shown while framing. */
+  private photoWarn: Advice | null = null;
+  /** The straightened wall's own colour (the detector's median), for the colour-tap check. */
+  private wallLab: Lab | null = null;
   // straightened wall
   private rect: HTMLCanvasElement | null = null;
   private rectKey = '';
@@ -349,11 +354,20 @@ export class PhotoImporter {
     this.photoError = '';
     this.setBusy('Reading photo');
     try {
-      const canvas = await decodePhoto(file, IMPORT.photoLong);
+      const { canvas, srcW, srcH } = await decodePhoto(file, IMPORT.photoLong);
+      const warn = photoAdvice(srcW, srcH);
+      if (warn?.level === 'bad') {
+        this.setBusy('');
+        this.photoError = warn.body;
+        this.go('photo');
+        return;
+      }
+      this.photoWarn = warn;
       const g = canvas.getContext('2d', { willReadFrequently: true })!;
       const data = g.getImageData(0, 0, canvas.width, canvas.height);
       await this.engine.setPhoto({ width: data.width, height: data.height, data: data.data });
       this.photo = canvas;
+      this.wallLab = null;
       this.quad = defaultQuad(canvas.width, canvas.height);
       this.rect = null;
       this.rectKey = '';
@@ -371,7 +385,7 @@ export class PhotoImporter {
       this.go('frame');
     } catch {
       this.setBusy('');
-      this.photoError = 'That file isn’t a photo we can read. Try a JPEG or PNG.';
+      this.photoError = decodeAdvice(file.type, file instanceof File ? file.name : '');
       this.go('photo');
     }
   }
@@ -439,7 +453,10 @@ export class PhotoImporter {
       case 'frame': {
         const reset = button({ label: 'RESET', variant: 'ghost', cls: 'ph-reset', onTap: () => this.resetQuad() });
         const next = button({ label: 'STRAIGHTEN', variant: 'primary', cls: 'ph-next', icon: 'arrow', iconAfter: true, onTap: () => void this.straighten() });
-        s.append(head('Frame the wall', 'Drag the corners to the wall’s edges, floor to top. We’ll straighten it.'), el('div', 'ph-actions', reset, next));
+        s.append(head('Frame the wall', 'Drag the corners to the wall’s edges, floor to top. We’ll straighten it.'));
+        const adv = this.frameWarn() ?? this.photoWarn;
+        if (adv) s.appendChild(this.adviceEl(adv));
+        s.appendChild(el('div', 'ph-actions', reset, next));
         break;
       }
       case 'color': {
@@ -478,12 +495,16 @@ export class PhotoImporter {
               ? 'Add a tap where the light changes, or find the holds.'
               : 'Tap one of your problem’s holds. Pinch to zoom in.'
             : 'Tap a look-alike colour that isn’t yours, like purple next to blue.';
-        s.append(head('Tap your colour', hint), seg, sw, el('div', 'ph-actions', next));
+        s.append(head('Tap your colour', hint), seg, sw);
+        const wallTap = inc.length ? inc.map((x) => colorAdvice(x.lab, this.wallLab)).find((a) => a) : null;
+        if (wallTap) s.appendChild(this.adviceEl(wallTap));
+        s.appendChild(el('div', 'ph-actions', next));
         break;
       }
       case 'holds': {
         const n = this.included().length;
-        const title = this.detecting && !this.detected ? 'Finding holds…' : `${n} hold${n === 1 ? '' : 's'} found`;
+        const advice = this.detected ? this.holdsAdvice() : [];
+        const title = this.detecting && !this.detected ? 'Finding holds…' : n === 0 ? 'No holds found' : `${n} hold${n === 1 ? '' : 's'} found`;
         const slider = el('input', 'ph-range');
         slider.type = 'range';
         slider.min = '0';
@@ -499,12 +520,11 @@ export class PhotoImporter {
         });
         const sens = el('label', 'ph-sens', el('span', 'ph-lbl', 'SENSITIVITY'), slider, val);
         s.append(head(title, 'Tap a hold to drop it, or an empty spot to add one.'));
-        const scale = this.scaleWarning();
-        if (scale) s.appendChild(el('p', 'ph-err ph-warn', icon('warn', 'ph-err-ic'), el('span', null, scale)));
+        if (advice.length && !this.detecting) s.appendChild(this.adviceEl(advice[0]));
         s.appendChild(sens);
         if (this.claude && !this.claudeHidden) s.appendChild(this.claudeBlock());
         else if (this.claudeNote) s.appendChild(this.noteEl());
-        const next = button({ label: 'NEXT', variant: 'primary', cls: 'ph-next', icon: 'arrow', iconAfter: true, disabled: n === 0, onTap: () => this.go('roles') });
+        const next = button({ label: 'NEXT', variant: 'primary', cls: 'ph-next', icon: 'arrow', iconAfter: true, disabled: !holdsReady(n), onTap: () => this.go('roles') });
         s.appendChild(el('div', 'ph-actions', next));
         break;
       }
@@ -528,10 +548,13 @@ export class PhotoImporter {
           el('span', `ph-chip${top !== null ? ' ok' : ''}`, top !== null ? 'TOP ✓' : 'TOP —'),
           el('span', `ph-chip${this.handCount() >= 4 ? ' ok' : ''}`, `HANDS ${this.handCount()}`),
         );
-        const ok = starts.length >= 1 && top !== null;
+        const adv = this.rolesAdvice();
+        const ok = starts.length >= 1 && top !== null && adv?.level !== 'bad';
         const next = button({ label: 'NEXT', variant: 'primary', cls: 'ph-next', icon: 'arrow', iconAfter: true, disabled: !ok, onTap: () => this.go('wall') });
         const hint = this.roleMode === 'start' ? 'Tap 1 or 2 start holds. Tap again to clear one.' : 'Tap the top hold: match both hands on it to send.';
-        s.append(head('Start and top', hint), seg, status, el('div', 'ph-actions', next));
+        s.append(head('Start and top', hint), seg, status);
+        if (adv) s.appendChild(this.adviceEl(adv));
+        s.appendChild(el('div', 'ph-actions', next));
         break;
       }
       case 'wall': {
@@ -564,17 +587,67 @@ export class PhotoImporter {
     }
   }
 
-  /**
-   * Research §5.1 sanity check: the median hold should be 8–25 cm. Far off means the corners do not span
-   * the wall from floor to top (or the photo is of a board / a detail).
-   */
-  private scaleWarning(): string {
-    const inc = this.included().filter((h) => h.kind === 'hold');
-    if (inc.length < 4) return '';
-    const m = [...inc.map((h) => h.major / this.ppm())].sort((a, b) => a - b)[inc.length >> 1];
-    if (m < 0.045) return 'Holds look tiny: do the corners frame just the wall, floor to top?';
-    if (m > 0.32) return 'Holds look huge: drag the corners out to the whole wall, floor to top.';
-    return '';
+  /** The detection's advice: nothing found, too loose a colour, too many / few holds, the frame's scale. */
+  private holdsAdvice(): Advice[] {
+    const inc = this.included();
+    const holds = inc.filter((h) => h.kind === 'hold');
+    const medianM = holds.length >= 4 ? [...holds.map((h) => (h.sizeM ?? h.major / this.ppm()))].sort((a, b) => a - b)[holds.length >> 1] : null;
+    const mask = this.detected?.mask;
+    let on = 0;
+    if (mask) for (let i = 0; i < mask.length; i++) on += mask[i];
+    return holdsAdvice({ n: inc.length, coverage: mask && mask.length ? on / mask.length : 0, medianM, sensitivity: this.sensitivity });
+  }
+
+  /** The framed wall: too small in the photo, or much wider than tall. */
+  private frameWarn(): Advice | null {
+    if (!this.quad || !this.photo) return null;
+    const area = quadArea(this.quad) / (this.photo.width * this.photo.height);
+    return frameAdvice(area, quadAspect(this.quad, this.photo.width, this.photo.height));
+  }
+
+  /** Start / top on the chosen wall (heights in metres). */
+  private rolesAdvice(): Advice | null {
+    const inc = this.included();
+    const { starts, top } = this.resolveRoles();
+    const wall = wallFor(this.presetId);
+    const placed = placeHolds(inc, this.rectW, this.rectH, wall.length);
+    return rolesAdvice({ startYs: starts.map((i) => placed[i].y), topY: top !== null ? placed[top].y : null, hands: this.handCount() });
+  }
+
+  /** A message with the buttons that act on it. */
+  private adviceEl(a: Advice): HTMLElement {
+    const box = el('div', `ph-adv ${a.level}`, icon('warn', 'ph-adv-ic'), el('p', 'ph-adv-t', el('b', null, a.title), el('span', null, ' ' + a.body)));
+    box.setAttribute('role', 'status');
+    const LABEL: Partial<Record<AdviceAction, string>> = { more: 'FIND MORE', less: 'FIND FEWER', recolor: 'TAP A HOLD AGAIN', exclude: 'ADD NOT THIS', reframe: 'FIX THE CORNERS' };
+    const acts = (a.actions ?? []).filter((x) => LABEL[x]);
+    if (acts.length) {
+      const row = el('div', 'ph-adv-acts');
+      for (const x of acts) row.appendChild(button({ label: LABEL[x]!, variant: 'glass', cls: 'ph-adv-b', onTap: () => this.act(x) }));
+      box.appendChild(row);
+    }
+    return box;
+  }
+
+  private act(x: AdviceAction): void {
+    switch (x) {
+      case 'more':
+      case 'less':
+        this.sensitivity = clamp(this.sensitivity + (x === 'more' ? SENSITIVITY_STEP : -SENSITIVITY_STEP), 0, 1);
+        this.renderSheet();
+        void this.detect();
+        this.say(`Sensitivity ${Math.round(this.sensitivity * 100)}`);
+        break;
+      case 'recolor':
+      case 'exclude':
+        this.pickMode = x === 'exclude' ? 'exclude' : 'match';
+        this.go('color');
+        break;
+      case 'reframe':
+        this.go('frame');
+        break;
+      case 'add':
+        break;
+    }
   }
 
   private segmented(options: { id: string; label: string }[], value: string, onChange: (v: string) => void): HTMLElement {
@@ -662,6 +735,8 @@ export class PhotoImporter {
       c.classList.remove('drag');
       if (c.hasPointerCapture(e.pointerId)) c.releasePointerCapture(e.pointerId);
       this.hideLoupe();
+      // the frame's advice follows the corners
+      if (this.step === 'frame') this.renderSheet();
     };
     c.addEventListener('pointerup', end);
     c.addEventListener('pointercancel', end);
@@ -698,7 +773,8 @@ export class PhotoImporter {
     try {
       const aspect = quadAspect(this.quad, this.photo.width, this.photo.height);
       const { w, h } = rectSize(aspect, IMPORT.rectLong);
-      const { image } = await this.engine.rectify(this.quad, w, h);
+      const { image, wall } = await this.engine.rectify(this.quad, w, h);
+      this.wallLab = wall;
       const c = document.createElement('canvas');
       c.width = image.width;
       c.height = image.height;
@@ -1722,7 +1798,7 @@ function spotlight(rect: HTMLCanvasElement, mask: Uint8Array): HTMLCanvasElement
 }
 
 /** Decode an image file with its EXIF orientation applied, downscaled to `long` px on its long edge. */
-export async function decodePhoto(file: Blob, long: number): Promise<HTMLCanvasElement> {
+export async function decodePhoto(file: Blob, long: number): Promise<{ canvas: HTMLCanvasElement; srcW: number; srcH: number }> {
   let src: ImageBitmap | HTMLImageElement;
   let w: number;
   let h: number;
@@ -1754,5 +1830,5 @@ export async function decodePhoto(file: Blob, long: number): Promise<HTMLCanvasE
   g.imageSmoothingQuality = 'high';
   g.drawImage(src, 0, 0, c.width, c.height);
   if ('close' in src) src.close();
-  return c;
+  return { canvas: c, srcW: w, srcH: h };
 }
