@@ -410,7 +410,8 @@ export function handSite(
       // fingers' span along it; a horn is wrapped round the middle of its shaft
       const zLo = def.style === 'horn' ? s.depth * 0.3 : -Infinity;
       const zHi = def.style === 'horn' ? s.depth * 0.72 : Infinity;
-      support(s, gx, gy, def.lipZ, cx, cy, _X.x, _X.y, 0.022, Infinity, out.p, zLo, zHi);
+      // (a narrow strip: a hand turned toward the arm still hooks the lip right where the sim holds it)
+      support(s, gx, gy, def.lipZ, cx, cy, _X.x, _X.y, 0.007, Infinity, out.p, zLo, zHi);
       out.n.copy(_Y).multiplyScalar(0.8).addScaledVector(_Z, 0.6).normalize();
       handAxes(_Y, beta, out);
       contactLocal(def, side, null, out);
@@ -447,26 +448,24 @@ export function handSite(
         const z = convexHeight(s, cx, cy, out.n);
         out.p.set(cx, cy, z);
       } else {
-        _a.copy(_Y).multiplyScalar(0.5).addScaledVector(_Z, 0.866);
-        support(s, _a.x, _a.y, _a.z, cx, cy, _X.x, _X.y, 0.03, Infinity, out.p);
+        _a.copy(_Y).multiplyScalar(0.22).addScaledVector(_Z, 0.975).normalize();
+        support(s, _a.x, _a.y, _a.z, cx, cy, _X.x, _X.y, 0.01, Infinity, out.p);
         out.n.copy(_a);
       }
       out.up.copy(out.n);
       out.dir.copy(_Y).addScaledVector(out.n, -_Y.dot(out.n));
       if (out.dir.lengthSq() < 1e-6) out.dir.set(0, 1, 0).addScaledVector(out.n, -out.n.y);
       out.dir.normalize();
-      out.local.set(0, PALM * 0.52, -PALM_SKIN);
+      // a dome: the knuckles sit on its front, the fingers follow it over the top and the palm lies on
+      // the front below (convex: it curves away under both); a flat face: the palm's centre
+      out.local.set(0, def.style === 'drape' ? PALM : PALM * 0.52, -PALM_SKIN * (def.style === 'drape' ? 0.7 : 1));
       if (def.style === 'drape') {
-        // the fingers follow the dome down: curl each by how far the surface falls away under it
+        // each finger bends segment by segment to stay on the surface as it falls away
         _hx.crossVectors(out.dir, out.up);
         for (let f = 0; f < 4; f++) {
           const kx = FING_X[f] * side;
-          _c.copy(out.p).addScaledVector(out.dir, PALM - out.local.y + 0.04 * FING_L[f]).addScaledVector(_hx, kx);
-          const h = heightUnder(s, _c, out.up, _hx, out.dir, 0.012);
-          const drop = h === -Infinity ? 0.05 : Math.max(0, -h);
-          const k = Math.min(1.1, Math.atan2(drop, 0.04) * 1.15);
-          out.a[f] = 0.12 + k;
-          out.b[f] = 0.08 + k * 0.7;
+          _c.copy(out.p).addScaledVector(_hx, kx - out.local.x).addScaledVector(out.up, PAD_A);
+          fitFinger(s, _c, out.dir, out.up, _hx, FING_A * FING_L[f], FING_B * FING_L[f], f, out);
         }
       }
       break;
@@ -493,6 +492,46 @@ export function handSite(
     }
   }
   return out;
+}
+
+/** Surface height along n at q (hold-local); past the hold's outline, the plane it is bolted to (z = 0). */
+function surfaceAlong(s: HoldSurface, q: THREE.Vector3, n: THREE.Vector3, u: THREE.Vector3, v: THREE.Vector3): number {
+  const h = heightUnder(s, q, n, u, v, 0.009);
+  if (h !== -Infinity) return h;
+  return n.z > 0.2 ? -q.z / n.z : -0.08;
+}
+
+const _fe = new THREE.Vector3();
+const _fd = new THREE.Vector3();
+
+/**
+ * Bend finger f over the surface from its knuckle `k` (on the centre line, a pad above the surface):
+ * each segment takes the smallest bend toward the palm that brings its end down to the surface (a pad
+ * above it) → out.a[f], out.b[f]. The finger never bends back.
+ */
+function fitFinger(s: HoldSurface, k: THREE.Vector3, dir: THREE.Vector3, up: THREE.Vector3, hx: THREE.Vector3, la: number, lb: number, f: number, out: HandSite): void {
+  let base = 0;
+  _fe.copy(k);
+  for (let seg = 0; seg < 2; seg++) {
+    const len = seg === 0 ? la : lb;
+    const pad = seg === 0 ? PAD_A : PAD_B;
+    let best = 1.25;
+    for (let i = 0; i <= 12; i++) {
+      const ang = base + i * 0.1;
+      _fd.copy(dir).multiplyScalar(Math.cos(ang)).addScaledVector(up, -Math.sin(ang));
+      _d.copy(_fe).addScaledVector(_fd, len);
+      const gap = -surfaceAlong(s, _d, up, hx, dir);
+      if (gap <= pad * 1.15) {
+        best = i * 0.1;
+        break;
+      }
+    }
+    if (seg === 0) out.a[f] = 0.06 + best;
+    else out.b[f] = 0.04 + best;
+    base += best;
+    _fd.copy(dir).multiplyScalar(Math.cos(base)).addScaledVector(up, -Math.sin(base));
+    _fe.addScaledVector(_fd, len);
+  }
 }
 
 /** Hand axes from the grip direction Y and the palm pitch: fingers over Y tipped into the wall. */
@@ -542,6 +581,19 @@ export function soleContact(
     out.set(cx, cy, z);
     return;
   }
-  support(s, up.x, up.y, up.z, cx, cy, tx, ty, band, Infinity, out);
+  // the support right under the toe (a narrow strip: a slightly tilted sole must not slide the foot to
+  // the end of a long edge), then the sole lifted until nothing of the hold under its width pokes through
+  support(s, up.x, up.y, up.z, cx, cy, tx, ty, 0.008, Infinity, out);
+  const P = s.pts;
+  let lift = 0;
+  for (let i = 0; i < s.count; i++) {
+    const ox = P[i * 3] - out.x;
+    const oy = P[i * 3 + 1] - out.y;
+    const t = (P[i * 3] - cx) * tx + (P[i * 3 + 1] - cy) * ty;
+    if (t > band || t < -band) continue;
+    const h = ox * up.x + oy * up.y + (P[i * 3 + 2] - out.z) * up.z;
+    if (h > lift) lift = h;
+  }
+  out.addScaledVector(up, lift);
   outN.copy(up);
 }

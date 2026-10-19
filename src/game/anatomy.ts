@@ -15,7 +15,7 @@
 //   ARMS: from straight UP (+U),   positive toward O; 180 = straight down.
 // Max reach r(φ) is piecewise linear between the table knots; outside [φmin, φmax] the region is
 // forbidden. Angles are unwrapped so the forbidden wedge is centred on the wrap-around point
-// (legs: φ ∈ (160°, 250°) i.e. up and up-inward — a hooking leg to 166°; arms: φ ∈ (195°, 210°) i.e.
+// (legs: φ ∈ (160°, 250°) i.e. up and up-inward — a hooking leg to 162°; arms: φ ∈ (195°, 210°) i.e.
 // down-inward). Legs have two tables: a standing foot (LEG_ENVELOPE, limb 2 / 3) and a hooking one
 // (HOOK_ENVELOPE, limb 4 / 5 = hookLimb(li)), which reaches higher out to the side.
 //
@@ -78,10 +78,11 @@ export const HOOK_ENVELOPE: readonly EnvelopeKnot[] = [
   [90, 0.93, 0.25],
   [110, 0.88, 0.35],
   [125, 0.84, 0.5],
-  [140, 0.74, 0.65],
-  [153, 0.56, 0.85],
-  [160, 0.42, 1],
-  [166, 0.3, 1],
+  [140, 0.66, 0.65],
+  // high up the hook stays out to the side (≥ ≈0.2 m): a foot can't hook straight over its hip
+  [150, 0.5, 0.85],
+  [157, 0.34, 1],
+  [162, 0.22, 1],
 ];
 
 /** Envelope limb index of a hooking foot (2 LF → 4, 3 RF → 5); other limbs unchanged. */

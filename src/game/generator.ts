@@ -1601,7 +1601,7 @@ export function tutorialBoulder(): BoulderDef {
     tutHold('tut-foot-2', 0.28, 0.82, 'jug', 0.085, 'foot', -90, 16),
     tutHold('tut-hand-2', -0.24, 2.39, 'jug', 0.11, 'hand', -90, 17),
     tutHold('tut-foot-3', -0.32, 1.25, 'jug', 0.085, 'foot', -90, 18),
-    tutHold('tut-hand-3', 0.965, 2.68, 'edge', 0.075, 'hand', -170, 19),
+    tutHold('tut-hand-3', 0.95, 2.68, 'edge', 0.075, 'hand', -170, 19),
     tutHold('tut-foot-4', 0.43, 1.47, 'jug', 0.085, 'foot', -90, 20),
     tutHold('tut-hand-4', 0.11, 3.04, 'jug', 0.11, 'hand', -90, 21),
     tutHold('tut-foot-5', -0.09, 1.83, 'jug', 0.085, 'foot', -90, 22),

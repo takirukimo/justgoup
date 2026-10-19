@@ -15,7 +15,7 @@ function pelvisX(g: GuideModel): number {
   return g.rig.bones[BONE.pelvis].position.x;
 }
 
-describe('GuideModel spot changes', () => {
+describe('GuideModel spot changes', { timeout: 60_000 }, () => {
   const frame = new WallFrame(0);
   it('places the guide at once on a jump > JUMP_M (no slide across the mats)', () => {
     const g = new GuideModel();

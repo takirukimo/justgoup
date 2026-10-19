@@ -16,6 +16,8 @@ import { ClimberSim } from '../src/game/climber-sim';
 import { BetaBot } from '../src/game/bot';
 import { RopeSystem } from '../src/game/rope';
 import { BONE, ClimberModel } from '../src/render/climber';
+import { HoldSet } from '../src/render/holds';
+import { holdSurface } from '../src/render/grip';
 import { WallFrame } from '../src/render/wall-frame';
 import { measureRig, segDist, PEN_BAD, FLOOR_BAD, type Measure } from './character-probe';
 
@@ -51,6 +53,11 @@ interface Tally {
   headArmWorst: number;
   /** Frames where the head turns faster than HEAD_JERK relative to the chest (climbing, not airborne). */
   headJerkFrames: number;
+  /**
+   * Hands / feet on holds (limb-frames, calm phases): the closest skin point (finger chain / palm, shoe
+   * toe → heel) to the drawn hold's surface; > HOVER_BAD reads as hovering beside / above it.
+   */
+  touch: Record<'hand' | 'foot', { n: number; hover: number; sum: number; worst: number; what: string }>;
 }
 
 const fresh = (): Tally => ({
@@ -79,7 +86,52 @@ const fresh = (): Tally => ({
   headArmOverhead: 0,
   headArmWorst: 0,
   headJerkFrames: 0,
+  touch: { hand: { n: 0, hover: 0, sum: 0, worst: 0, what: '' }, foot: { n: 0, hover: 0, sum: 0, worst: 0, what: '' } },
 });
+
+/** A hand / foot whose skin stays this far (m) from the hold it is on reads as hovering. */
+const HOVER_BAD = 0.02;
+const _hp = new THREE.Vector3();
+const _hq = new THREE.Vector3();
+const _hm = new THREE.Matrix4();
+
+/** Closest distance (m) from the limb's skin samples to hold `id`'s drawn surface (minus the skin radius). */
+function touchGap(model: ClimberModel, set: HoldSet, id: string, li: number): number {
+  const g = set.geoms.get(id);
+  const h = set.holds.get(id);
+  if (!g || !h) return 0;
+  const info = { type: h.type, angle: 0, size: 0, depth: 0, matrix: _hm } as Parameters<HoldSet['contactInfo']>[1];
+  if (!set.contactInfo(id, info) || !info.hasMatrix) return 0;
+  const surf = holdSurface(g, h.type);
+  const samples: [THREE.Vector3, number][] = [];
+  const B = model.rig.bones;
+  if (li < 2) {
+    const s = li;
+    const tipIds = s ? [BONE.tipR, BONE.tipR1, BONE.tipR2, BONE.tipR3] : [BONE.tipL, BONE.tipL1, BONE.tipL2, BONE.tipL3];
+    const fIds = s ? [BONE.fingR, BONE.fingR1, BONE.fingR2, BONE.fingR3] : [BONE.fingL, BONE.fingL1, BONE.fingL2, BONE.fingL3];
+    for (const b of [...tipIds, ...fIds]) {
+      samples.push([B[b].position.clone(), 0.009]);
+      samples.push([new THREE.Vector3(0, 0.028, 0).applyQuaternion(B[b].quaternion).add(B[b].position), 0.008]);
+    }
+    samples.push([model.rig.joints.grip[s].clone(), 0.012]);
+    samples.push([model.rig.joints.wrist[s].clone().lerp(model.rig.joints.grip[s], 0.5), 0.016]);
+  } else {
+    const s = li - 2;
+    const J = model.rig.joints;
+    // the sole from the toe back toward the heel
+    for (let k = 0; k <= 4; k++) samples.push([J.toe[s].clone().lerp(J.ankle[s], k * 0.18), 0.012 + k * 0.006]);
+  }
+  let best = Infinity;
+  const P = surf.pts;
+  for (let i = 0; i < surf.count; i++) {
+    _hp.set(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]).applyMatrix4(_hm);
+    for (const [q, r] of samples) {
+      const d = _hq.subVectors(_hp, q).length() - r;
+      if (d < best) best = d;
+    }
+  }
+  return Math.max(0, best);
+}
 
 /** An elbow / knee moving this much more than its limb's ends in one 60 Hz frame reads as a pop. */
 const JUMP_BAD = 0.03;
@@ -181,17 +233,23 @@ function run(b: BoulderDef, T: Tally, opts: { secs: number; fallAt?: number; tag
   // baseline: the rig clears only the single body plane through the wall origin (pre-fold behaviour)
   if (process.env.NOFOLD) model.rig.setWallFolds = () => undefined;
   const holds = new Map(b.holds.map((h) => [h.id, h]));
-  model.setHoldLookup((id, out) => {
-    const h = holds.get(id);
-    if (!h) return false;
-    out.type = h.type;
-    out.angle = h.angle;
-    out.size = h.size;
-    out.depth = h.size * 0.5;
-    return true;
-  });
   const frame = new WallFrame(b.wallAngle);
   frame.setWall(b);
+  // the drawn holds, exactly as the renderer builds them (geometry, volume mounts, lip clamps)
+  const set = new HoldSet(frame);
+  set.build(b, b.holds);
+  if (process.env.OLDHOLDS) {
+    // before: type / angle / size only (hands and feet at the sim's point, no surface)
+    model.setHoldLookup((id, out) => {
+      const h = holds.get(id);
+      if (!h) return false;
+      out.type = h.type;
+      out.angle = h.angle;
+      out.size = h.size;
+      out.depth = h.size * 0.5;
+      return true;
+    });
+  } else model.setHoldLookup((id, out) => set.contactInfo(id, out, holds.get(id)?.y));
   const dt = 1 / 60;
   let events: SimEvent[] = [];
   const m: Measure = { pen: 0, what: '', floor: 0, floorWhat: '' };
@@ -350,6 +408,23 @@ function run(b: BoulderDef, T: Tally, opts: { secs: number; fallAt?: number; tag
     havePrev = true;
     const calm = st.phase === 'climbing' || st.phase === 'topped' || st.phase === 'idle';
     if (calm && model.rig.fallback.some(Boolean)) T.fbFrames++;
+    if (calm && !st.airborne && i % 3 === 0) {
+      // hands / feet on their holds: touching the drawn surface, not hovering beside it
+      const ids = ['LH', 'RH', 'LF', 'RF'] as LimbId[];
+      for (let li = 0; li < 4; li++) {
+        const L = st.limbs[ids[li]];
+        if (!L.holdId || L.smearing || L.dragging || L.busy) continue;
+        const mode = L.footMode;
+        if (li >= 2 && mode && mode !== 'edge' && mode !== 'drop') continue;
+        const gap = touchGap(model, set, L.holdId, li);
+        const tt = T.touch[li < 2 ? 'hand' : 'foot'];
+        tt.n++;
+        tt.sum += gap;
+        if (gap > HOVER_BAD) tt.hover++;
+        if (gap > tt.worst) tt.worst = gap;
+        if (gap > tt.worst - 1e-9 && gap > 0) tt.what = `${ids[li]} on ${set.holds.get(L.holdId)?.type}${set.holds.get(L.holdId)?.shape ? '/' + set.holds.get(L.holdId)?.shape : ''} @ ${where}`;
+      }
+    }
     if (calm && !st.airborne) {
       if (jw > JUMP_BAD) {
         T.jumpFrames++;
@@ -400,6 +475,13 @@ function report(name: string, T: Tally): void {
   process.stderr.write(
     `\n== ${name} ==\nframes ${T.frames}  pen>${PEN_BAD * 100}cm ${pct(T.penFrames, T.frames)}  pen>5cm ${pct(T.pen5Frames, T.frames)}  floor ${pct(T.floorFrames, T.frames)}  wall>${WALL_BAD * 100}cm ${pct(T.wallFrames, T.frames)}  pops ${pct(T.jumpFrames, T.frames)}  ik-fallback ${pct(T.fbFrames, T.frames)}\n` +
       `pose ${(T.poseMs / Math.max(1, T.frames)).toFixed(3)} ms/frame (node)\n` +
+      (['hand', 'foot'] as const)
+        .map((k) => {
+          const t = T.touch[k];
+          return `${k}s on holds: hover>${HOVER_BAD * 100}cm ${pct(t.hover, t.n)} of ${t.n}, mean gap ${((t.sum / Math.max(1, t.n)) * 1000).toFixed(1)} mm, worst ${(t.worst * 100).toFixed(1)} cm ${t.what}`;
+        })
+        .join('\n') +
+      '\n' +
       `head↔arm>${PEN_BAD * 100}cm ${pct(T.headArmFrames, T.frames)} of frames; overhead reaches ${pct(T.overheadFrames, T.frames)} of frames, head↔arm in ${pct(T.headArmOverhead, T.overheadFrames)} of them (worst ${(T.headArmWorst * 100).toFixed(1)} cm); head snaps ${pct(T.headJerkFrames, T.frames)}\n` +
       `worst wall ${(T.wall.v * 100).toFixed(1)} cm ${T.wall.what} @ ${T.wall.tag}\nwall by part: ${JSON.stringify(T.wallBy)}\n` +
       (T.wallLog.length ? `walls:\n  ${T.wallLog.join('\n  ')}\n` : '') +

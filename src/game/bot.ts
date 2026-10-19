@@ -274,6 +274,9 @@ export class BetaBot {
       }
       case 'settle': {
         if (!st) break;
+        // a limb held past its reach by the hip handle (a grab at the edge of reach that the planned pose
+        // can't settle into from here): let go of the hips, the climber settles into a pose it can hold
+        if (this.opts.useHips && this.t > 0.08 && this.overReach(s)) sim.setHipTarget(null);
         if (this.t > (this.fastFeet ? 0.04 : this.opts.settleTime)) {
           const clip = st.clip;
           this.idx++;
@@ -319,6 +322,15 @@ export class BetaBot {
         break;
       }
     }
+  }
+
+  /** Is an attached limb past the edge of its reach (LimbSnapshot.reachRatio)? */
+  private overReach(s: ReturnType<ClimberSimAPI['getState']>): boolean {
+    for (const l of ['LH', 'RH', 'LF', 'RF'] as const) {
+      const L = s.limbs[l];
+      if ((L.holdId || L.smearing) && !L.dragging && L.reachRatio > 1.03) return true;
+    }
+    return false;
   }
 
   /** Tension when the current weight shift began (−1 = not shifting). */

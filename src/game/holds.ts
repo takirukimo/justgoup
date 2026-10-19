@@ -579,6 +579,8 @@ export function footModeFor(
   // wall frame (what the player sees): height above the hip joint, distance out to the side
   const up = vy;
   const out = vx < 0 ? -vx : vx;
+  // out to the foot's own side (beyond its hip, away from the pelvis): a hook never crosses the body
+  const ownOut = (hipX - pelvisX) * vx > 0 ? out : -out;
   const dx = -vx / dist;
   const dy = -vy / dist;
   const push = pushQuality(h, dx, dy);
@@ -586,10 +588,12 @@ export function footModeFor(
   const hooked = current === 'heel' || current === 'toe';
   // heel hook: at / above hip height out to the side on a steep wall, on a hold the heel can pull on
   // (hysteresis: it stays a heel hook until the hips rise over it — a rock-over)
-  if (wall >= SIM.heelMinAngle && pull >= (hooked ? 0.3 : 0.4) && up >= (current === 'heel' ? -0.22 : -0.1) && out >= (current === 'heel' ? 0.1 : 0.15) && dist <= 0.85) return 'heel';
+  if (wall >= SIM.heelMinAngle && pull >= (hooked ? 0.3 : 0.4) && up >= (current === 'heel' ? -0.22 : -0.1) && ownOut >= (current === 'heel' ? 0.1 : 0.15) && dist <= 0.85) return 'heel';
   // toe hook: a hold the foot can pull on but not stand on (the far side of a feature, under a lip),
   // or any pull-able foothold on a roof
-  if (wall >= SIM.toeMinAngle && ((pull >= (hooked ? 0.45 : 0.6) && push < (hooked ? 0.6 : 0.5)) || (wall >= 60 && pull >= 0.5))) return 'toe';
+  // (on a roof a foot can't stand: anything it can pull on at all is toe-pulled; the statics give a pushing
+  // foot there nothing — research §2.1 — so a near-miss of the pull cone must not leave it 'edge')
+  if (wall >= SIM.toeMinAngle && ((pull >= (hooked ? 0.45 : 0.6) && push < (hooked ? 0.6 : 0.5)) || (wall >= 60 && pull >= (hooked ? 0.15 : 0.22)) || (wall >= 48 && pull >= (hooked ? 0.35 : 0.45)))) return 'toe';
   // drop knee: a sidepull-like foothold out to the side below the hip, facing away from the body
   const hx = dcos(h.angle);
   const ahx = hx < 0 ? -hx : hx;

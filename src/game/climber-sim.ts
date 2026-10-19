@@ -806,11 +806,17 @@ export class ClimberSim implements ClimberSimAPI {
         this.hipTarget.y = p.y;
       }
     } else if (this.hipTarget) {
-      // Releasing the hip handle: the climber keeps the position the player chose.
+      // Releasing the hip handle: the climber keeps the position the player chose — unless it holds a limb
+      // past its reach (the pull fought a fresh grab at the edge): then it settles into the nearest pose
+      // every limb can hold.
       this.hipTarget = null;
-      this.posture.px = this.P.x;
-      this.posture.py = this.P.y;
-      this.postureOn = true;
+      const r = this.envResidual;
+      if (Math.max(r[0], r[1], r[2], r[3]) > 0.012 && this.phase === 'climbing') this.retarget();
+      else {
+        this.posture.px = this.P.x;
+        this.posture.py = this.P.y;
+        this.postureOn = true;
+      }
     }
   }
 
@@ -2224,6 +2230,17 @@ export class ClimberSim implements ClimberSimAPI {
     this.leanUy = dy / l;
   }
 
+  /** A dragged foot pointed at a hold it would hook reaches with the hooking leg's range (high hooks). */
+  private updateReachHook(): void {
+    let li = -1;
+    for (let i = 0; i < 4; i++)
+      if (this.limbs[i].dragging) {
+        li = i;
+        break;
+      }
+    this.reachHook = li >= 2 && this.wouldHookAt(li, this.limbs[li].tx, this.limbs[li].ty);
+  }
+
   /** While a limb is dragged (and the player isn't steering the hips), the posture follows the reach. */
   private updateReachPosture(): void {
     if (this.hipTarget || (this.phase !== 'climbing' && this.phase !== 'idle')) return;
@@ -2239,8 +2256,6 @@ export class ClimberSim implements ClimberSimAPI {
     for (let i = 0; i < 4; i++) if (this.contacts[i]) any = true;
     if (!any) return;
     const L = this.limbs[li];
-    // a foot pointed at a hold it would hook reaches with the hooking leg's range (high hooks)
-    this.reachHook = li >= 2 && this.wouldHookAt(li, L.tx, L.ty);
     const prm = this.prmScratch;
     prm.reachLimb = li;
     prm.reachX = L.tx;
@@ -2324,6 +2339,7 @@ export class ClimberSim implements ClimberSimAPI {
     }
     if (this.reachTick-- <= 0) {
       this.reachTick = 9;
+      this.updateReachHook();
       this.updateReachPosture();
     }
     this.integrateBody(h, dampBoost);
@@ -2494,8 +2510,14 @@ export class ClimberSim implements ClimberSimAPI {
         this.feasibleHip(this.hipTarget.x, this.hipTarget.y, this.hipAim);
         tx = this.hipAim.x;
         ty = this.hipAim.y;
-        k = SIM.hipStiffness;
-        cap = SIM.hipMaxForce * g;
+        // the hips yield to the limbs: while a contact sits past its envelope (the hip pull fights an arm or
+        // a leg that can't follow, e.g. a fresh grab at the edge of reach), the pull eases off instead of
+        // stretching that limb further
+        const res = this.envResidual;
+        const over = Math.max(res[0], res[1], res[2], res[3]);
+        const yieldK = 1 - 0.85 * smoothstep(0.008, 0.035, over);
+        k = SIM.hipStiffness * yieldK;
+        cap = SIM.hipMaxForce * g * yieldK;
         c = SIM.hipDamping;
       } else if (this.postureOn) {
         tx = this.posture.px;
@@ -2838,8 +2860,9 @@ export class ClimberSim implements ClimberSimAPI {
       if (L.dragging) {
         // the limb follows the finger up to its anatomical limit (a hold up to SIM.reachTolerance
         // further out still snaps on release; the body is then eased into reach)
-        // (a dragged foot may go as high as a hook could: the hooking leg's range contains the standing one)
-        const di = i >= 2 ? i + 2 : i;
+        // (a foot pointed at a hold it would hook goes up to the hooking leg's range, which contains the
+        // standing one; otherwise it stays within the standing leg's)
+        const di = i >= 2 && this.reachHook ? i + 2 : i;
         const c = envClampOn(this.prof, di, ax[i], ay[i], sx, sy, L.tx, L.ty, 0);
         const kk = 1 - Math.exp(-36 * h);
         L.px += (c.x - L.px) * kk;
@@ -3436,7 +3459,7 @@ export class ClimberSim implements ClimberSimAPI {
       o.stress = L.stress;
       o.capacity = L.cap;
       // fraction of the anatomical reach in this direction (≥ 1 = at the envelope's edge)
-      o.reachRatio = envEvalOn(this.prof, L.dragging && i >= 2 ? i + 2 : this.envLi(i), this.ax[i], this.ay[i], u.x, u.y, L.px, L.py).ratio;
+      o.reachRatio = envEvalOn(this.prof, L.dragging ? (i >= 2 && this.reachHook ? i + 2 : i) : this.envLi(i), this.ax[i], this.ay[i], u.x, u.y, L.px, L.py).ratio;
       o.smearing = L.smear;
       o.shake = L.shake;
       o.busy = L.busy;

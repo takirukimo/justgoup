@@ -139,7 +139,7 @@ export function gripBoulder(kind: GripKind, limb: 'hand' | 'foot', angle: number
   };
 }
 
-type Cam = 'close' | 'side' | 'game' | 'below' | 'front';
+type Cam = 'close' | 'side' | 'game' | 'below' | 'front' | 'profile';
 
 export async function runGrip(canvas: HTMLCanvasElement, qs: URLSearchParams, hud: HTMLDivElement): Promise<void> {
   const r = new GameRenderer(canvas, { quality: 'high' });
@@ -175,11 +175,13 @@ export async function runGrip(canvas: HTMLCanvasElement, qs: URLSearchParams, hu
       const look = P.clone().addScaledVector(N, limb === 'hand' ? 0.02 : 0.03);
       const d = limb === 'hand' ? 0.42 : 0.55;
       const pos = look.clone();
-      if (cam === 'close') pos.addScaledVector(N, d * 0.82).addScaledVector(R, sg * d * 0.35).addScaledVector(U, d * (limb === 'hand' ? 0.42 : 0.38));
+      if (cam === 'close' && limb === 'hand') pos.addScaledVector(N, d * 0.82).addScaledVector(R, sg * d * 0.35).addScaledVector(U, d * 0.42);
+      else if (cam === 'close') pos.addScaledVector(N, d * 0.72).addScaledVector(R, sg * d * 0.62).addScaledVector(U, d * 0.06);
       else if (cam === 'side') pos.addScaledVector(R, sg * d * 0.95).addScaledVector(N, d * 0.3).addScaledVector(U, d * 0.12);
+      else if (cam === 'profile') pos.addScaledVector(R, sg * d).addScaledVector(N, d * 0.06).addScaledVector(U, d * 0.04);
       else if (cam === 'below') pos.addScaledVector(N, d * 0.7).addScaledVector(U, -d * 0.6).addScaledVector(R, sg * d * 0.2);
       else pos.addScaledVector(N, d).addScaledVector(U, d * 0.05);
-      r.setDebugView(pos, look, limb === 'hand' ? 30 : 34);
+      r.setDebugView(pos, look, cam === 'profile' ? 24 : limb === 'hand' ? 30 : 34);
     }
     info = `${kind} ${limb} ${id}: hold ${L.holdId ?? '-'} mode ${L.footMode ?? '-'} pos ${L.pos.x.toFixed(3)},${L.pos.y.toFixed(3)} depth ${L.depth.toFixed(3)} | wall ${b.wallAngle}°`;
     document.title = info;

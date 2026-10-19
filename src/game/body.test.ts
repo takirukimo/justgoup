@@ -346,17 +346,19 @@ describe('shake-out (research §2.6: +32 % reoxygenation beside the body)', () =
     const f = new Forearm();
     expect(f.halfLife).toBeCloseTo(SIM.forearm.halfLife, 6);
     const sim = pumped(22);
-    const p0 = sim.getState().limbs.LH.pump!;
+    // the more pumped forearm (the hang need not be symmetric) shakes out
+    const hand = sim.getState().limbs.LH.pump! >= sim.getState().limbs.RH.pump! ? 'LH' : 'RH';
+    const p0 = sim.getState().limbs[hand].pump!;
     expect(p0).toBeGreaterThan(0.25);
     const ev: SimEvent[] = [];
-    expect(sim.shakeOut('LH')).toBe(true);
+    expect(sim.shakeOut(hand)).toBe(true);
     for (const e of sim.step(0)) ev.push(e);
     expect(ev.map((e) => e.type)).toEqual(['release', 'shake-out-start']);
     const s = sim.getState();
-    expect(s.limbs.LH.shakingOut).toBe(true);
-    expect(s.limbs.LH.holdId).toBeNull();
+    expect(s.limbs[hand].shakingOut).toBe(true);
+    expect(s.limbs[hand].holdId).toBeNull();
     let t = 0;
-    while (sim.getState().limbs.LH.pump! > p0 / 2 && t < 90) {
+    while (sim.getState().limbs[hand].pump! > p0 / 2 && t < 90) {
       run(sim, 0.25, ev);
       t += 0.25;
     }
@@ -365,9 +367,9 @@ describe('shake-out (research §2.6: +32 % reoxygenation beside the body)', () =
     expect(t).toBeLessThan(half * 1.25);
     // the hand that kept holding on (with feet) recovered far less in the same time
     const rest = pumped(22);
-    const r0 = rest.getState().limbs.LH.pump!;
+    const r0 = rest.getState().limbs[hand].pump!;
     run(rest, t);
-    expect(rest.getState().limbs.LH.pump!).toBeGreaterThan(r0 * 0.7);
+    expect(rest.getState().limbs[hand].pump!).toBeGreaterThan(r0 * 0.7);
     expect(ev.some((e) => e.type === 'fall' || e.type === 'slip')).toBe(false);
   });
 

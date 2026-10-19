@@ -14,3 +14,4 @@ screenshots/
 src/**/__*.test.ts
 src/**/zz-*.test.ts
 dev/**/*.debug*.test.ts
+dev/**/*dbg*.test.ts

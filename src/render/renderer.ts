@@ -26,10 +26,9 @@ import { ClimberModel } from './climber';
 import { GuideModel } from './guide';
 import { RopeMesh } from './rope-mesh';
 import { renderPortrait, resetPortraitEnvironment } from './portrait';
-import { disposeHoldCache, holdMatrix } from './holds';
+import { disposeHoldCache } from './holds';
 import { HOLD_CUE } from './shading';
 
-const ONE3 = new THREE.Vector3(1, 1, 1);
 
 /** Optional fx beyond RendererAPI['fx'] (the app calls them when present). */
 export interface GameRendererFx {
@@ -253,31 +252,7 @@ export class GameRenderer implements RendererAPI {
     this.post = new PostFX(this.gl, this.scene, this.rig.camera);
     this.climber = new ClimberModel({ head: this.skin.head, colorway: this.skin.colorway, chalk: this.skin.chalk });
     // CHARACTER integration: hand shapes + contact depth come from the hold set
-    this.climber.setHoldLookup((id, out) => {
-      const h = this.wall.holds.holds.get(id);
-      if (!h) return false;
-      out.type = h.type;
-      out.angle = h.angle;
-      out.size = h.size;
-      // a hold bolted onto a volume stands off the wall by the volume's face height there
-      out.depth = (this.wall.holds.geoms.get(id)?.depth ?? h.size * 0.5) + (this.wall.holds.mounts.get(id)?.lift ?? 0);
-      // a hold slid back from a roof lip (drawn copy vs the problem's hold): the limb follows the drawing
-      const src = this.srcHolds.get(id);
-      out.dy = src ? h.y - src.y : 0;
-      out.shape = h.shape;
-      out.fingers = h.fingers;
-      // the drawn hold itself (geometry + world transform, a volume mount included): hands and feet
-      // are placed on its real surface
-      const g = this.wall.holds.geoms.get(id);
-      if (g && out.matrix) {
-        out.geom = g;
-        const mount = this.wall.holds.mounts.get(id);
-        if (mount) out.matrix.compose(mount.pos, mount.quat, ONE3);
-        else holdMatrix(h, this.wallFrame, out.matrix);
-        out.hasMatrix = true;
-      }
-      return true;
-    });
+    this.climber.setHoldLookup((id, out) => this.wall.holds.contactInfo(id, out, this.srcHolds.get(id)?.y));
     this.climber.setCueGain(this.pure ? 1.4 : 1);
     // fingers creeping before a slip: a little chalk trickles off the hold (feet: a puff of rubber dust)
     this.climber.onCreep = (limb, p) => {

@@ -248,6 +248,11 @@ export const SIM = {
   hookHoldFactor: { jug: 1, edge: 0.85, crimp: 0.55, sloper: 0.6, pinch: 0.9, pocket: 0.55, volume: 0.95, foot: 0.35 },
   /** Hooks take over at most this share of the hands' keep-in pull. */
   hookMaxShare: 0.85,
+  /**
+   * …and, beside a pushing foot, each hook's pull-in at most this fraction of its own capacity (it carries a
+   * share, not its limit). Hanging on hands + hooks alone (a roof) the hooks pull what they can.
+   */
+  hookPullStress: 0.6,
   /** A hook pulls the hips in by this much (m) per hooking leg; hooks alone keep the hips this far out. */
   hookDepthPull: 0.06,
   hookOnlyDepth: 0.22,

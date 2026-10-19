@@ -18,6 +18,7 @@ import type { WallFrame } from './wall-frame';
 import { createSurfaceMaterial, ensureSurfaceAttributes, type SurfaceMaterial } from './shading';
 import { createLabelAtlas, softBlobTexture, speckleNormal, type AtlasRect } from './textures';
 import { bakeCurvature } from './curvature';
+import type { HoldInfo } from './climber';
 
 export const HOLD_VARIANTS = 6;
 
@@ -1230,6 +1231,34 @@ export class HoldSet {
     const quat = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
     const pos = hit.point.clone().addScaledVector(z, -0.0015);
     return { pos, quat, lift: Math.max(0, hit.point.clone().sub(base).dot(n)) };
+  }
+
+  /**
+   * What the climber needs to put a hand / foot on hold `id` (type, product, the drawn geometry and its
+   * world transform incl. a volume mount, the stand-off from the wall). `srcY`: the problem's own y of
+   * the hold (a hold slid back from a roof lip is drawn elsewhere: dy). False when the id is unknown.
+   */
+  contactInfo(id: string, out: HoldInfo, srcY?: number): boolean {
+    const h = this.holds.get(id);
+    if (!h) return false;
+    out.type = h.type;
+    out.angle = h.angle;
+    out.size = h.size;
+    const g = this.geoms.get(id);
+    const mount = this.mounts.get(id);
+    // a hold bolted onto a volume stands off the wall by the volume's face height there
+    out.depth = (g?.depth ?? h.size * 0.5) + (mount?.lift ?? 0);
+    out.dy = srcY !== undefined ? h.y - srcY : 0;
+    out.shape = h.shape;
+    out.fingers = h.fingers;
+    out.geom = g ?? null;
+    out.hasMatrix = false;
+    if (g && out.matrix) {
+      if (mount) out.matrix.compose(mount.pos, mount.quat, ONE);
+      else holdMatrix(h, this.frame, out.matrix);
+      out.hasMatrix = true;
+    }
+    return true;
   }
 
   /** Rebuild everything for `holds` on `boulder`. */

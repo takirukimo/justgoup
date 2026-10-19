@@ -17,6 +17,7 @@ import {
   envEval,
   inEnvelope,
   LEG_ENVELOPE,
+  HOOK_ENVELOPE,
   limbPhi,
   POLYGON_POINTS,
   segmentsCross,
@@ -63,13 +64,40 @@ describe('anatomy — reach envelopes', () => {
     expect(Math.max(...ARM_ENVELOPE.map((k) => k[1]))).toBeCloseTo(BODY.armMax, 12);
     // straight down for an arm is continuous through the wrap: −170° ≡ 190°
     expect(envelopeRadius(1, -170)).toBeCloseTo(envelopeRadius(1, 190), 12);
-    // a foot never goes straight up; at most ~0.17 m above the hip joint (what the joint-limited 3D
-    // body can reach with the hips off the wall), out to the side
+    // a foot never goes straight up; a standing foot (high step, the hips brought in) at most ≈0.32 m above
+    // the hip joint, a hooking one (heel / toe hook) ≈0.50 m, both out to the side (shared high-feet spec)
     expect(envelopeRadius(3, 180)).toBe(0);
-    let top = 0;
-    for (let phi = 90; phi <= 160; phi += 0.5) top = Math.max(top, -Math.cos(deg(phi)) * envelopeRadius(3, phi));
-    expect(top).toBeGreaterThan(0.14);
-    expect(top).toBeLessThan(0.2);
+    expect(envelopeRadius(5, 180)).toBe(0);
+    const topOf = (li: number): { up: number; out: number } => {
+      let up = 0;
+      let out = 0;
+      for (let phi = 90; phi <= 170; phi += 0.5) {
+        const r = envelopeRadius(li, phi);
+        const u = -Math.cos(deg(phi)) * r;
+        if (u > up) {
+          up = u;
+          out = Math.sin(deg(phi)) * r;
+        }
+      }
+      return { up, out };
+    };
+    const stand = topOf(3);
+    expect(stand.up).toBeGreaterThan(0.29);
+    expect(stand.up).toBeLessThan(0.35);
+    expect(stand.out).toBeGreaterThan(0.2);
+    const hook = topOf(5);
+    expect(hook.up).toBeGreaterThan(0.46);
+    expect(hook.up).toBeLessThan(0.54);
+    expect(hook.out).toBeGreaterThan(0.2);
+    // out to the side 0.25–0.65 m a hook still reaches ≈0.5 m up
+    for (const o of [0.35, 0.45, 0.6]) {
+      const p = { x: o, y: 0.45 };
+      expect(inEnvelope(5, O, UP, p), `hook ${o}`).toBe(true);
+      expect(inEnvelope(3, O, UP, p), `stand ${o}`).toBe(false);
+    }
+    // the hooking leg's range contains the standing one
+    for (let phi = -110; phi <= 160; phi += 1) expect(envelopeRadius(5, phi)).toBeGreaterThanOrEqual(envelopeRadius(3, phi) - 1e-12);
+    for (const [phi, r] of HOOK_ENVELOPE) expect(envelopeRadius(4, phi)).toBeCloseTo(r, 12);
   });
 
   it('φ follows the shared body-frame convention (legs from down, arms from up, + outward)', () => {
@@ -161,14 +189,15 @@ describe('anatomy — reach envelopes', () => {
 
   it('envelopePolygon: anchor first, boundary on the edge, turns with the body, mirrors left/right', () => {
     const a = { x: 0.3, y: 1.2 };
-    for (const li of [0, 1, 2, 3]) {
+    for (const li of [0, 1, 2, 3, 4, 5]) {
       const poly = envelopePolygon(li, a, UP);
       expect(poly.length).toBe(POLYGON_POINTS);
       expect(poly[0]).toEqual(a);
-      for (let k = 1; k < poly.length; k++) expect(envelopeRatio(li, a, UP, poly[k])).toBeCloseTo(1, 4);
+      // (≈1e-4: the hot path's polynomial atan meets the steep top of the leg tables)
+      for (let k = 1; k < poly.length; k++) expect(envelopeRatio(li, a, UP, poly[k])).toBeCloseTo(1, 3);
       const tilted = { x: Math.sin(deg(25)), y: Math.cos(deg(25)) };
       const t = envelopePolygon(li, a, tilted);
-      for (let k = 1; k < t.length; k++) expect(envelopeRatio(li, a, tilted, t[k])).toBeCloseTo(1, 4);
+      for (let k = 1; k < t.length; k++) expect(envelopeRatio(li, a, tilted, t[k])).toBeCloseTo(1, 3);
       // grown by a pad
       const padded = envelopePolygon(li, a, UP, [], 0.07);
       for (let k = 1; k < padded.length; k++) expect(envelopeExcess(li, a, UP, padded[k])).toBeCloseTo(0.07, 4);
@@ -492,7 +521,9 @@ describe('anatomy — whole climbs stay anatomical', () => {
         for (const l of ['LF', 'RF'] as const) {
           const L = s.limbs[l];
           if (!L.holdId && !L.smearing) continue;
-          const e = envEval(LIMB_INDEX[l], L.anchor.x, L.anchor.y, u.x, u.y, L.pos.x, L.pos.y);
+          // (a hooking foot is judged against the hooking leg's range: it reaches higher)
+          const hooked = L.footMode === 'heel' || L.footMode === 'toe' || L.footMode === 'cam';
+          const e = envEval(LIMB_INDEX[l] + (hooked ? 2 : 0), L.anchor.x, L.anchor.y, u.x, u.y, L.pos.x, L.pos.y);
           footUp = Math.max(footUp, e.over);
         }
       });

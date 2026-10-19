@@ -35,7 +35,7 @@ import type { WallFrame } from './wall-frame';
 import type { PanelSpan } from '../game/wall-profile';
 import { createHead, disposeHead, headBlinkWeights, setHeadBlink } from './heads/index';
 import { MeshBuilder, loft, sstep, superCos, superSin, type AttribFn } from './heads/geo';
-import { FING_A, FING_B, FING_L, FING_R, FING_SPLAY, FING_X, PALM, createHandSite, gripStyleOf, handSite, holdSurface, type HandSite } from './grip';
+import { FING_A, FING_B, FING_L, FING_R, FING_SPLAY, FING_X, PALM, createHandSite, gripStyleOf, handSite, holdSurface, soleContact } from './grip';
 import { ATLAS_RECTS, REGION, TORSO_E, TORSO_Y0, TORSO_Y1, createBodyMaterial, createOutfitAtlas, type BodyMaterial, type OutfitStyle, type TorsoSection, type UvRect } from './materials';
 
 // ═══════════════════════════════ skeleton layout ═══════════════════════════════
@@ -3608,6 +3608,7 @@ export class ClimberModel extends THREE.Group {
   // ── hands on the real hold surface (render/grip.ts) ──
   /** Per hand: the placement on the hold (hold-local) and its world copy; whether it is in use. */
   private site = [createHandSite(), createHandSite()];
+  private siteKey = [0, 1].map(() => ({ id: null as string | null, geom: null as HoldGeometry | null, x: 0, y: 0, t: 0, f: 0, a: 0 }));
   private siteOn = [false, false];
   private siteP = [new THREE.Vector3(), new THREE.Vector3()];
   private siteDir = [new THREE.Vector3(), new THREE.Vector3()];
@@ -3618,6 +3619,14 @@ export class ClimberModel extends THREE.Group {
   private grabT = [9, 9];
   private mInv = new THREE.Matrix4();
   private lq = new THREE.Vector3();
+  /** Per foot: blend onto the drawn hold, the placement (world), the smoothed sole normal, the contact normal. */
+  private fSiteK = [0, 0];
+  private fSiteW = [new THREE.Vector3(), new THREE.Vector3()];
+  private fUp = [new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 1, 0)];
+  private fUpOk = [false, false];
+  private fN = [new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 1, 0)];
+  private fGrabId: (string | null)[] = [null, null];
+  private fGrabT = [9, 9];
   private sRope = [0, 0];
   private sStand = 0;
   /** Drop-knee / backstep amount per foot (foot crossed inward of its hip) and the hip turn it drives. */
@@ -4390,6 +4399,7 @@ export class ClimberModel extends THREE.Group {
       if (up.lengthSq() < 1e-8) up.copy(this.siteUp[s]);
       up.normalize();
       hg.contact.lerp(this.site[s].local, k);
+      hg.useContact = true;
       shape = SHAPE_SITE;
     } else if (L.holdId && ph !== 'falling' && ph !== 'landed') {
       // fingers wrap over the hold: opposite to the hold's good direction, blended with the arm line
@@ -4526,10 +4536,24 @@ export class ClimberModel extends THREE.Group {
       const a = Math.atan2(-this.v1.x, this.v1.y);
       th = clampN(a, -def.turn, def.turn) * sstep(2.7, 1.7, Math.abs(a));
     }
-    const gx = -Math.sin(th);
-    const gy = Math.cos(th);
     const across = this.v1.x >= 0 ? 1 : -1;
-    const site = handSite(surf, def, cx, cy, gx, gy, SIGN[s], info.fingers ?? 3, across, this.site[s]);
+    // the placement only changes when the hold, the spot on it or the hand's turn does (quantised)
+    const key = this.siteKey[s];
+    const qx = Math.round(cx / 0.002);
+    const qy = Math.round(cy / 0.002);
+    const qt = Math.round(th / 0.025);
+    const fingers = info.fingers ?? 3;
+    let site = this.site[s];
+    if (key.id !== L.holdId || key.geom !== info.geom || key.x !== qx || key.y !== qy || key.t !== qt || key.f !== fingers || key.a !== across) {
+      site = handSite(surf, def, qx * 0.002, qy * 0.002, -Math.sin(qt * 0.025), Math.cos(qt * 0.025), SIGN[s], fingers, across, this.site[s]);
+      key.id = L.holdId;
+      key.geom = info.geom;
+      key.x = qx;
+      key.y = qy;
+      key.t = qt;
+      key.f = fingers;
+      key.a = across;
+    }
     this.siteP[s].copy(site.p).applyMatrix4(M);
     this.siteDir[s].copy(site.dir).transformDirection(M);
     this.siteUp[s].copy(site.up).transformDirection(M);
@@ -4798,12 +4822,87 @@ export class ClimberModel extends THREE.Group {
         up.addScaledVector(dir, -up.dot(dir)).normalize();
       }
     }
+    // a standing foot on a drawn hold: the toe box rests on its real top (the sole tangent to the hold
+    // where it presses), the tip just off the wall / volume face it is bolted to
+    const standing =
+      mode === 'hold' &&
+      L.holdId !== null &&
+      !L.smearing &&
+      this.hookK[s] < 0.5 &&
+      info !== null &&
+      info.hasMatrix === true &&
+      !!info.geom &&
+      (fm === undefined || fm === 'edge' || fm === 'drop');
+    this.placeFootOnHold(s, standing, info, L, frame, fg, Uw, snap, d);
     if (mode === 'hold' && L.shake > 0.02) {
       // the knee jiggles with the heel (Elvis leg)
       const e = L.shake * Math.min(1.6, this.cueGain);
       pole.normalize().addScaledVector(Uw, Math.sin(t * 69 + s * 1.7 + 0.6) * 0.22 * e).addScaledVector(Rw, Math.sin(t * 57 + s) * 0.12 * e);
     }
     pole.normalize();
+  }
+
+  /**
+   * The toe of a standing foot on the drawn hold's real surface (render/grip.ts soleContact): the sole
+   * plane (normal = the shoe's instep axis, smoothed so an Elvis-leg heel bounce pivots about a fixed
+   * toe) touches the hold at its support point, the toe tip is pushed along the sole to just off the
+   * surface the hold is bolted to; on a volume the shoe stands / smears on the face under it. A fresh
+   * placement sets the toe down from just above and out. Blends in / out of the sim's point.
+   */
+  private placeFootOnHold(s: number, on: boolean, info: HoldInfo | null, L: LimbSnapshot, frame: WallFrame, fg: LimbGoal, Uw: THREE.Vector3, snap: boolean, d: number): void {
+    const want = on ? 1 : 0;
+    this.fSiteK[s] += (want - this.fSiteK[s]) * (snap ? 1 : dampK(on ? 14 : 10, d));
+    if (L.holdId !== this.fGrabId[s]) {
+      this.fGrabId[s] = L.holdId;
+      this.fGrabT[s] = 0;
+    } else this.fGrabT[s] += d;
+    if (snap) this.fGrabT[s] = 9;
+    if (!on || !info || !info.geom || !info.matrix) {
+      this.fUpOk[s] = false;
+      this.fSiteW[s].copy(fg.target);
+      return;
+    }
+    const M = info.matrix;
+    const inv = this.mInv.copy(M).invert();
+    const surf = holdSurface(info.geom, info.type);
+    // the sole normal, low-passed (the heel bounce must not move the toe)
+    if (!this.fUpOk[s] || snap) this.fUp[s].copy(fg.up);
+    else this.fUp[s].lerp(fg.up, dampK(6, d)).normalize();
+    this.fUpOk[s] = true;
+    const uL = this.v1.copy(this.fUp[s]).transformDirection(inv);
+    const lift = Math.max(0, info.depth - info.geom.depth);
+    const cp = L.contactPos ?? L.pos;
+    this.p2.x = cp.x;
+    this.p2.y = cp.y + (info.dy ?? 0);
+    frame.toWorld(this.p2, lift, this.lq).applyMatrix4(inv);
+    const c = this.v2;
+    const n = this.v3;
+    soleContact(surf, uL, this.lq.x, this.lq.y, 1, 0, 0.034, c, n);
+    if (surf.planes && surf.planeCount && surf.depth > 0.05) {
+      // a volume: the sole goes flat on the face under the foot (the instep along its normal)
+      this.fN[s].copy(n).transformDirection(M);
+      fg.up.copy(this.fN[s]);
+      fg.dir.addScaledVector(fg.up, -fg.dir.dot(fg.up));
+      if (fg.dir.lengthSq() < 1e-6) fg.dir.copy(Uw).addScaledVector(fg.up, -Uw.dot(fg.up));
+      fg.dir.normalize();
+      uL.copy(n);
+    } else this.fN[s].copy(this.fUp[s]);
+    // the toe point sits ≈ 8 mm above the sole: then slide along the sole toward the surface it is
+    // bolted to until the tip just clears it
+    c.addScaledVector(uL, 0.008);
+    const dL = this.lq.copy(fg.dir).transformDirection(inv);
+    if (dL.z < -0.15) c.addScaledVector(dL, clampN((0.014 - c.z) / dL.z, -0.008, 0.07));
+    const T = this.fSiteW[s].copy(c).applyMatrix4(M);
+    // set down: in from just above and out from the hold over the first moments on it
+    const gt = this.fGrabT[s];
+    if (gt < 0.3) {
+      const k = 1 - sstep(0, 0.16, gt);
+      T.addScaledVector(this.fN[s], 0.018 * k).addScaledVector(Uw, 0.012 * k);
+    }
+    // creep (a slipping toe skates down the hold)
+    const fc = this.creepK[2 + s];
+    if (fc > 1e-3) T.addScaledVector(Uw, -(0.004 + 0.01 * fc) * fc * this.cueGain);
+    fg.target.lerp(T, this.fSiteK[s]);
   }
 
   /**

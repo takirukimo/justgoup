@@ -122,6 +122,12 @@ export const SOLVER = {
    */
   footCross: 0.6,
   footCrossTol: 0.03,
+  /**
+   * Extra cost of a foot placed high (more than SIM.highStepFree over its hip joint when it goes on): a high
+   * step or a high hook is planned where it is the way up (no footholds lower, a steep wall), not to skip
+   * holds on an easy ladder (the tutorial must stay a V0).
+   */
+  highFootCost: 0.7,
 } as const;
 
 /** Extra clearance (m) the planner keeps beyond the sim's self-clipping limits. */
@@ -682,7 +688,7 @@ class Planner {
     n.pose = st.pose;
     n.tension = st.tension;
     n.step = step;
-    n.g = parent.g + this.moveCost(st.tension, r.tension) + this.crossCost(n.slots, n.sx);
+    n.g = parent.g + this.moveCost(st.tension, r.tension) + this.crossCost(n.slots, n.sx) + (m.li >= 2 && m.ty - this.anchorOf(r.pose, m.li).y > SIM.highStepFree ? SOLVER.highFootCost : 0);
     n.f = n.g + this.hw * this.heuristic(n.slots);
     STEP_NODE.set(step, n);
     return true;

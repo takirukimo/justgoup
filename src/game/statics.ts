@@ -603,7 +603,7 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
     for (let i = 2; i < 4; i++) {
       const c = contacts[i];
       if (!c || !isHook(c.mode)) continue;
-      const nMax = hookPullIn(c.hold, c.mode === FOOT_HEEL, prm.assist);
+      const nMax = hookPull(c, i, ax, ay, prm.assist);
       let arm: number;
       if (nf > 0) arm = clamp((c.y - fyMean) / Math.max(SIM.minLever, hyMean - fyMean), 0.25, 1);
       else arm = clamp((hyMean - comY) / Math.max(0.2, hyMean - c.y), 0.2, 1);
@@ -913,6 +913,33 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
   out.sth = sth;
   return out;
 }
+
+/**
+ * Most out-of-plane pull-in a hooking foot takes over (body weights): its hold's hookPullIn, but never more
+ * than SIM.hookPullStress of the hook's own capacity at this pull direction — a hook carries its share of the
+ * keep-in like a hand, it isn't loaded to the limit just because it can pull (that made every hook stance
+ * strenuous and hooks were never planned).
+ */
+function hookPull(c: Contact, i: number, ax: Float64Array, ay: Float64Array, assist: number): number {
+  const heel = c.mode === FOOT_HEEL;
+  const n = hookPullIn(c.hold, heel, assist);
+  if (!c.hold) return n;
+  let dx = ax[i] - c.x;
+  let dy = ay[i] - c.y;
+  const dl = sq(dx, dy);
+  if (dl > 1e-9) {
+    dx /= dl;
+    dy /= dl;
+  } else {
+    dx = 0;
+    dy = -1;
+  }
+  HOOK_GRIP.assist = assist;
+  const cap = hookCapacity(c.hold, heel, c.hx, c.hy, dx, dy, HOOK_GRIP);
+  const lim = SIM.hookPullStress * cap;
+  return n < lim ? n : lim;
+}
+const HOOK_GRIP: GripContext = { wallAngle: 0, assist: 0, pump: 0, overhang: 0 };
 
 /** Side-view scratch of the profile path. */
 const SV: Side = { h: 0, z: 0 };

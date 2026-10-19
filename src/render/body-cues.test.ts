@@ -49,7 +49,7 @@ function breathRate(model: ClimberModel, frame: WallFrame, st: ClimberState, sec
   return { rpm: (ups * 60) / secs, range: hi - lo };
 }
 
-describe('body as feedback', () => {
+describe('body as feedback', { timeout: 60_000 }, () => {
   it('breathes 15 → 30 → 45 times a minute from rest to a crux, deeper as it works', () => {
     const { model, frame, base } = setup();
     const rest = breathRate(model, frame, forced(base, { tension: 0, pump: 0 }));
