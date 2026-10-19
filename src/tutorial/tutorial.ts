@@ -481,6 +481,9 @@ const STAND_UP_GIVE_UP_S = 28;
 const BEAT_GIVE_UP_S = 32;
 /** How long the hand hangs and shakes before Steini asks for it back (s, game time). */
 const SHAKE_OUT_HANG_S = 2.8;
+/** Where a relaxed arm hangs in its shake-out lane: below the shoulder / out to its side (m). */
+const HANG_DOWN = 0.42;
+const HANG_OUT = 0.12;
 
 interface LessonOutcome {
   /** The limb ended on the target hold. */
@@ -645,9 +648,10 @@ class TutorialDirector extends Director {
   }
 
   /**
-   * Where `hand` would let go for a beat right now: the chalk bag, or the spot of the hand's
-   * shake-out lane (input/release.ts, mirrors the sim) furthest from any hold it would grab
-   * instead (null when the whole lane is covered by holds).
+   * Where `hand` would let go for a beat right now: the chalk bag, or a spot of the hand's
+   * shake-out lane (input/release.ts, mirrors the sim) clear of any hold it would grab instead,
+   * as close as possible to where a relaxed arm hangs (well inside its reach, so the body doesn't
+   * lean after the finger). Null when the whole lane is covered by holds.
    */
   private zonePoint(kind: 'shake-out' | 'chalk', hand: 'LH' | 'RH'): Vec2 | null {
     const st = this.sim.getState();
@@ -664,13 +668,13 @@ class TutorialDirector extends Director {
         const out = SHAKE_LANE.out0 + ((SHAKE_LANE.out1 - SHAKE_LANE.out0) * b) / 6;
         shakeLanePoint(idx, A, up, down, out, p);
         if (this.sim.snapCandidate(hand, p)) continue;
-        // clear of holds by the widest margin, then nearest the middle of the lane
+        // clear of holds (up to a comfortable 15 cm), then nearest a relaxed hanging arm
         let clear = 1;
         for (const h of this.holds.values()) {
           if (h.role === 'deco') continue;
           clear = Math.min(clear, Math.hypot(h.x - p.x, h.y - p.y) - h.size);
         }
-        const score = Math.min(clear, 0.25) - 0.15 * (Math.abs(a - 3) + Math.abs(b - 3)) / 4;
+        const score = 2 * Math.min(clear, 0.15) - 0.5 * Math.hypot(down - HANG_DOWN, out - HANG_OUT);
         if (score > bestScore) {
           bestScore = score;
           best = { x: p.x, y: p.y };
@@ -940,7 +944,10 @@ class TutorialDirector extends Director {
           const L = st.limbs[step.limb];
           const short = candidate !== step.holdId;
           if (L.shake > 0.05 || st.shake > 0.05 || st.tension >= SIM.shakeOn) out.shook = true;
-          stretchT = L.reachRatio > 0.96 && short ? stretchT + dt : short ? Math.max(0, stretchT - dt) : stretchT;
+          // a stretch only counts toward the target: a hand dragged down by the side (the shake-out
+          // lane) or off the other way is at full extension too, but not reaching for this hold
+          const toward = Math.hypot(L.pos.x - target.x, L.pos.y - target.y) < Math.hypot(L.anchor.x - target.x, L.anchor.y - target.y);
+          stretchT = L.reachRatio > 0.96 && short && toward ? stretchT + dt : short ? Math.max(0, stretchT - dt) : stretchT;
           if (stretchT > 0.8 && !saidStretch) {
             saidStretch = true;
             // a hand that could throw for it: teach the deadpoint flick instead of "keep holding"
