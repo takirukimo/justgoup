@@ -128,6 +128,34 @@ describe('planBeta', () => {
   });
 });
 
+describe('planBeta — foot technique realism', () => {
+  it('rarely crosses the feet: a cross-through only where it is clearly better (SOLVER.footCross)', { timeout: 120_000 }, () => {
+    let stances = 0;
+    let crossed = 0;
+    for (const style of availableStyles(true))
+      for (const grade of [3, 8]) {
+        const b = generateBoulder({ seed: 5300 + grade * 23 + style.length * 11, grade, style });
+        const plan = planBetaDetailed(b);
+        expect(plan, b.id).not.toBeNull();
+        const byId = new Map(b.holds.map((h) => [h.id, h] as const));
+        const feet: Record<'LF' | 'RF', { x: number } | null> = {
+          LF: b.startFeet?.LF ? byId.get(b.startFeet.LF)! : null,
+          RF: b.startFeet?.RF ? byId.get(b.startFeet.RF)! : null,
+        };
+        for (const st of plan!.steps) {
+          const m = st.move;
+          if (m.limb === 'LF' || m.limb === 'RF') feet[m.limb] = byId.get(m.holdId) ?? st.smear ?? null;
+          if (st.dyno) for (const c of st.dyno.cut) if (c === 'LF' || c === 'RF') feet[c] = null;
+          stances++;
+          // the left foot right of the right one (two different holds / smears)
+          if (feet.LF && feet.RF && feet.LF !== feet.RF && feet.LF.x > feet.RF.x + 0.03) crossed++;
+        }
+      }
+    // (≈28 % of the planned stances crossed their feet before the cost)
+    expect(crossed / stances).toBeLessThan(0.12);
+  });
+});
+
 describe('nextHint', () => {
   it('suggests a reachable, useful move from the live stance', () => {
     const b = tutorialBoulder();

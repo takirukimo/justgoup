@@ -114,6 +114,14 @@ export const SOLVER = {
   dynoCatchMargin: 0.85,
   /** Tension allowed right after a catch (feet cut: the climber puts them back at once). */
   dynoLandMax: 0.98,
+  /**
+   * Extra cost of a stance with crossed feet (the left foothold more than footCrossTol right of the
+   * right one). Real climbers rarely cross their feet: a cross-through is planned only when it is clearly
+   * better (it saves a move or a lot of strain), and a crossed stance is undone soon (every move that
+   * stays crossed pays it again).
+   */
+  footCross: 0.6,
+  footCrossTol: 0.03,
 } as const;
 
 /** Extra clearance (m) the planner keeps beyond the sim's self-clipping limits. */
@@ -586,7 +594,7 @@ class Planner {
     const st = this.stance(tmp, seed);
     if (st.violation > 0.004 || st.tension > SOLVER.stanceMax) return null;
     const mt = step ? step.moveTension : 0;
-    const g = parent ? parent.g + this.moveCost(st.tension, mt) : 0;
+    const g = parent ? parent.g + this.moveCost(st.tension, mt) + this.crossCost(slots, sx) : 0;
     return {
       slots,
       sx,
@@ -607,6 +615,16 @@ class Planner {
   moveCost(stanceT: number, moveT: number): number {
     // tension is costly, and strenuous moves much more so: prefer the smooth beta when one exists
     return 1 + 0.8 * stanceT + 0.6 * moveT + 5 * Math.max(0, moveT - 0.68) + 5 * Math.max(0, stanceT - 0.58);
+  }
+
+  /** SOLVER.footCross when the stance's feet are crossed (left foot right of the right foot), else 0. */
+  crossCost(slots: Slot[], sx: number[]): number {
+    const l = slots[2];
+    const r = slots[3];
+    if (!l || !r || l === r) return 0;
+    const lx = l === 'smear' ? sx[2] : l.x;
+    const rx = r === 'smear' ? sx[3] : r.x;
+    return lx > rx + SOLVER.footCrossTol ? SOLVER.footCross : 0;
   }
 
   /**
@@ -639,7 +657,7 @@ class Planner {
     n.pose = st.pose;
     n.tension = st.tension;
     n.step = step;
-    n.g = parent.g + this.moveCost(st.tension, r.tension);
+    n.g = parent.g + this.moveCost(st.tension, r.tension) + this.crossCost(n.slots, n.sx);
     n.f = n.g + this.hw * this.heuristic(n.slots);
     STEP_NODE.set(step, n);
     return true;
@@ -786,7 +804,7 @@ class Planner {
     n.tension = st.tension;
     n.step = step;
     n.transient = st.tension > SOLVER.stanceMax || !n.slots[2] || !n.slots[3] || !n.slots[0] || !n.slots[1];
-    n.g = parent.g + this.moveCost(st.tension, 0.7) + SOLVER.dynoCost;
+    n.g = parent.g + this.moveCost(st.tension, 0.7) + SOLVER.dynoCost + this.crossCost(n.slots, n.sx);
     n.f = n.g + this.hw * this.heuristic(n.slots);
     STEP_NODE.set(step, n);
     return true;
@@ -817,7 +835,7 @@ class Planner {
         for (const i of d.cut) slots[i] = null;
         const key = slots.map(slotId).join('|');
         if (closed.has(key)) continue;
-        const g = n.g + 1 + SOLVER.dynoCost;
+        const g = n.g + 1 + SOLVER.dynoCost + this.crossCost(slots, n.sx);
         push({
           slots,
           sx: n.sx.slice(),
@@ -981,6 +999,8 @@ class Planner {
         }
         if (subKey === null) subKey = n.slots.map((s, i) => (i === li ? '_' : slotId(s))).join('|');
         const reachKey = `${subKey}>${li}:${c.hold ? c.hold.id : `s${sx[li]},${sy[li]}`}`;
+        // a lower bound of the evaluated cost (crossed feet cost the same once evaluated)
+        const g0 = hBase + this.crossCost(slots, sx);
         push({
           slots,
           sx,
@@ -988,8 +1008,8 @@ class Planner {
           key,
           pose: n.pose,
           tension: n.tension,
-          g: hBase,
-          f: hBase + this.hw * this.heuristic(slots),
+          g: g0,
+          f: g0 + this.hw * this.heuristic(slots),
           parent: n,
           step: null,
           depth: n.depth + 1,

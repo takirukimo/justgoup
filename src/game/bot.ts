@@ -206,6 +206,15 @@ export class BetaBot {
           this.moves++;
           this.throwBoost = 0;
           this.fastFeet = !!st.dyno && st.dyno.cut.some((l) => l === 'LF' || l === 'RF');
+          // the live throw cut a foot the plan kept on: feet back on first, then a re-plan from here
+          // (the planned next move assumed the feet were still holding)
+          const off = (l: 'LF' | 'RF') => !s.limbs[l].holdId && !s.limbs[l].smearing && !st.dyno?.cut.includes(l);
+          if (off('LF') || off('RF')) {
+            this.log.push('the throw cut the feet');
+            this.sim.setHipTarget(null);
+            this.replan();
+            return;
+          }
           if (this.opts.useHips) sim.setHipTarget({ x: st.pose.px, y: st.pose.py });
           this.phase = 'settle';
           this.t = 0;
