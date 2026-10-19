@@ -92,7 +92,25 @@ async function tapText(text) {
   await loc.tap();
 }
 
+/**
+ * QA shortcut for a send: put the climber on the TOP hold matched, with the feet where the planned
+ * beta ends (a bare respawn lets the sim pick feet, which on a traverse or a roof can't hold the
+ * body and falls). The real send path (celebration, results, scoring) follows.
+ */
+const sendShortcut = () =>
+  page.evaluate(async () => {
+    const sim = window.__jgu.sim;
+    const { planBeta } = await import('/src/game/solver.ts');
+    const st = sim.getState();
+    const at = { LF: st.limbs.LF.holdId, RF: st.limbs.RF.holdId };
+    for (const m of planBeta(sim.boulder, { maxMs: 2000 }) ?? []) if (m.limb === 'LF' || m.limb === 'RF') at[m.limb] = m.holdId;
+    const top = sim.boulder.holds.filter((h) => h.role === 'top').sort((a, b) => b.y - a.y)[0];
+    sim.respawn({ LH: top.id, RH: top.id, LF: at.LF ?? undefined, RF: at.RF ?? undefined });
+  });
+
 const samples = [];
+/** Walls the Send Train served: style + panel count (GEN.profiles folds most of them). */
+const walls = [];
 async function sample(label) {
   const s = await page.evaluate(async () => {
     window.gc?.();
@@ -141,12 +159,12 @@ try {
     await veilClear();
     await tap('.pv-hit');
     await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'climb start');
+    walls.push(await page.evaluate(() => {
+      const b = window.__jgu.sim.boulder;
+      return { style: b.style ?? '?', panels: b.profile?.length ?? 1, angle: b.wallAngle };
+    }));
     // QA shortcut: matched on the top hold → the real send path (celebration, results, scoring)
-    await page.evaluate(() => {
-      const sim = window.__jgu.sim;
-      const top = sim.boulder.holds.filter((h) => h.role === 'top').sort((a, b) => b.y - a.y)[0];
-      sim.respawn({ LH: top.id, RH: top.id });
-    });
+    await sendShortcut();
     await waitScreen('results', 240000);
     if (i === 1 || i === boulders) await page.screenshot({ path: `${out}/results-${String(i).padStart(2, '0')}.png`, timeout: 180000 });
     await sample(`send train #${String(i).padStart(2, '0')}`);
@@ -188,6 +206,11 @@ try {
     await tapText('CREATE');
     await waitFor(() => window.__jgu.app.current === 'editor', 'editor', 60000);
     await page.waitForTimeout(1500);
+    // Steini's first-visit tip sits over the top bar: tap it away
+    for (let k = 0; k < 4 && (await page.$('.guide-layer.on')); k++) {
+      await page.tap('.gb-card').catch(() => undefined);
+      await page.waitForTimeout(700);
+    }
     await tap('.ed-x');
     await waitFor(() => window.__jgu.app.current === 'menu', 'editor closed', 60000);
     await waitScreen('title');
@@ -215,12 +238,37 @@ if (trains.length >= 4) {
   const n = trains.length - 2;
   const per = (k) => ((b[k] - a[k]) / n).toFixed(2);
   log(`per-boulder growth over ${n} boulders: geo ${per('geo')}  tex ${per('tex')}  heap ${per('heapMB')} MB  dom ${per('dom')}  obj ${per('objects')}  bus ${per('busListeners')}  domL ${per('domListeners')}`);
-  ok(b.tex - a.tex <= 2, `textures stay flat across boulders (${a.tex} → ${b.tex})`);
-  ok(b.objects - a.objects <= 4, `scene graph stays flat across boulders (${a.objects} → ${b.objects})`);
+  // every unlocked skin brings its own cached portrait / material textures (bounded by the
+  // catalogue): textures must stay flat across the boulders after the last unlock
+  let u = trains.length - 1;
+  while (u > 0 && trains[u - 1].unlocked === trains[trains.length - 1].unlocked) u--;
+  const tu = trains[u];
+  if (trains.length - u >= 4) ok(b.tex - tu.tex <= 2, `textures stay flat across boulders once unlocks stop (${tu.label}: ${tu.tex} → ${b.tex}; ${a.tex} at the start, ${b.unlocked - a.unlocked} unlocks)`);
+  else ok(b.tex - a.tex <= 2 + 2 * (b.unlocked - a.unlocked), `textures grow only with unlocks (${a.tex} → ${b.tex}, ${b.unlocked - a.unlocked} unlocks)`);
+  // the scene graph follows the wall (holds, volumes, folds): bounded per boulder, and back to the
+  // title's size once the run is left
+  const objs = trains.map((t) => t.objects);
+  ok(Math.max(...objs) - Math.min(...objs) <= 30, `scene graph bounded across boulders (${Math.min(...objs)}…${Math.max(...objs)} objects)`);
+  const title = samples.find((x) => x.label === 'title');
+  const after = samples.find((x) => x.label === 'after send train');
+  if (title && after) {
+    ok(after.objects - title.objects <= 4, `scene graph back to the title's after the run (${title.objects} → ${after.objects})`);
+    ok(after.busListeners - title.busListeners <= 2, `bus listeners back to the title's after the run (${title.busListeners} → ${after.busListeners})`);
+  }
   ok(b.busListeners - a.busListeners <= 2, `bus listeners stay flat across boulders (${a.busListeners} → ${b.busListeners})`);
   ok(b.heapMB - a.heapMB < 25, `JS heap stays bounded (${a.heapMB} → ${b.heapMB} MB)`);
   ok(b.geo <= 200, `GPU geometries stay bounded (${a.geo} → ${b.geo})`);
   ok(b.domListeners - a.domListeners <= 2, `window/document listeners stay flat across boulders (${a.domListeners} → ${b.domListeners})`);
+}
+if (walls.length) {
+  const folded = walls.filter((w) => w.panels > 1).length;
+  const styles = new Set(walls.map((w) => w.style));
+  log(`walls: ${walls.map((w) => `${w.style}/${w.panels}p/${w.angle}°`).join(' ')}`);
+  ok(folded >= 2, `folded multi-angle walls in the run (${folded}/${walls.length}: caves and mixed walls fold)`);
+  ok(styles.size >= Math.min(5, walls.length - 1), `the run rotates archetypes (${[...styles].join(', ')})`);
+  let repeats = 0;
+  for (let i = 1; i < walls.length; i++) if (walls[i].style === walls[i - 1].style) repeats++;
+  ok(repeats === 0, `no archetype twice in a row (${repeats} repeats)`);
 }
 const cyc = samples.filter((s) => s.label.startsWith('mode cycle'));
 if (cyc.length >= 2) {
