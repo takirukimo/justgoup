@@ -5,7 +5,8 @@
 //   baseUrl defaults to http://localhost:5207 (start the dev server first:
 //   VITE_CACHE_DIR=node_modules/.vite-integration npx vite --config dev/e2e.vite.config.mjs --port 5207 --strictPort
 //   — that config never reloads the page mid-run; restart it after source changes)
-//   steps: onboarding, sendtrain, leaderboard, locker, human, settings, profile, community, editor, daily, communityplay, lead
+//   steps: onboarding, sendtrain, leaderboard, locker, human, settings, pure, profile, community, editor, daily, communityplay, lead
+//   (pure: Settings → Pure climbing on, a Send Train problem climbed by touch with no HUD, then off again)
 //   --only runs a subset (later steps seed a returning-player profile when onboarding is skipped).
 import { chromium } from 'playwright-core';
 import { mkdirSync } from 'node:fs';
@@ -197,7 +198,8 @@ async function look(holdId, limb) {
         const s = j.renderer.wallToScreen(p, d);
         return { x: s.x + gr.left, y: s.y + gr.top, visible: s.visible };
       };
-      const hp = j.controls.handlePosition(limb);
+      // Pure climbing has no visible handles: a finger lands on the hand / foot itself
+      const hp = j.controls.isPure ? null : j.controls.handlePosition(limb);
       const idx = { LH: 0, RH: 1, LF: 2, RF: 3 }[limb];
       const pair = limb === 'LH' ? 'RH' : limb === 'RH' ? 'LH' : limb === 'LF' ? 'RF' : 'LF';
       const h = sim.boulder.holds.find((x) => x.id === holdId);
@@ -209,7 +211,7 @@ async function look(holdId, limb) {
       const dragging = j.controls.dragging === limb;
       return {
         phase: st.phase,
-        handle: hp ? { x: hp.x + cr.left, y: hp.y + cr.top } : null,
+        handle: hp ? { x: hp.x + cr.left, y: hp.y + cr.top } : j.controls.isPure ? scr(st.limbs[limb].pos, st.limbs[limb].depth) : null,
         from: scr(st.limbs[limb].pos, st.limbs[limb].depth),
         to: to ? scr(to) : null,
         drag: dragging ? scr(target) : null,
@@ -351,9 +353,10 @@ async function hipMove(target) {
     if (!st || st.phase !== 'climbing') return null;
     const cr = document.getElementById('controls').getBoundingClientRect();
     const gr = j.renderer.canvas.getBoundingClientRect();
-    const hp = j.controls.handlePosition('HIP');
     const a = j.renderer.wallToScreen(st.pelvis, st.pelvisDepth);
     const b = j.renderer.wallToScreen(t, st.pelvisDepth);
+    // Pure climbing: the finger lands on the pelvis itself
+    const hp = j.controls.isPure ? { x: a.x + gr.left - cr.left, y: a.y + gr.top - cr.top } : j.controls.handlePosition('HIP');
     return hp ? { handle: { x: hp.x + cr.left, y: hp.y + cr.top }, dx: b.x - a.x, dy: b.y - a.y, gr } : null;
   }, target);
   if (!s) return false;
@@ -753,6 +756,180 @@ if (want('settings')) {
   ok((await page.evaluate(() => window.__jgu.renderer.getQuality())) === 'high', 'settings: renderer switched to HIGH');
   await tapText('LOW');
   await page.waitForTimeout(400);
+  await tap('.btn-back', 'back');
+  await waitScreen('title');
+}
+
+// ───────────────────────────── Pure climbing: no HUD, the body is the feedback ─────────────────────────────
+if (want('pure')) {
+  const hudVisible = () =>
+    page.evaluate(() => {
+      const vis = (sel) => [...document.querySelectorAll(sel)].some((e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden' && +getComputedStyle(e).opacity > 0.05);
+      return {
+        meters: vis('.scr-hud .hud-inst') || vis('.scr-hud .hud-route') || vis('.scr-hud .hud-score') || vis('.scr-hud .hud-topprog.on'),
+        hint: vis('.scr-hud .hud-hint'),
+        look: vis('.scr-hud .hud-eye'),
+        pause: vis('.scr-hud .hud-pause'),
+        handles: [...document.querySelectorAll('.jgl .jgl-h')].filter((h) => !h.classList.contains('is-drag')).some((h) => +getComputedStyle(h).opacity > 0.02),
+        canvas: (() => {
+          // the overlay canvas draws nothing in Pure mode (no leaders, reach arcs, grip tags)
+          const c = document.querySelector('.jgl canvas');
+          if (!c || !c.width) return false;
+          const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+          for (let i = 3; i < d.length; i += 16) if (d[i] > 8) return true;
+          return false;
+        })(),
+      };
+    });
+  await tapText('SETTINGS');
+  await waitScreen('settings');
+  await page.waitForTimeout(900);
+  await page.locator('#ui .row-pure').scrollIntoViewIfNeeded();
+  await shot('settings-pure-off');
+  await page.locator('#ui .row-pure').tap();
+  await page.waitForTimeout(500);
+  await shot('settings-pure-on');
+  const ps = await page.evaluate(() => ({
+    setting: window.__jgu.app.profile.settings.pure,
+    stored: localStorage.getItem('jgu.pure.v1'),
+    ui: document.getElementById('ui').classList.contains('is-pure'),
+    jgl: !!document.querySelector('.jgl.is-pure'),
+    aria: document.querySelector('#ui .row-pure')?.getAttribute('aria-checked'),
+  }));
+  ok(ps.setting === true && ps.stored === '1' && ps.aria === 'true', `settings: Pure climbing on, saved with the profile (${JSON.stringify(ps)})`);
+  ok(ps.ui && ps.jgl, 'Pure climbing applies live (HUD + limb controls)');
+  await tap('.btn-back', 'back');
+  await waitScreen('title');
+  // the tutorial teaches with the HUD: Pure climbing is suspended for the lesson and comes back after
+  await page.evaluate(() => window.__jgu.bus.emit('ui:tutorial'));
+  await waitFor(() => window.__jgu.app.current === 'tutorial', 'tutorial (pure setting)', 60000);
+  await veilClear();
+  await page.waitForSelector('.gb-skip', { state: 'visible', timeout: 60000 });
+  await page.waitForTimeout(1500);
+  const tut = await page.evaluate(() => ({
+    ui: document.getElementById('ui').classList.contains('is-pure'),
+    jgl: !!document.querySelector('.jgl.is-pure'),
+    hud: !!document.querySelector('.scr-hud .hud-inst')?.getClientRects().length,
+    setting: window.__jgu.app.profile.settings.pure,
+  }));
+  await shot('tutorial-pure-setting');
+  ok(!tut.ui && !tut.jgl && tut.hud && tut.setting === true, `tutorial runs with the full HUD while the Pure setting stays on (${JSON.stringify(tut)})`);
+  await tap('.gb-skip', 'SKIP tutorial');
+  await waitScreen('title', 60000);
+  await veilClear();
+  ok(await page.evaluate(() => document.getElementById('ui').classList.contains('is-pure') && !!document.querySelector('.jgl.is-pure')), 'Pure climbing is back once the tutorial ends');
+  // a fixed, honest first problem for the run: a short vertical / slab line the planner climbs with no
+  // throws (the run's own seeding formula, searched in the page; the run class is restored after)
+  const pureSeed = await page.evaluate(async () => {
+    const { Rng, hashString } = await import('/src/core/rng.ts');
+    const { runGradeFor } = await import('/src/game/scoring.ts');
+    const { generateBoulder } = await import('/src/game/generator.ts');
+    const { planBeta } = await import('/src/game/solver.ts');
+    const { ROUTE_COLORS } = await import('/src/config/brand.ts');
+    let best = null;
+    for (let s = 2000; s < 2060; s++) {
+      const rng = new Rng(hashString(`send-train:${s}:0`));
+      const grade = runGradeFor(0, rng);
+      const b = generateBoulder({ seed: rng.int(1, 0x7ffffffe), grade, colorIndex: rng.int(0, ROUTE_COLORS.length - 1), run: { seed: s, index: 0 } });
+      if (b.style !== 'vertical' && b.style !== 'slab') continue;
+      const beta = planBeta(b, { maxMs: 400 });
+      if (beta && !beta.some((m) => m.dyno) && (!best || beta.length < best.moves)) best = { s, name: b.name, moves: beta.length, style: b.style };
+    }
+    return best;
+  });
+  log(`pure: run seed ${JSON.stringify(pureSeed)}`);
+  if (pureSeed)
+    await page.evaluate(async (seed) => {
+      const m = await import('/src/app/runs.ts');
+      const C = m.SendTrainRun;
+      if (!C.__origReset) C.__origReset = C.prototype.reset;
+      C.prototype.reset = function () {
+        C.__origReset.call(this);
+        this.seed = seed;
+      };
+    }, pureSeed.s);
+  await tap('.title-play', 'PLAY');
+  await waitScreen('modes');
+  await tap('.mode-featured', 'Send Train');
+  await waitScreen('preview', 120000);
+  await veilClear();
+  await page.waitForTimeout(1500);
+  await shot('preview-pure');
+  ok(await page.evaluate(() => !document.querySelector('.scr-preview .pv-legend')?.getClientRects().length && !document.querySelector('.scr-preview .pv-tip-slot')?.getClientRects().length), 'Pure preview: no START / TOP legend, no tip');
+  await tap('.pv-hit', 'TAP TO START');
+  await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'climb start (pure)', 60000);
+  await page.waitForTimeout(900);
+  await shot('climbing-pure');
+  let hv = await hudVisible();
+  ok(!hv.meters && !hv.hint && !hv.look && hv.pause, `Pure HUD: no meters, no hint, no LOOK, a faint pause stays (${JSON.stringify(hv)})`);
+  ok(!hv.handles && !hv.canvas, `Pure controls: no handles, leaders or arcs until a finger lands (${JSON.stringify(hv)})`);
+  // a finger on the right hand picks it: only a faint ring shows
+  const ring = await page.evaluate(() => {
+    const j = window.__jgu;
+    const st = j.sim.getState();
+    const gr = j.renderer.canvas.getBoundingClientRect();
+    const s = j.renderer.wallToScreen(st.limbs.RH.pos, st.limbs.RH.depth);
+    return { x: s.x + gr.left, y: s.y + gr.top };
+  });
+  await touch('touchStart', [ring]);
+  await frames(2);
+  await touch('touchMove', [{ x: ring.x + 4, y: ring.y - 6 }]);
+  await frames(3);
+  const held = await page.evaluate(() => ({ drag: window.__jgu.controls.dragging, ring: [...document.querySelectorAll('.jgl .jgl-h.is-drag')].length, highlights: window.__jgu.renderer.highlightCount?.() ?? null }));
+  await shot('pure-touch-ring');
+  ok(held.drag === 'RH' && held.ring === 1, `Pure: a finger on the hand picks it and shows one faint ring (${JSON.stringify(held)})`);
+  hv = await hudVisible();
+  ok(!hv.canvas, 'Pure drag: no reach arc, leader or grip tag drawn');
+  await touch('touchMove', [ring]);
+  await frames(1);
+  await touch('touchEnd', []);
+  await frames(4);
+  // climb it by touch, like the Send Train step, with the fingers on the limbs themselves
+  let midPure = false;
+  const sentPure = await autoClimb({
+    label: 'pure',
+    until: async () => {
+      const ph = await page.evaluate(() => window.__jgu.sim?.getState().phase);
+      if (!midPure && ph === 'climbing' && (await page.evaluate(() => window.__jgu.sim.getState().pelvis.y)) > 1.7) {
+        midPure = true;
+        await shot('climbing-pure-mid');
+        const m = await hudVisible();
+        ok(!m.meters && !m.hint && !m.handles, 'Pure mid-climb: still no HUD or handles');
+      }
+      return ph === 'topped' || ph === 'falling' || ph === 'landed';
+    },
+  });
+  const phPure = await page.evaluate(() => window.__jgu.sim?.getState().phase);
+  ok(sentPure && phPure === 'topped', `Pure: the problem is climbed by touch without a HUD (phase ${phPure})`);
+  await waitScreen('results', 120000);
+  await page.waitForTimeout(2500);
+  await shot('results-pure');
+  // the run ends (forced fall on the next problem: QA shortcut), back to the menu, Pure off again
+  if (await page.locator('#ui button', { hasText: 'NEXT BOULDER' }).count()) {
+    await tapText('NEXT BOULDER');
+    await waitScreen('preview', 120000);
+    await veilClear();
+    await tap('.pv-hit', 'TAP TO START');
+    await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'climb start (pure 2)', 60000);
+    await page.evaluate(() => window.__jgu.sim.forceFall());
+    await waitScreen('results', 90000);
+    await page.waitForTimeout(1500);
+  }
+  await tapText('MENU');
+  await waitScreen('modes', 60000);
+  await veilClear();
+  await tap('.btn-back', 'back');
+  await waitScreen('title');
+  await page.evaluate(async () => {
+    const C = (await import('/src/app/runs.ts')).SendTrainRun;
+    if (C.__origReset) C.prototype.reset = C.__origReset;
+  });
+  await tapText('SETTINGS');
+  await waitScreen('settings');
+  await page.locator('#ui .row-pure').tap();
+  await page.waitForTimeout(400);
+  const off = await page.evaluate(() => ({ setting: window.__jgu.app.profile.settings.pure, stored: localStorage.getItem('jgu.pure.v1'), ui: document.getElementById('ui').classList.contains('is-pure') }));
+  ok(off.setting === false && off.stored === '0' && !off.ui, `settings: Pure climbing off again (${JSON.stringify(off)})`);
   await tap('.btn-back', 'back');
   await waitScreen('title');
 }
