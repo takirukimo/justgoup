@@ -376,12 +376,15 @@ const HEAD_ARM_MOVES: Float32Array = (() => {
   const rows: number[][] = [];
   for (const y of [0, 0.17, 0.34, 0.51, 0.68, 0.85, 1.02, 1.2])
     for (const r of [0, 0.14, 0.28, 0.42, 0.55])
-      for (const p of [0, -0.18, 0.18, -0.32, 0.32, 0.48]) {
+      for (const p of [0, -0.18, 0.18, -0.32, 0.32, 0.48, 0.62]) {
         if (!y && !r && !p) continue;
         rows.push([y, p, r, y / 0.85 + r / 0.42 + Math.abs(p) / 0.3]);
       }
   rows.sort((a, b) => a[3] - b[3]);
-  return new Float32Array(rows.slice(0, 72).flat());
+  // every combination, cheapest first (the search stops at the first that clears and is capped at 400
+  // evaluations): the big moves (a full look up under a hand straight overhead, a hard turn plus a
+  // tilt) are what clear the horns and the skull of an arm reaching over the head, so none is cut
+  return new Float32Array(rows.flat());
 })();
 
 /** Fastest the head moves into / out of an arm dodge (rad/s per axis). */
