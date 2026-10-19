@@ -259,6 +259,46 @@ export const SIM = {
   /** Wall angles (°) from which a pull-able foothold at / above the hip is a heel hook, and a far one a toe hook. */
   heelMinAngle: 8,
   toeMinAngle: 15,
+  // ── Heel-toe cam (advanced moves; research: a foot jammed between two opposing surfaces) ──
+  /**
+   * A foot put on a hold with an opposing surface a foot-length away (another route hold, or a route
+   * volume's face) cams: the toe presses one, the heel the other. Distance between the two contacts (m), the
+   * walls it is inferred on (°) and how squarely the two surfaces must face each other (cos of the angle).
+   */
+  camMin: 0.16,
+  camMax: 0.34,
+  camMinAngle: 15,
+  camFacing: 0.5,
+  /** Cam capacity (BW, any direction: it pushes and pulls), and the most pull-in it gives (holds the body to a roof). */
+  camCap: 0.75,
+  camPull: 0.5,
+  /** Perpendicular force of a cam costs this × the usual (the foot is jammed, not pivoting on a point). */
+  camPerp: 0.35,
+  // ── Bat hang (advanced moves): no hands, hanging upside down from two hooked / cammed feet ──
+  /** Steepest panel under the feet (°) from which the climber can bat-hang. */
+  batMinAngle: 45,
+  /** A foot's bat-hang capacity (BW) by technique (× the hold's hookHoldFactor; a cam uses holds.camCapacity). */
+  batHeelCap: 0.6,
+  batToeCap: 0.38,
+  /** Hip joints this far (m) below the feet along world-down (knees bent over the hooks). */
+  batLegHang: 0.5,
+  /** Seconds of the swing into the hang and of the sit-up back out of it. */
+  batSwing: 0.9,
+  batSitUp: 0.8,
+  /**
+   * Hang endurance (core + hamstrings): fatigue grows at (0.5 + worst foot stress) / batEndure per second
+   * (≈20 s at a comfortable hang) and recovers off the hang at batRecover per second; at 1 the feet let go.
+   */
+  batEndure: 24,
+  batRecover: 0.05,
+  /** Hands are free in the hang: forearm recovery × this on top of a shake-out (hanging fully relaxed). */
+  batShakeBoost: 1.3,
+  /** A hand in the hang grabs (a sit-up) a hold whose grip is within this far (m) of the hips… */
+  batGrabReach: 1.0,
+  /** …costing that forearm this W′ fraction (the sit-up pull). */
+  batSitUpPump: 0.04,
+  /** With no hand on and both feet able to bat-hang, the climber falls back into the hang after this (s). */
+  batAutoAfter: 0.5,
   // ── High feet (shared sim + render spec, v0.2 playtest: "feet should go above hip height") ──
   /**
    * A foot target more than this (m) above its hip joint (body frame) is a high step / high hook: it needs a

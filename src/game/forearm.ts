@@ -41,6 +41,8 @@ export interface ForearmStep {
   shaking: boolean;
   /** Multiplier on drains (assist lowers it). */
   drainScale: number;
+  /** Optional extra recovery multiplier (a bat hang: hanging fully relaxed). Absent = 1. */
+  boost?: number;
 }
 
 export class Forearm {
@@ -112,6 +114,7 @@ export class Forearm {
     } else if (this.w < 1) {
       let speed = cf > 1e-6 ? 1 - f / cf : 0;
       if (s.shaking) speed *= F.shakeBoost;
+      if (s.boost !== undefined) speed *= s.boost;
       // reperfusion takes a moment: the brief pauses between holds recover less than a real rest
       if (!s.gripping && this.offT < F.recoveryOnset) speed *= this.offT / F.recoveryOnset;
       if (speed > 0) this.w += (1 - this.w) * (1 - Math.exp((-Math.LN2 * dt * speed) / this.halfLife));

@@ -242,8 +242,10 @@ export interface LimbSnapshot {
    */
   gripDir?: Vec2 | null;
   /**
-   * Feet in a heel-toe cam (footMode 'cam'): the heel's hold and contact point (the toe is on `holdId`
-   * at `contactPos`, pressing the opposite way). Absent / null otherwise.
+   * Feet in a heel-toe cam (footMode 'cam'): the opposite surface the foot jams against — its hold (a route
+   * hold or volume) and contact point. The foot spans `contactPos` (on `holdId`) ↔ `camPos`; the heel is on
+   * whichever is nearer the hip (gripDir runs heel → toe; contactNormal points from contactPos toward camPos).
+   * null otherwise.
    */
   camHoldId?: string | null;
   camPos?: Vec2 | null;

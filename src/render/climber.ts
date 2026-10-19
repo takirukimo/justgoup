@@ -974,6 +974,8 @@ export class BodyRig {
   private quick = false;
   /** QA: the limb's target was outside the anatomical range and the end was pulled in (last solve). */
   readonly fallback = [false, false, false, false];
+  /** QA: how far (m) the hand's / foot's contact point ended up from its target (last solve). */
+  readonly reachMiss = [0, 0, 0, 0];
   private reqEnd = [0, 1, 2, 3].map(() => new THREE.Vector3());
   private stretchK = [1, 1, 1, 1];
   /** Last frame's elbow / knee apex direction per limb (swivel rate limit) and the solve's dt. */
@@ -2578,6 +2580,7 @@ export class BodyRig {
     basisQuat(dir, up, qh);
     _t0.copy(this.cGrip).applyQuaternion(qh);
     J.grip[s].copy(J.wrist[s]).add(_t0);
+    this.reachMiss[s] = goal.jointTarget ? J.wrist[s].distanceTo(tgt) : J.grip[s].distanceTo(tgt);
   }
 
   /** Wrist range vs the solved forearm: finger deviation and pro/supination. True if it changed the hand. */
@@ -2729,6 +2732,8 @@ export class BodyRig {
       J.ankle[s].copy(this.cOut);
     }
     basisQuat(dir, up, qf);
+    _t0.copy(this.cToe).applyQuaternion(qf);
+    this.reachMiss[li] = goal.jointTarget ? J.ankle[s].distanceTo(tgt) : _t0.add(J.ankle[s]).distanceTo(tgt);
     // the reported toe point is the toe tip, whatever point of the foot the target was for
     if (goal.useContact) toeLocal(sg, this.outfit.shoe, this.cToe);
     _t0.copy(this.cToe).applyQuaternion(qf);

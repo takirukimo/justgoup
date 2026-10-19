@@ -5,7 +5,7 @@ import { BODY as BODY_, GAME, SIM as SIM_ } from '../config/tuning';
 import { clamp as clamp_, DEG } from '../core/math';
 import { dcos, dsin } from './dmath';
 import { envEvalOn, pointSegDist } from './anatomy';
-import { angleAt, profileOf } from './wall-profile';
+import { angleAt, profileOf, type WallProfile } from './wall-profile';
 
 // Hot path (capacities are evaluated thousands of times per plan): plain module-local bindings
 // (some module runners read imported bindings through a getter on every use).
@@ -526,6 +526,16 @@ export function hookCapacity(h: HoldDef, heel: boolean, hx: number, hy: number, 
   return cap;
 }
 
+/**
+ * Capacity of a heel-toe CAM between holds `a` and `b` (b null: a volume face or the wall): strong in every
+ * direction (no pull cone) — SIM.camCap × the weaker hold's hookHoldFactor (volumes take a cam well).
+ */
+export function camCapacity(a: HoldDef, b: HoldDef | null, assist: number): number {
+  const fa = SIM.hookHoldFactor[a.type];
+  const fb = b ? SIM.hookHoldFactor[b.type] : 0.9;
+  return SIM.camCap * (fa < fb ? fa : fb) * (1 + SIM.assistCap * assist);
+}
+
 /** Most out-of-plane pull-in (body weights) a hook on `h` can provide (it pulls the hips to the wall). */
 export function hookPullIn(h: HoldDef | null, heel: boolean, assist: number): number {
   if (!h) return 0;
@@ -605,7 +615,101 @@ export const FM_EDGE = 1;
 export const FM_HEEL = 2;
 export const FM_TOE = 4;
 export const FM_DROP = 8;
-export const FM_HOOK = FM_HEEL | FM_TOE;
+export const FM_CAM = 16;
+/** Techniques that reach with the hooking leg's range (anatomy HOOK_ENVELOPE). */
+export const FM_HOOK = FM_HEEL | FM_TOE | FM_CAM;
+
+/** The opposite surface of a heel-toe cam: a route hold (`hold`) or a route volume's face, and its contact point. */
+export interface CamPartner {
+  hold: HoldDef | null;
+  x: number;
+  y: number;
+}
+
+/**
+ * Heel-toe cam (advanced moves): can a foot put on hold `a` at contact (ax, ay) jam between it and an opposing
+ * surface? Candidates are the route holds a foot may use (`holds`, not `a`, not `taken` by another limb) and
+ * route volumes: their foot contact (a volume: the point of its face toward the foot) 0.16–0.34 m away
+ * (SIM.camMin / camMax: a foot-length), the two gripped surfaces facing each other (each one's surface normal
+ * — the −good direction — within SIM.camFacing of the line to the other), both within the hooking leg's
+ * range of the hip, on a wall of SIM.camMinAngle+. The best pair is the most square and nearest a 0.25 m
+ * foot. Writes `out` and returns it, or null. (Bounded: the route holds of one problem, ≈20–60.)
+ */
+export function camPartner(
+  a: HoldDef,
+  ax: number,
+  ay: number,
+  li: number,
+  hipX: number,
+  hipY: number,
+  bodyUx: number,
+  bodyUy: number,
+  wall: number,
+  holds: readonly HoldDef[],
+  taken: readonly (HoldDef | null)[],
+  out: CamPartner,
+  prof: WallProfile | null = null,
+  current: HoldDef | null = null,
+): CamPartner | null {
+  if (wall < SIM.camMinAngle) return null;
+  const nax = -dcos(a.angle);
+  const nay = -dsin(a.angle);
+  let best = Infinity;
+  let found = false;
+  for (const b of holds) {
+    if (b === a || b.role === 'deco') continue;
+    let skip = false;
+    for (const t of taken) if (t === b) skip = true;
+    if (skip) continue;
+    let bx: number;
+    let by: number;
+    let nbx: number;
+    let nby: number;
+    if (b.type === 'volume') {
+      // the volume's face toward the foot
+      let dx = ax - b.x;
+      let dy = ay - b.y;
+      const dl = Math.sqrt(dx * dx + dy * dy);
+      if (dl < 1e-6) continue;
+      dx /= dl;
+      dy /= dl;
+      const r = Math.min(b.size * 0.85, dl);
+      bx = b.x + dx * r;
+      by = b.y + dy * r;
+      nbx = dx;
+      nby = dy;
+    } else {
+      contactPoint(b, li, false, CAM_TMP);
+      bx = CAM_TMP.x;
+      by = CAM_TMP.y;
+      nbx = -dcos(b.angle);
+      nby = -dsin(b.angle);
+    }
+    const fx = bx - ax;
+    const fy = by - ay;
+    const d = Math.sqrt(fx * fx + fy * fy);
+    if (d < SIM.camMin || d > SIM.camMax) continue;
+    const ux = fx / d;
+    const uy = fy / d;
+    // a's surface faces b, b's faces a
+    const fa = nax * ux + nay * uy;
+    const fb = -(nbx * ux + nby * uy);
+    // (a foot already jammed against b stays jammed while the body moves around it: hysteresis)
+    const keep = b === current;
+    if (fa < SIM.camFacing - (keep ? 0.15 : 0) || fb < SIM.camFacing - (keep ? 0.15 : 0)) continue;
+    if (envEvalOn(prof, li + 2, hipX, hipY, bodyUx, bodyUy, bx, by).excess > (keep ? 0.16 : 0.04)) continue;
+    const score = (2 - fa - fb) + Math.abs(d - 0.25) * 3;
+    if (score < best) {
+      best = score;
+      out.hold = b;
+      out.x = bx;
+      out.y = by;
+      found = true;
+    }
+  }
+  return found ? out : null;
+}
+const CAM_TMP = { x: 0, y: 0 };
 
 /**
  * Every technique a foot on hold h at (cx, cy) could use from where its hip is (bit mask of FM_*): the one

@@ -33,6 +33,7 @@ import type { HoldDef } from '../core/types';
 import { BODY as BODY_, GAME, SIM as SIM_ } from '../config/tuning';
 import { clamp as clamp_, DEG, smoothstep as smoothstep_ } from '../core/math';
 import {
+  camCapacity,
   contactPoint,
   footCapacity as footCapacity_,
   handCapacity as handCapacity_,
@@ -77,8 +78,10 @@ export interface Contact {
   /** Hold's good direction (cos, sin of hold.angle); (0, −1) for smears. */
   hx: number;
   hy: number;
-  /** Feet: FOOT_PUSH (edge / smear), FOOT_HEEL, FOOT_TOE (hooks: the leg pulls) or FOOT_DROP. Hands: 0. */
+  /** Feet: FOOT_PUSH (edge / smear), FOOT_HEEL, FOOT_TOE (hooks: the leg pulls), FOOT_DROP or FOOT_CAM. Hands: 0. */
   mode: number;
+  /** FOOT_CAM: the opposite hold the heel / toe presses (null: a volume face). */
+  hold2: HoldDef | null;
 }
 
 /** Contact.mode values (feet). */
@@ -86,7 +89,10 @@ export const FOOT_PUSH = 0;
 export const FOOT_HEEL = 2;
 export const FOOT_TOE = 3;
 export const FOOT_DROP = 4;
-const isHook = (m: number): boolean => m === FOOT_HEEL || m === FOOT_TOE;
+/** A heel-toe cam: the foot jammed between two opposing surfaces, strong in every direction (holds.camCapacity). */
+export const FOOT_CAM = 5;
+/** Feet that hold by pulling / jamming, not standing: heel and toe hooks and cams (pull-in, hooking range). */
+const isHook = (m: number): boolean => m === FOOT_HEEL || m === FOOT_TOE || m === FOOT_CAM;
 
 /** Fill a contact for limb `li` on hold `h` (grip point + direction). */
 export function setContact(c: Contact, h: HoldDef, li: number, matched: boolean): Contact {
@@ -96,6 +102,7 @@ export function setContact(c: Contact, h: HoldDef, li: number, matched: boolean)
   c.hx = dcos(h.angle);
   c.hy = dsin(h.angle);
   c.mode = FOOT_PUSH;
+  c.hold2 = null;
   return c;
 }
 
@@ -107,10 +114,11 @@ export function setSmear(c: Contact, x: number, y: number): Contact {
   c.hx = 0;
   c.hy = -1;
   c.mode = FOOT_PUSH;
+  c.hold2 = null;
   return c;
 }
 
-export const newContact = (): Contact => ({ hold: null, x: 0, y: 0, matched: false, hx: 0, hy: -1, mode: FOOT_PUSH });
+export const newContact = (): Contact => ({ hold: null, x: 0, y: 0, matched: false, hx: 0, hy: -1, mode: FOOT_PUSH, hold2: null });
 
 /** Indexed by limb: 0 LH, 1 RH, 2 LF, 3 RF. */
 export type Contacts = (Contact | null)[];
@@ -582,7 +590,7 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
     for (let i = 2; i < 4; i++) {
       const c = contacts[i];
       if (!c || !isHook(c.mode)) continue;
-      out.hookN[i] = hookPullIn(c.hold, c.mode === FOOT_HEEL, prm.assist);
+      out.hookN[i] = c.mode === FOOT_CAM ? SIM.camPull * (1 + SIM.assistCap * prm.assist) : hookPullIn(c.hold, c.mode === FOOT_HEEL, prm.assist);
       capSum += out.hookN[i];
       kSum += c.y;
     }
@@ -680,6 +688,8 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
       GRIP.friction = hf ? hf[i] : 1;
       cap = c.hold ? handCapacity(c.hold, c.hx, c.hy, dx, dy, c.matched, GRIP) : 0.02;
       handCapSum += cap;
+    } else if (c.mode === FOOT_CAM) {
+      cap = c.hold ? camCapacity(c.hold, c.hold2, prm.assist) : 0.02;
     } else if (isHook(c.mode)) {
       cap = c.hold ? hookCapacity(c.hold, c.mode === FOOT_HEEL, c.hx, c.hy, dx, dy, GRIP) : 0.02;
     } else {
@@ -727,17 +737,19 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
       const ry = c.y - comY;
       const cap = out.cap[i];
       const w = (isHandIdx(i) ? SIM.handCost : SIM.footCost) / (cap * cap);
+      const cam = c.mode === FOOT_CAM;
       A0[nc] = ux;
       A1[nc] = uy;
       A2[nc] = rx * uy - ry * ux;
       WI[nc] = 1 / w;
       CL[nc] = i;
-      CK[nc] = 0;
+      // (a cam pushes or pulls along the leg: its axial force has no sign constraint)
+      CK[nc] = cam ? 3 : 0;
       nc++;
       A0[nc] = tx;
       A1[nc] = ty;
       A2[nc] = rx * ty - ry * tx;
-      WI[nc] = 1 / (w * SIM.perpCost);
+      WI[nc] = 1 / (w * SIM.perpCost * (cam ? SIM.camPerp : 1));
       CL[nc] = i;
       CK[nc] = 1;
       nc++;
@@ -796,7 +808,7 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
       continue;
     }
     for (let k = 0; k < nc; k++) {
-      if (CK[k] === 0) LAM[CL[k]] = XS[k];
+      if (CK[k] === 0 || CK[k] === 3) LAM[CL[k]] = XS[k];
       else if (CK[k] === 1) MU[CL[k]] = XS[k];
       else tau = XS[k];
     }
@@ -921,6 +933,11 @@ export function evaluateStance(pose: Pose, contacts: Contacts, prm: StaticsParam
  * strenuous and hooks were never planned).
  */
 function hookPull(c: Contact, i: number, ax: Float64Array, ay: Float64Array, assist: number): number {
+  if (c.mode === FOOT_CAM) {
+    const n = SIM.camPull * (1 + SIM.assistCap * assist);
+    const lim = c.hold ? SIM.hookPullStress * camCapacity(c.hold, c.hold2, assist) : 0;
+    return n < lim ? n : lim;
+  }
   const heel = c.mode === FOOT_HEEL;
   const n = hookPullIn(c.hold, heel, assist);
   if (!c.hold) return n;
@@ -960,12 +977,12 @@ export function chooseFootModes(pose: Pose, contacts: Contacts, prm: StaticsPara
   let best = Infinity;
   let b2 = cur2;
   let b3 = cur3;
-  for (let a = 0; a < 4; a++) {
+  for (let a = 0; a < 5; a++) {
     if (k2) {
       if (!(k2 & (1 << a))) continue;
       c2!.mode = MODE_OF[a];
     } else if (a > 0) break;
-    for (let b = 0; b < 4; b++) {
+    for (let b = 0; b < 5; b++) {
       if (k3) {
         if (!(k3 & (1 << b))) continue;
         c3!.mode = MODE_OF[b];
@@ -984,8 +1001,8 @@ export function chooseFootModes(pose: Pose, contacts: Contacts, prm: StaticsPara
   if (c3) c3.mode = b3;
   return best;
 }
-/** footModeOptions bit index → Contact.mode (FM_EDGE, FM_HEEL, FM_TOE, FM_DROP). */
-const MODE_OF = [0, 2, 3, 4] as const;
+/** footModeOptions bit index → Contact.mode (FM_EDGE, FM_HEEL, FM_TOE, FM_DROP, FM_CAM). */
+const MODE_OF = [0, 2, 3, 4, 5] as const;
 
 /** Side-view scratch of the profile path. */
 const SV: Side = { h: 0, z: 0 };

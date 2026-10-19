@@ -23,6 +23,9 @@ import {
   contactPoint,
   footModeFor,
   footModeOptions,
+  camPartner,
+  type CamPartner,
+  FM_CAM,
   FM_EDGE,
   FM_HOOK,
   LIMB_IDS,
@@ -40,6 +43,7 @@ import {
 import {
   computeAnchors,
   evaluateStance,
+  FOOT_CAM,
   FOOT_DROP,
   FOOT_HEEL,
   FOOT_PUSH,
@@ -445,8 +449,34 @@ class Planner {
       this.fm[i] = footModeOptions(c.hold, c.x, c.y, this.AX[i], this.AY[i], pose.px, wall, null);
       const m = footModeFor(c.hold, c.x, c.y, this.AX[i], this.AY[i], pose.px, wall, null);
       this.fp[i] = m === 'heel' ? FOOT_HEEL : m === 'toe' ? FOOT_TOE : m === 'drop' ? FOOT_DROP : FOOT_PUSH;
+      // a heel-toe cam against an opposing surface the other limbs don't hold (the sim's rule)
+      c.hold2 = null;
+      if (wall >= SIM.camMinAngle) {
+        const t = this.camTaken;
+        let n = 0;
+        for (let k = 0; k < 4; k++) {
+          if (k === i) continue;
+          const o = contacts[k];
+          t[n++] = o ? o.hold : null;
+          if (k >= 2) t[n++] = o && o.mode === FOOT_CAM ? o.hold2 : null;
+        }
+        while (n < t.length) t[n++] = null;
+        let ux = pose.cx - pose.px;
+        let uy = pose.cy - pose.py;
+        const ul = dhypot(ux, uy) || 1;
+        ux /= ul;
+        uy /= ul;
+        const p = camPartner(c.hold, c.x, c.y, i, this.AX[i], this.AY[i], ux, uy, wall, this.footHolds, t, this.camOut, prof);
+        if (p) {
+          this.fm[i] |= FM_CAM;
+          c.hold2 = p.hold;
+          this.fp[i] = FOOT_CAM;
+        }
+      }
     }
   }
+  private readonly camOut: CamPartner = { hold: null, x: 0, y: 0 };
+  private readonly camTaken: (HoldDef | null)[] = [null, null, null, null, null, null];
   /** The geometric technique (holds.footModeFor) of each foot, as Contact.mode (footOptions). */
   private readonly fp = [0, 0, 0, 0];
 

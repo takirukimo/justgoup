@@ -128,8 +128,12 @@ import {
   type ContactFrame,
   footModeFor,
   footModeOptions,
+  FM_CAM,
   FM_EDGE,
   FM_HOOK,
+  camPartner,
+  camCapacity,
+  type CamPartner,
   LIMB_IDS,
   LIMB_INDEX,
   maxReachIdx,
@@ -148,6 +152,7 @@ import { angleAt, local3DToSurface, profileOf, smoothAngleAt, surfaceToLocal3D, 
 import {
   computeAnchors,
   evaluateStance,
+  FOOT_CAM,
   FOOT_DROP,
   FOOT_HEEL,
   FOOT_PUSH,
@@ -244,9 +249,14 @@ interface LimbRt {
   hy: number;
   /** Move counter value of this limb's last lift / placement (newest crossing limb goes in front). */
   stamp: number;
+  /** Feet in a heel-toe cam: the opposite hold (a route hold or volume) and its contact point. */
+  camHold: HoldDef | null;
+  camX: number;
+  camY: number;
   /** Contact geometry for the renderer (holds.contactFrame), refreshed on attach / technique change. */
   readonly frame: ContactFrame;
   readonly cPos: Vec2;
+  readonly camPos: Vec2;
   readonly cNormal: { x: number; y: number; z: number };
   readonly cGrip: Vec2;
 }
@@ -268,6 +278,9 @@ export interface SimStats {
   shakeOuts: number;
   /** Highest forearm pump reached (either hand). */
   maxPump: number;
+  /** Bat hangs and figure 4s during this climb (advanced moves). */
+  batHangs: number;
+  figure4s: number;
 }
 
 const EMPTY_EVENTS: SimEvent[] = [];
@@ -326,8 +339,12 @@ function newLimb(): LimbRt {
     hx: 0,
     hy: -1,
     stamp: 0,
+    camHold: null,
+    camX: 0,
+    camY: 0,
     frame: { nx: 0, ny: 0, nz: 1, gx: 0, gy: 1 },
     cPos: { x: 0, y: 0 },
+    camPos: { x: 0, y: 0 },
     cNormal: { x: 0, y: 0, z: 1 },
     cGrip: { x: 0, y: 1 },
   };
@@ -377,6 +394,7 @@ function snapshot(id: LimbId): LimbSnapshot {
     contactPos: null,
     contactNormal: null,
     gripDir: null,
+    ...(id === 'LF' || id === 'RF' ? { camHoldId: null, camPos: null } : {}),
     ...(id === 'LH' || id === 'RH' ? { pump: 0, friction: 1, shakingOut: false, chalking: false, flying: false, flightTarget: null } : {}),
   };
 }
@@ -499,7 +517,7 @@ export class ClimberSim implements ClimberSimAPI {
 
   private events: SimEvent[] = [];
   private readonly state: ClimberState;
-  private readonly stats: SimStats = { slips: 0, maxTension: 0, shakeTime: 0, moves: 0, maxHeight: 0, chalkUps: 0, shakeOuts: 0, maxPump: 0 };
+  private readonly stats: SimStats = { slips: 0, maxTension: 0, shakeTime: 0, moves: 0, maxHeight: 0, chalkUps: 0, shakeOuts: 0, maxPump: 0, batHangs: 0, figure4s: 0 };
 
   /**
    * Optional extra (not in ClimberSimAPI): does chalk matter on this climb? True on lead (the hands sweat,
@@ -533,6 +551,25 @@ export class ClimberSim implements ClimberSimAPI {
   private footTick = 0;
   /** Dyno / deadpoint in progress (phase stays 'climbing'). */
   private flight: Flight | null = null;
+
+  // ── advanced moves ──
+  /** The special stance in progress (ClimberState.special). */
+  private special: 'bat' | 'figure4' | null = null;
+  /** Bat hang: seconds in it, hang fatigue 0..1, the 0..1 blend of the inverted pose, −1 swinging in / 0 hanging / +1 sitting up. */
+  private batT = 0;
+  private batFatigue = 0;
+  private batBlend = 0;
+  private batDir = 0;
+  /** The pose (and depths) a bat-hang transition starts from, the upright pose a sit-up ends in, the spine's side-view angle at the start. */
+  private readonly batFrom: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
+  private batFromDepth = 0;
+  private batFromBeta = 0;
+  private readonly batUp: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
+  private batUpDepth = 0;
+  private batUpBeta = 0;
+  /** Chest depth off the wall (m) in the hang (the spine points out of the wall under a roof). */
+  private batChestDepth = 0;
+  private readonly batInfo = { fatigue: 0, blend: 0 };
   private readonly flightInfo: FlightInfo = { kind: 'deadpoint', limbs: [], holdId: '', t: 0, apexIn: 0, power: 1 };
 
   constructor(boulder: BoulderDef, opts: ClimberSimOptions = {}) {
@@ -629,6 +666,12 @@ export class ClimberSim implements ClimberSimAPI {
     this.stats.chalkUps = 0;
     this.stats.shakeOuts = 0;
     this.stats.maxPump = 0;
+    this.stats.batHangs = 0;
+    this.stats.figure4s = 0;
+    this.special = null;
+    this.batFatigue = 0;
+    this.batDir = 0;
+    this.batBlend = 0;
     const place = startPlacement(this.boulder);
     this.placeLimbs(place, true);
     this.settle(1.6);
@@ -696,10 +739,14 @@ export class ClimberSim implements ClimberSimAPI {
     const i = LIMB_INDEX[limb];
     const L = this.limbs[i];
     if (L.busy || L.dragging) return false;
+    // in a bat hang the feet hold the climber (moving one drops them); a sit-up is in progress
+    if (this.special === 'bat' && (i >= 2 || this.batDir > 0)) return false;
+    if (this.special === 'bat') L.shakeOut = false;
     const held = L.hold;
     const wasAttached = !!held || L.smear;
     if (L.flag) this.clearFlag(i);
     L.mode = null;
+    L.camHold = null;
     L.prevHold = held;
     L.prevSmear = L.smear;
     L.prevX = L.cx;
@@ -773,6 +820,20 @@ export class ClimberSim implements ClimberSimAPI {
       const thrown = this.flickThrow(i, p, opts.velocity);
       if (thrown) return thrown;
     }
+    if (this.special === 'bat' && i < 2) {
+      // in the hang: a hand onto a hold sits up onto it; over nothing it hangs (shakes out) again
+      if (hold) {
+        this.attach(i, hold);
+        this.stats.moves++;
+        out.push({ type: 'grab', limb, holdId: hold.id, quality: this.predictGrip(limb, hold.id) });
+        this.startBatSitUp(i);
+      } else {
+        L.shakeOut = true;
+        out.push({ type: 'return', limb, holdId: null });
+      }
+      this.syncState();
+      return out;
+    }
     if (hold) {
       const quality = this.predictGrip(limb, hold.id);
       this.attach(i, hold);
@@ -781,11 +842,14 @@ export class ClimberSim implements ClimberSimAPI {
       if (i < 2) this.wearChalk(i, this.sweatM);
       out.push({ type: 'grab', limb, holdId: hold.id, quality });
       if (i < 2 && this.topIds.has(hold.id)) out.push({ type: 'top-touch', limb });
-      if (i >= 2 && L.mode && L.mode !== 'edge') out.push({ type: 'technique', limb, technique: L.mode as 'heel' | 'toe' | 'drop' });
+      if (i >= 2 && L.mode && L.mode !== 'edge') out.push({ type: 'technique', limb, technique: L.mode as 'heel' | 'toe' | 'drop' | 'cam' });
     } else if (i < 2 && this.releaseZone(i, p.x, p.y) === 'chalk' && this.startChalk(i, out)) {
       // reached back to the chalk bag (behind the hips)
     } else if (i < 2 && this.releaseZone(i, p.x, p.y) === 'shake' && this.canShakeOut(i)) {
       this.startShakeOut(i, out);
+    } else if (i < 2 && !this.limbs[1 - i].hold && !this.limbs[1 - i].busy && this.canBatHang()) {
+      // the last hand let go over nothing while both feet are hooked / cammed on a steep panel: bat hang
+      this.enterBat();
     } else if (i >= 2 && this.flagZone(i, p.x, p.y)) {
       this.setFlag(i, p.x, p.y);
       out.push({ type: 'technique', limb, technique: 'flag' });
@@ -971,7 +1035,9 @@ export class ClimberSim implements ClimberSimAPI {
   private startChalk(i: number, out: SimEvent[], returnAfter = true): boolean {
     const L = this.limbs[i];
     const o = this.limbs[1 - i];
-    if (!o.hold || o.dragging || o.busy || (this.phase !== 'climbing' && this.phase !== 'idle')) return false;
+    const bat = this.special === 'bat' && this.batDir <= 0;
+    if ((!o.hold && !bat) || o.dragging || o.busy || (this.phase !== 'climbing' && this.phase !== 'idle')) return false;
+    if (bat) returnAfter = false;
     // bouldering: chalk is cosmetic, so a dip never costs the climber the problem
     if (!this.chalkMatters && this.phase === 'climbing' && !this.canHoldWithout(i)) return false;
     if (L.shakeOut) this.endShakeOut(i);
@@ -1443,6 +1509,330 @@ export class ClimberSim implements ClimberSimAPI {
     this.retarget();
   }
 
+  // ═══════════════════════════════ advanced moves: bat hang ═══════════════════════════════
+
+  /**
+   * Could the climber let go with both hands into a bat hang right now? Both feet on holds in heel / toe hooks
+   * or heel-toe cams strong enough to hold half the body each (batFootCap ≥ 0.5 BW), on a panel of at least
+   * SIM.batMinAngle under the feet, climbing (not in a flight or another special stance).
+   */
+  canBatHang(): boolean {
+    if (this.phase !== 'climbing' || this.flight || this.special) return false;
+    return this.batFeetOk();
+  }
+
+  /** The feet alone can hold a bat hang (see canBatHang), ignoring the phase. */
+  private batFeetOk(): boolean {
+    for (let i = 2; i < 4; i++) {
+      const L = this.limbs[i];
+      if (!L.hold || L.dragging || L.busy) return false;
+      if (L.mode !== 'heel' && L.mode !== 'toe' && L.mode !== 'cam') return false;
+      if (this.batFootCap(i) < 0.5) return false;
+    }
+    return this.batPanel() >= SIM.batMinAngle;
+  }
+
+  /**
+   * Bat hang (advanced moves): let go with both hands and hang upside down from the hooked / cammed feet. The
+   * body swings back and down (SIM.batSwing) until it hangs inverted below the feet; the free hands shake out
+   * (fast recovery) and can chalk; core / hamstring fatigue builds (SIM.batEndure) and ends the hang at 1.
+   * Drag a hand onto a hold to sit up and grab it. Events: 'release' per hand, 'technique' ('bat'), later
+   * 'special-end'. Returns false (nothing changes) when canBatHang() is false.
+   */
+  batHang(): boolean {
+    if (!this.canBatHang()) return false;
+    for (let i = 0; i < 2; i++) {
+      const L = this.limbs[i];
+      if (L.busy) return false;
+    }
+    for (let i = 0; i < 2; i++) {
+      const L = this.limbs[i];
+      if (L.dragging) L.dragging = false;
+      if (L.hold) {
+        this.events.push({ type: 'release', limb: LIMB_IDS[i], holdId: L.hold.id });
+        L.prevHold = L.hold;
+        L.hold = null;
+        L.sfx = L.sfy = 0;
+        L.slipT = 0;
+        this.forearms[i].release();
+      }
+      if (L.shakeOut) this.endShakeOut(i);
+    }
+    this.refreshMatch();
+    this.enterBat();
+    this.syncState();
+    return true;
+  }
+
+  /** A foot's capacity in the hang (BW): a cam's, else its hook kind's × the hold's hookHoldFactor (× assist). */
+  private batFootCap(i: number): number {
+    const L = this.limbs[i];
+    const h = L.hold;
+    if (!h) return 0;
+    if (L.mode === 'cam') return camCapacity(h, L.camHold, this.assist);
+    const k = L.mode === 'heel' ? SIM.batHeelCap : L.mode === 'toe' ? SIM.batToeCap : 0;
+    return k * SIM.hookHoldFactor[h.type] * (1 + SIM.assistCap * this.assist);
+  }
+
+  /** Panel angle (degrees) under the feet (the steeper of the two). */
+  private batPanel(): number {
+    const a = this.limbs[2].cy;
+    const b = this.limbs[3].cy;
+    if (!this.prof) return this.boulder.wallAngle;
+    return Math.max(angleAt(this.prof, a), angleAt(this.prof, b));
+  }
+
+  private enterBat(): void {
+    this.special = 'bat';
+    this.batT = 0;
+    this.batDir = -1;
+    this.batBlend = 0;
+    this.hipTarget = null;
+    this.postureOn = false;
+    this.noHandsT = 0;
+    this.stanceHand = -1;
+    this.batFrom.px = this.P.x;
+    this.batFrom.py = this.P.y;
+    this.batFrom.cx = this.C.x;
+    this.batFrom.cy = this.C.y;
+    this.batFromDepth = this.depth;
+    this.batFromBeta = Math.atan2(Math.max(0, this.chestDepth() - this.depth), Math.max(0.05, this.C.y - this.P.y));
+    for (let i = 0; i < 2; i++) {
+      const L = this.limbs[i];
+      if (!L.dragging && !L.busy) L.shakeOut = true;
+    }
+    this.stats.batHangs++;
+    this.events.push({ type: 'technique', limb: 'LF', technique: 'bat' });
+  }
+
+  private readonly batPose: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
+  /**
+   * The inverted hang below the feet: the hips SIM.batLegHang along world-down from the feet, the spine
+   * pointing world-down (side-view angle π − θ from up the surface: θ the panel angle). Writes batPose and
+   * returns the pelvis depth.
+   */
+  private batHangTarget(): number {
+    const th = this.batPanel() * DEG;
+    const ct = Math.cos(th);
+    const st = Math.sin(th);
+    const fx = (this.limbs[2].cx + this.limbs[3].cx) / 2;
+    const fy = (this.limbs[2].cy + this.limbs[3].cy) / 2;
+    const sway = Math.sin(this.batT * 1.35) * 0.025 * this.batBlend;
+    this.batPose.px = fx + sway;
+    this.batPose.py = fy - ct * SIM.batLegHang;
+    return 0.06 + st * SIM.batLegHang;
+  }
+
+  /**
+   * Place pelvis + chest for a pelvis at (px, py, depth) and a spine side-view angle beta (0 up the surface,
+   * π/2 straight out of the wall, π down the surface). The in-plane spine never shrinks below 0.12 m (the
+   * body frame stays defined): its sign flips where the spine points straight out.
+   */
+  private placeSpine(px: number, py: number, depth: number, beta: number): void {
+    const c = Math.cos(beta);
+    let iy = BODY.spine * c;
+    if (iy > -0.12 && iy < 0.12) iy = c >= 0 ? 0.12 : -0.12;
+    this.P.x = px;
+    this.P.y = py;
+    this.C.x = px;
+    this.C.y = py + iy;
+    this.depth = depth;
+    this.batChestDepth = depth + BODY.spine * Math.max(0, Math.sin(beta));
+  }
+
+  /**
+   * Shoulders / hips of the body in the hang. Inverted (the chest below the pelvis in the wall plane) the
+   * climber still has its right side at +x (it flipped backward, about the x axis), so the sim's body frame
+   * is mirrored there: right = (−up.y, up.x).
+   */
+  private batAnchors(): void {
+    const P = this.P;
+    const C = this.C;
+    let ux = C.x - P.x;
+    let uy = C.y - P.y;
+    const l = Math.hypot(ux, uy) || 1;
+    ux /= l;
+    uy /= l;
+    const rx = uy >= 0 ? uy : -uy;
+    const ry = uy >= 0 ? -ux : ux;
+    this.ax[0] = C.x - rx * BODY.shoulderHalf;
+    this.ay[0] = C.y - ry * BODY.shoulderHalf;
+    this.ax[1] = C.x + rx * BODY.shoulderHalf;
+    this.ay[1] = C.y + ry * BODY.shoulderHalf;
+    this.ax[2] = P.x - rx * BODY.hipHalf;
+    this.ay[2] = P.y - ry * BODY.hipHalf;
+    this.ax[3] = P.x + rx * BODY.hipHalf;
+    this.ay[3] = P.y + ry * BODY.hipHalf;
+  }
+
+  /** One fixed step of the bat hang (swing in, hang, sit up): kinematic body, the feet carry the climber. */
+  private batStep(h: number): void {
+    this.time += h;
+    this.batT += h;
+    this.updateBusy(h);
+    if (this.special !== 'bat') return;
+    const ease = (t: number): number => t * t * (3 - 2 * t);
+    const th = this.batPanel() * DEG;
+    const betaHang = Math.PI - th;
+    const opx = this.P.x;
+    const opy = this.P.y;
+    const ocx = this.C.x;
+    const ocy = this.C.y;
+    if (this.batDir <= 0) {
+      // swing in (or hang): from the pose the hands let go in to the inverted hang
+      if (this.batDir < 0) {
+        this.batBlend = Math.min(1, this.batBlend + h / SIM.batSwing);
+        if (this.batBlend >= 1) this.batDir = 0;
+      }
+      const k = ease(this.batBlend);
+      const d = this.batHangTarget();
+      const F = this.batFrom;
+      this.placeSpine(F.px + (this.batPose.px - F.px) * k, F.py + (this.batPose.py - F.py) * k, this.batFromDepth + (d - this.batFromDepth) * k, this.batFromBeta + (betaHang - this.batFromBeta) * k);
+    } else {
+      // sitting up onto the grabbed hold: from the hang to the upright stance
+      this.batBlend = Math.max(0, this.batBlend - h / SIM.batSitUp);
+      const k = ease(1 - this.batBlend);
+      const d = this.batHangTarget();
+      const U = this.batUp;
+      const hx = this.batPose.px;
+      const hy = this.batPose.py;
+      this.placeSpine(hx + (U.px - hx) * k, hy + (U.py - hy) * k, d + (this.batUpDepth - d) * k, betaHang + (this.batUpBeta - betaHang) * k);
+      if (this.batBlend <= 0) {
+        this.endBat('grab');
+        return;
+      }
+    }
+    this.Pv.x = (this.P.x - opx) / h;
+    this.Pv.y = (this.P.y - opy) / h;
+    this.Cv.x = (this.C.x - ocx) / h;
+    this.Cv.y = (this.C.y - ocy) / h;
+    this.syncPose();
+    this.batAnchors();
+    // limbs: feet on their holds, free hands hang world-down from the shoulders (shaking out), a dragged
+    // hand follows the finger, a grabbing hand is on its hold
+    const ct = Math.cos(th);
+    const st = Math.sin(th);
+    for (let i = 0; i < 4; i++) {
+      const L = this.limbs[i];
+      if (L.hold) {
+        L.px = damp(L.px, L.cx, 30, h);
+        L.py = damp(L.py, L.cy, 30, h);
+        L.depth = damp(L.depth, i < 2 ? 0.03 : 0.02, 14, h);
+      } else if (L.dragging) {
+        const dx = L.tx - this.ax[i];
+        const dy = L.ty - this.ay[i];
+        const dl = Math.hypot(dx, dy);
+        const m = BODY.armMax + 0.25;
+        const k = dl > m ? m / dl : 1;
+        L.px = damp(L.px, this.ax[i] + dx * k, 30, h);
+        L.py = damp(L.py, this.ay[i] + dy * k, 30, h);
+        L.depth = damp(L.depth, 0.12, 14, h);
+      } else if (L.busy && L.busyKind === 'chalk') {
+        // the bag hangs at the hips (here above the shoulders)
+        L.px = damp(L.px, this.P.x, 16, h);
+        L.py = damp(L.py, this.P.y, 16, h);
+        L.depth = damp(L.depth, this.depth + 0.14, 12, h);
+      } else {
+        const w = Math.sin(this.time * Math.PI * 2 * 3.1) * 0.025;
+        L.px = damp(L.px, this.ax[i] + (i === 0 ? -1 : 1) * (0.06 + w), 10, h);
+        L.py = damp(L.py, this.ay[i] - ct * 0.58, 10, h);
+        L.depth = damp(L.depth, this.batChestDepth + st * 0.58, 10, h);
+      }
+    }
+    // the feet carry the body: each half of it (a sit-up's grabbing hand takes over as it comes up)
+    this.buildContacts();
+    let worst = 0;
+    const handShare = this.batDir > 0 ? ease(1 - this.batBlend) * 0.5 : 0;
+    for (let i = 0; i < 4; i++) {
+      const L = this.limbs[i];
+      if (!this.contacts[i]) {
+        L.load = L.stress = L.cap = 0;
+        continue;
+      }
+      if (i < 2) {
+        L.cap = 0.6;
+        L.load = handShare;
+        L.stress = L.load / L.cap;
+      } else {
+        L.cap = Math.max(this.batFootCap(i), 0.01);
+        L.load = 0.5 * (1 - handShare);
+        L.stress = L.load / L.cap;
+      }
+      L.sfx = L.sfy = 0;
+      if (L.stress > worst) worst = L.stress;
+      L.shake = damp(L.shake, smoothstep(0.75, 1.3, L.stress), 10, h);
+    }
+    // core + hamstrings: the hang tires (and stops tiring while sitting up)
+    if (this.batDir <= 0) this.batFatigue = Math.min(1, this.batFatigue + (h * (0.5 + worst)) / SIM.batEndure);
+    this.tension = damp(this.tension, worst + 0.35 * this.batFatigue, 8, h);
+    this.shakeAmt = damp(this.shakeAmt, smoothstep(0.6, 1.3, this.tension), 8, h);
+    this.balance = 0;
+    this.barnAmt = 0;
+    this.yaw = damp(this.yaw, 0, 3, h);
+    if (this.tension > this.stats.maxTension) this.stats.maxTension = this.tension;
+    this.updateForearms(h);
+    if (this.phase !== 'climbing') return;
+    if (this.batFatigue >= 1) {
+      // the feet let go
+      this.events.push({ type: 'special-end', special: 'bat', reason: 'fatigue' });
+      this.special = null;
+      this.fall('slip');
+      return;
+    }
+    this.updateSlips(h);
+  }
+
+  /** A hand grabbed a hold in the hang: sit up onto it (the inverted body swings back upright). */
+  private startBatSitUp(i: number): void {
+    this.batDir = 1;
+    this.forearms[i].spend(SIM.batSitUpPump);
+    // the upright stance the sit-up ends in: the statics' best pose for the grabbing hand + the feet
+    this.buildContacts();
+    const prm = this.prmScratch;
+    prm.reachLimb = -1;
+    prm.maxPelvisY = Infinity;
+    const init = this.batUp;
+    initialPose(this.contacts, prm, init);
+    const out: Pose = { px: 0, py: 0, cx: 0, cy: 0 };
+    optimizePose(this.contacts, prm, init, out, this.evScratch, 70);
+    evaluateStance(out, this.contacts, prm, this.evScratch);
+    this.batUp.px = out.px;
+    this.batUp.py = out.py;
+    this.batUp.cx = out.cx;
+    this.batUp.cy = out.cy;
+    this.batUpDepth = this.evScratch.depth;
+    const cd = chestDepthFor(this.evScratch.depth, steepness(Math.max(0, this.evScratch.sth)));
+    this.batUpBeta = Math.atan2(Math.max(0, cd - this.batUpDepth), Math.max(0.05, out.cy - out.py));
+  }
+
+  /** The hang is over (sat up onto a hold, or a fall): back to the normal body. */
+  private endBat(reason: 'grab' | 'foot' | 'fatigue' | 'slip' | 'fall'): void {
+    if (this.special !== 'bat') return;
+    this.special = null;
+    this.batDir = 0;
+    this.batBlend = 0;
+    for (let i = 0; i < 2; i++) this.limbs[i].shakeOut = false;
+    this.events.push({ type: 'special-end', special: 'bat', reason });
+    if (reason === 'grab') {
+      // land exactly in the sit-up's stance, then the normal body takes over from rest
+      this.P.x = this.batUp.px;
+      this.P.y = this.batUp.py;
+      this.C.x = this.batUp.cx;
+      this.C.y = this.batUp.cy;
+      this.depth = this.batUpDepth;
+      this.Pv.x = this.Pv.y = this.Cv.x = this.Cv.y = 0;
+      const l = Math.hypot(this.C.x - this.P.x, this.C.y - this.P.y) || 1;
+      this.leanUx = (this.C.x - this.P.x) / l;
+      this.leanUy = (this.C.y - this.P.y) / l;
+      this.lean = 0;
+      this.posture.px = this.P.x;
+      this.posture.py = this.P.y;
+      this.postureOn = true;
+      for (const L of this.limbs) L.age = Math.max(L.age, SOFT_ATTACH);
+      this.retarget();
+    }
+  }
+
   // ═══════════════════════════════ queries ═══════════════════════════════
 
   snapCandidate(limb: LimbId, p: Vec2): HoldDef | null {
@@ -1699,7 +2089,7 @@ export class ClimberSim implements ClimberSimAPI {
   private envLi(i: number): number {
     if (i < 2) return i;
     const m = this.limbs[i].mode;
-    return m === 'heel' || m === 'toe' ? i + 2 : i;
+    return m === 'heel' || m === 'toe' || m === 'cam' ? i + 2 : i;
   }
 
   /**
@@ -1710,7 +2100,8 @@ export class ClimberSim implements ClimberSimAPI {
    * holds the climber.
    */
   private footReach(i: number, h: HoldDef, cx: number, cy: number, tol: number): boolean {
-    const m = footModeOptions(h, cx, cy, this.ax[i], this.ay[i], this.P.x, this.techAngle(cy), null);
+    const wall = this.techAngle(cy);
+    const m = footModeOptions(h, cx, cy, this.ax[i], this.ay[i], this.P.x, wall, null) | (this.camFor(i, h, cx, cy, wall) ? FM_CAM : 0);
     const ei = m & FM_HOOK ? i + 2 : i;
     if (!this.reachOk(i, cx, cy, tol, ei)) return false;
     if (aboveHip(this.ax[i], this.ay[i], this.upTmp.x, this.upTmp.y, cx, cy) > SIM.highStepFree && !this.handHolding()) return false;
@@ -1728,6 +2119,8 @@ export class ClimberSim implements ClimberSimAPI {
 
   /** Reach check of limb i placed on hold h at (x, y): the foot's technique-aware range, a hand's own. */
   private placeOk(i: number, h: HoldDef, x: number, y: number, tol: number): boolean {
+    // in a bat hang a hand sits up to a hold near the hips (the body curls up toward the feet)
+    if (this.special === 'bat' && i < 2) return this.batDir <= 0 && Math.hypot(x - this.P.x, y - this.P.y) <= SIM.batGrabReach;
     return i < 2 ? this.reachOk(i, x, y, tol) : this.footReach(i, h, x, y, tol);
   }
 
@@ -1771,6 +2164,8 @@ export class ClimberSim implements ClimberSimAPI {
   private attach(i: number, h: HoldDef): void {
     const L = this.limbs[i];
     L.hold = h;
+    // a limb taking the hold a foot cams against breaks that cam (the foot re-picks its technique)
+    for (let k = 2; k < 4; k++) if (k !== i && this.limbs[k].mode === 'cam' && this.limbs[k].camHold === h) this.refineFootModes(k, false);
     L.hx = Math.cos(h.angle);
     L.hy = Math.sin(h.angle);
     L.smear = false;
@@ -1857,7 +2252,7 @@ export class ClimberSim implements ClimberSimAPI {
       const L = this.limbs[i];
       const m = L.mode;
       if (!L.hold || m === (i === 2 ? before0 : before1)) continue;
-      if (m && m !== 'edge' && this.phase === 'climbing') this.events.push({ type: 'technique', limb: LIMB_IDS[i], technique: m as 'heel' | 'toe' | 'drop' });
+      if (m && m !== 'edge' && this.phase === 'climbing') this.events.push({ type: 'technique', limb: LIMB_IDS[i], technique: m as 'heel' | 'toe' | 'drop' | 'cam' });
     }
   }
 
@@ -1874,19 +2269,46 @@ export class ClimberSim implements ClimberSimAPI {
     const wall = this.techAngle(L.cy);
     // the geometric rule (with its hysteresis on a re-check) is what the climber does by default …
     const primary = footModeFor(L.hold, L.cx, L.cy, this.ax[i], this.ay[i], this.P.x, wall, recheck ? L.mode : null);
-    const mask = footModeOptions(L.hold, L.cx, L.cy, this.ax[i], this.ay[i], this.P.x, wall, recheck ? L.mode : null);
-    L.mode = primary;
+    let mask = footModeOptions(L.hold, L.cx, L.cy, this.ax[i], this.ay[i], this.P.x, wall, recheck ? L.mode : null);
+    // a heel-toe cam: an opposing surface a foot-length away the other limbs don't hold
+    const partner = this.camFor(i, L.hold, L.cx, L.cy, wall);
+    if (partner) mask |= FM_CAM;
+    // (a foot dropped between two opposing surfaces cams: that is the default technique there)
+    L.mode = partner ? 'cam' : primary;
+    L.camHold = partner ? partner.hold : null;
+    L.camX = partner ? partner.x : 0;
+    L.camY = partner ? partner.y : 0;
     if ((mask & ~FM_EDGE) === 0 && primary === 'edge') return;
     this.buildContacts();
     const c = this.contacts[i];
     if (!c) return;
+    c.hold2 = L.camHold;
     this.syncPose();
     const prm = this.prmScratch;
     prm.reachLimb = -1;
     prm.maxPelvisY = Infinity;
     // … unless another technique it could use holds clearly better (a roof foot that can't stand toe-pulls)
     chooseFootModes(this.pose, this.contacts, prm, this.evScratch, i === 2 ? mask : 0, i === 3 ? mask : 0, SIM.footModeBias);
-    L.mode = c.mode === FOOT_HEEL ? 'heel' : c.mode === FOOT_TOE ? 'toe' : c.mode === FOOT_DROP ? 'drop' : 'edge';
+    L.mode = c.mode === FOOT_HEEL ? 'heel' : c.mode === FOOT_TOE ? 'toe' : c.mode === FOOT_DROP ? 'drop' : c.mode === FOOT_CAM ? 'cam' : 'edge';
+    if (L.mode !== 'cam') L.camHold = null;
+  }
+
+  private readonly camOut: CamPartner = { hold: null, x: 0, y: 0 };
+  private readonly camTaken: (HoldDef | null)[] = [null, null, null, null, null, null];
+  /** A heel-toe cam partner for foot i on hold h at (cx, cy) right now (frame from frameNow()), or null. */
+  private camFor(i: number, h: HoldDef, cx: number, cy: number, wall: number): CamPartner | null {
+    const t = this.camTaken;
+    let n = 0;
+    for (let k = 0; k < 4; k++) {
+      if (k === i) continue;
+      const L = this.limbs[k];
+      t[n++] = L.hold && !L.dragging ? L.hold : null;
+      if (k >= 2) t[n++] = L.mode === 'cam' ? L.camHold : null;
+    }
+    while (n < t.length) t[n++] = null;
+    const L = this.limbs[i];
+    const cur = L.mode === 'cam' && L.hold === h ? L.camHold : null;
+    return camPartner(h, cx, cy, i, this.ax[i], this.ay[i], this.upTmp.x, this.upTmp.y, wall, this.footHolds, t, this.camOut, this.prof, cur);
   }
 
   /**
@@ -2118,10 +2540,33 @@ export class ClimberSim implements ClimberSimAPI {
     this.postureOn = true;
     if (resetPose) this.depth = 0.25;
     // foot techniques from the settled pose (attach() saw the old one)
+    let modesChanged = false;
     for (let i = 2; i < 4; i++) {
       const L = this.limbs[i];
       if (L.hold) {
+        const m0 = L.mode;
         this.refineFootModes(i, false);
+        if (L.mode !== m0) modesChanged = true;
+      }
+    }
+    if (modesChanged) {
+      // a technique the start pose didn't know about (a cam, a hook) settles it elsewhere: re-optimize from it
+      this.buildContacts();
+      const seed: Pose = { px: best.px, py: best.py, cx: best.cx, cy: best.cy };
+      const r2 = optimizePose(this.contacts, this.prm, seed, best, this.evScratch, 110);
+      if (r2.violation <= 0.01) {
+        this.P.x = this.posture.px = best.px;
+        this.P.y = this.posture.py = best.py;
+        this.C.x = best.cx;
+        this.C.y = best.cy;
+        const l = Math.hypot(best.cx - best.px, best.cy - best.py) || 1;
+        this.leanUx = (best.cx - best.px) / l;
+        this.leanUy = (best.cy - best.py) / l;
+        if (this.prof) {
+          evaluateStance(best, this.contacts, this.prm, this.evScratch);
+          this.gc = this.evScratch.cth;
+          this.gs = this.evScratch.sth;
+        }
       }
     }
     // limb endpoints at their contacts
@@ -2218,7 +2663,8 @@ export class ClimberSim implements ClimberSimAPI {
         c.matched = !!L.hold && this.wouldMatch(i, L.hold);
         c.hx = L.hx;
         c.hy = L.hy;
-        c.mode = i < 2 || !L.hold ? FOOT_PUSH : L.mode === 'heel' ? FOOT_HEEL : L.mode === 'toe' ? FOOT_TOE : L.mode === 'drop' ? FOOT_DROP : FOOT_PUSH;
+        c.mode = i < 2 || !L.hold ? FOOT_PUSH : L.mode === 'heel' ? FOOT_HEEL : L.mode === 'toe' ? FOOT_TOE : L.mode === 'drop' ? FOOT_DROP : L.mode === 'cam' ? FOOT_CAM : FOOT_PUSH;
+        c.hold2 = i >= 2 && L.mode === 'cam' ? L.camHold : null;
         this.contacts[i] = c;
       } else this.contacts[i] = null;
     }
@@ -2355,6 +2801,7 @@ export class ClimberSim implements ClimberSimAPI {
       case 'climbing':
       case 'topped':
         if (this.flight) this.flyStep(h);
+        else if (this.special === 'bat') this.batStep(h);
         else this.climbStep(h, 1);
         break;
       case 'falling':
@@ -2464,6 +2911,7 @@ export class ClimberSim implements ClimberSimAPI {
 
     if (!climbing) return;
     this.time += h;
+    if (this.batFatigue > 0) this.batFatigue = Math.max(0, this.batFatigue - SIM.batRecover * h);
     if (this.tension > this.stats.maxTension) this.stats.maxTension = this.tension;
     if (this.P.y > this.stats.maxHeight) this.stats.maxHeight = this.P.y;
 
@@ -2976,6 +3424,10 @@ export class ClimberSim implements ClimberSimAPI {
         this.chalkWear[i] = 0;
         this.handFric[i] = 1;
         this.events.push({ type: 'chalk-done', limb: LIMB_IDS[i] });
+        if (this.special === 'bat') {
+          L.shakeOut = true;
+          continue;
+        }
         if (L.prevHold) {
           let ret = this.returnLimb(i);
           if (ret === null && !L.hold) {
@@ -3039,7 +3491,7 @@ export class ClimberSim implements ClimberSimAPI {
         f *= 1 + FA.lockoffCost * bend;
         f += FA.barnCost * barn;
       }
-      fa.step(h, { f, gripping, shaking: L.shakeOut || L.busyKind === 'chalk', drainScale: drain });
+      fa.step(h, { f, gripping, shaking: L.shakeOut || L.busyKind === 'chalk', drainScale: drain, boost: this.special === 'bat' && !gripping ? SIM.batShakeBoost : 1 });
       if (this.invincible) {
         if (fa.w < 1 - SIM.pumpInvincibleCap) fa.w = 1 - SIM.pumpInvincibleCap;
         fa.exhausted = false;
@@ -3136,6 +3588,11 @@ export class ClimberSim implements ClimberSimAPI {
       }
     if (hands === 0) {
       this.noHandsT += h;
+      // no hand on, but both feet hooked / cammed on a steep panel: the climber falls back into a bat hang
+      if (this.batFeetOk() && !this.flight) {
+        if (this.noHandsT > SIM.batAutoAfter) this.enterBat();
+        return;
+      }
       if (this.noHandsT > SIM.noHandsGrace) this.fall(contacts === 0 ? 'no-contact' : 'no-hands');
     } else this.noHandsT = 0;
   }
@@ -3175,6 +3632,12 @@ export class ClimberSim implements ClimberSimAPI {
     if (this.shaking) {
       this.shaking = false;
       this.events.push({ type: 'shake-end' });
+    }
+    if (this.special) {
+      this.events.push({ type: 'special-end', special: this.special, reason: reason === 'slip' ? 'slip' : 'fall' });
+      this.special = null;
+      this.batDir = 0;
+      this.batBlend = 0;
     }
     this.events.push({ type: 'fall', reason });
     this.phase = 'falling';
@@ -3440,6 +3903,7 @@ export class ClimberSim implements ClimberSimAPI {
    * out under steep panels: body tension); in the air or on the rope a little beyond the hips.
    */
   private chestDepth(): number {
+    if (this.special === 'bat') return this.batChestDepth;
     if (this.phase === 'climbing' || this.phase === 'idle' || this.phase === 'topped') {
       if (!this.flight) return chestDepthFor(this.depth, steepness(Math.max(0, this.gs)));
     }
@@ -3483,6 +3947,13 @@ export class ClimberSim implements ClimberSimAPI {
       for (const c of this.clipped) s.clipped.push(c);
     }
     const u = this.frameNow();
+    if (this.special === 'bat') this.batAnchors();
+    s.special = this.special;
+    if (this.special === 'bat') {
+      this.batInfo.fatigue = this.batFatigue;
+      this.batInfo.blend = this.batBlend;
+      s.bat = this.batInfo;
+    } else s.bat = null;
     this.updateLayers();
     for (let i = 0; i < 4; i++) {
       const L = this.limbs[i];
@@ -3502,7 +3973,16 @@ export class ClimberSim implements ClimberSimAPI {
       o.smearing = L.smear;
       o.shake = L.shake;
       o.busy = L.busy;
-      if (i >= 2) o.footMode = L.flag ? 'flag' : (L.hold || L.smear) && !L.dragging ? L.mode ?? 'edge' : undefined;
+      if (i >= 2) {
+        o.footMode = L.flag ? 'flag' : (L.hold || L.smear) && !L.dragging ? L.mode ?? 'edge' : undefined;
+        const cam = L.mode === 'cam' && !!L.hold && !L.dragging;
+        o.camHoldId = cam && L.camHold ? L.camHold.id : null;
+        if (cam) {
+          L.camPos.x = L.camX;
+          L.camPos.y = L.camY;
+          o.camPos = L.camPos;
+        } else o.camPos = null;
+      }
       if ((L.hold || L.smear) && !L.dragging && !L.busy) {
         // contact geometry for the renderer (the exact contact, the touched surface, the grip side)
         this.contactGeometry(i);
@@ -3550,6 +4030,18 @@ export class ClimberSim implements ClimberSimAPI {
       const l = Math.hypot(dx, dy) || 1;
       L.cGrip.x = dx / l;
       L.cGrip.y = dy / l;
+    } else if (L.mode === 'cam') {
+      // a heel-toe cam: the gripped surface faces the opposite one; the foot's axis runs heel → toe (the
+      // heel on whichever contact is nearer the hip)
+      const dx = L.camX - L.cx;
+      const dy = L.camY - L.cy;
+      const l = Math.hypot(dx, dy) || 1;
+      const heelHere = Math.hypot(L.cx - this.ax[i], L.cy - this.ay[i]) < Math.hypot(L.camX - this.ax[i], L.camY - this.ay[i]);
+      L.cGrip.x = heelHere ? dx / l : -dx / l;
+      L.cGrip.y = heelHere ? dy / l : -dy / l;
+      L.cNormal.x = dx / l;
+      L.cNormal.y = dy / l;
+      L.cNormal.z = 0;
     } else {
       L.cGrip.x = f.gx;
       L.cGrip.y = f.gy;
