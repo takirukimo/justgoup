@@ -95,7 +95,11 @@ export function riseLabel(rise: number): string {
   return r < 0.995 ? `+${Math.round(r * 100)} CM` : `+${r.toFixed(1)} M`;
 }
 
-/** Tag text for a throw preview: kind (or TOO FAR) + rise. */
-export function throwWord(d: Pick<DynoPreview, 'kind' | 'rise' | 'feasible'>): { word: string; type: string } {
-  return { word: d.feasible ? (d.kind === 'dyno' ? 'DYNO' : 'DEADPOINT') : 'TOO FAR', type: riseLabel(d.rise) };
+/**
+ * Tag text for a throw preview: kind + rise; TOO FAR when it falls short, WON'T STICK when it reaches but
+ * the catch would rip off (DynoPreview.sticks === false: the hold can't stop the body at that speed).
+ */
+export function throwWord(d: Pick<DynoPreview, 'kind' | 'rise' | 'feasible'> & { sticks?: boolean }): { word: string; type: string } {
+  const word = !d.feasible ? 'TOO FAR' : d.sticks === false ? 'WON’T STICK' : d.kind === 'dyno' ? 'DYNO' : 'DEADPOINT';
+  return { word, type: riseLabel(d.rise) };
 }

@@ -2122,7 +2122,7 @@ export class LimbControls implements LimbControlsAPI {
       tagOn = true;
     } else if (d && dh && this.homo.map(dh.x, dh.y, this.s0)) {
       const t = throwWord(d);
-      this.setTagText(this.candTag, t.word, d.feasible ? `${t.type} · FLICK` : t.type, d.feasible ? C_THROW : PALETTE.mist);
+      this.setTagText(this.candTag, t.word, d.feasible ? `${t.type} · FLICK` : t.type, d.feasible && d.sticks !== false ? C_THROW : PALETTE.mist);
       const rpx = holdRadius(dh) * this.homo.scaleAt(dh.x, dh.y, this.s2, this.s3);
       this.placeTag(this.candTag, this.s0.x, this.s0.y, rpx + 6, h.x, h.y);
       tagOn = true;
@@ -2465,7 +2465,7 @@ export class LimbControls implements LimbControlsAPI {
     const colour = c
       ? qualityColor(this.quality)
       : dyno
-        ? dyno.feasible
+        ? dyno.feasible && dyno.sticks !== false
           ? C_THROW
           : C_THROW_DIM
         : this.zone === ZONE_CHALK

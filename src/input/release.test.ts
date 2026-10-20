@@ -105,6 +105,10 @@ describe('release helpers', () => {
     expect(throwWord({ kind: 'deadpoint', rise: 0.3, feasible: true })).toEqual({ word: 'DEADPOINT', type: '+30 CM' });
     expect(throwWord({ kind: 'dyno', rise: 0.5, feasible: true }).word).toBe('DYNO');
     expect(throwWord({ kind: 'dyno', rise: 0.9, feasible: false }).word).toBe('TOO FAR');
+    // reaches, but the catch would rip off (sim: DynoPreview.sticks === false)
+    expect(throwWord({ kind: 'deadpoint', rise: 0.4, feasible: true, sticks: false }).word).toBe('WON\u2019T STICK');
+    expect(throwWord({ kind: 'deadpoint', rise: 0.4, feasible: true, sticks: true }).word).toBe('DEADPOINT');
+    expect(throwWord({ kind: 'dyno', rise: 0.9, feasible: false, sticks: false }).word).toBe('TOO FAR');
   });
 });
 
