@@ -295,6 +295,8 @@ const MIN_PELVIS_Y = GAME.padHeight + 0.42;
  * linearly to 0; it never grows), and meanwhile being past the edge doesn't count toward popping off.
  */
 const SOFT_ATTACH = 0.25;
+/** Seconds a re-check keeps a foot technique it just changed before it may change it again (see techSwitchT). */
+const SIM_TECH_HOLD = 1.0;
 /** A dragged foot's target turns the torso lean only while it is within this far (m) of reach. */
 const FOOT_LEAN_REACH = 0.15;
 /** Torso leans (rad, within statics.LEAN_MAX) the hip handle's feasibility search may assume. */
@@ -2662,16 +2664,24 @@ export class ClimberSim implements ClimberSimAPI {
     return (this.prof ? angleAt(this.prof, y) : this.boulder.wallAngle) <= SIM.smearMaxAngle;
   }
 
+  /**
+   * Sim time of each foot's last technique change on a re-check. A re-check that just changed a foot's technique
+   * holds it for SIM_TECH_HOLD s: the new technique moves the body, and from there the old one could look better
+   * again, so a foot flipped toe hook <-> heel hook on every re-check (4x a second, each a 'technique' event:
+   * sound, haptics, the foot pose flipping; QA, photo test climb). Placing the foot clears it.
+   */
+  private readonly techSwitchT = [-1e9, -1e9, -1e9, -1e9];
+
   /** Re-check the attached feet's techniques (a rock-over turns a heel hook into a standing foot). */
   private updateFootModes(): void {
     const before0 = this.limbs[2].mode;
     const before1 = this.limbs[3].mode;
-    this.refineFootModes(2, true);
-    this.refineFootModes(3, true);
+    for (let i = 2; i < 4; i++) if (this.time - this.techSwitchT[i] >= SIM_TECH_HOLD || this.time < this.techSwitchT[i]) this.refineFootModes(i, true);
     for (let i = 2; i < 4; i++) {
       const L = this.limbs[i];
       const m = L.mode;
       if (!L.hold || m === (i === 2 ? before0 : before1)) continue;
+      this.techSwitchT[i] = this.time;
       if (m && m !== 'edge' && this.phase === 'climbing') this.events.push({ type: 'technique', limb: LIMB_IDS[i], technique: m as 'heel' | 'toe' | 'drop' | 'cam' });
     }
   }
@@ -2684,6 +2694,7 @@ export class ClimberSim implements ClimberSimAPI {
    */
   private refineFootModes(i: number, recheck: boolean): void {
     const L = this.limbs[i];
+    if (!recheck) this.techSwitchT[i] = -1e9;
     if (!L.hold || L.dragging || L.flag) return;
     this.frameNow();
     const wall = this.techAngle(L.cy);
