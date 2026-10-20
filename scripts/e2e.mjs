@@ -5,7 +5,10 @@
 //   baseUrl defaults to http://localhost:5207 (start the dev server first:
 //   VITE_CACHE_DIR=node_modules/.vite-integration npx vite --config dev/e2e.vite.config.mjs --port 5207 --strictPort
 //   — that config never reloads the page mid-run; restart it after source changes)
-//   steps: onboarding, sendtrain, leaderboard, locker, human, settings, pure, profile, community, editor, daily, communityplay, lead, startover
+//   steps: onboarding, sendtrain, leaderboard, locker, human, settings, pure, profile, community, editor, editorcave, photo, daily, communityplay, lead, startover
+//   (editorcave: a CAVE sample, a volume from the library with a crimp bolted onto it, TEST sent by the
+//    sim's climbing bot inside the live session (a V6 roof by touch takes headless frames too long), PUBLISH)
+//   (photo: IMPORT FROM PHOTO with a procedurally generated wall photo, the imported problem tested by touch)
 //   (startover runs last: Settings → START OVER wipes the profile and reloads into the first-launch flow)
 //   (pure: Settings → Pure climbing on, a Send Train problem climbed by touch with no HUD, then off again)
 //   --only runs a subset (later steps seed a returning-player profile when onboarding is skipped).
@@ -49,6 +52,10 @@ page.on('console', (m) => {
   else if (m.type() === 'warning') warnings.push(t);
 });
 page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
+// unhandled promise rejections fail the run too (the app reports them itself; this catches any that slip by)
+await context.addInitScript(() => {
+  window.addEventListener('unhandledrejection', (e) => console.error(`unhandledrejection: ${e.reason?.stack || e.reason}`));
+});
 
 if (!want('onboarding')) {
   // a returning player: intro seen, named, tutorial skipped earlier
@@ -239,11 +246,31 @@ async function settleHandle(limb) {
   }
 }
 
+/**
+ * Headless frames take ~0.7 s each, so a drag that a thumb makes in ~0.3 s spans seconds of game time
+ * with that limb off. On hard test climbs (cave, photo) `fastFinger` holds the sim still while the
+ * finger travels: the release still goes through LimbControls and the sim decides the grab.
+ */
+let fastFinger = false;
+const holdSim = (on) => page.evaluate((on) => {
+  const s = window.__jgu.app.activeSession;
+  if (s?.driver) s.driver.paused = on;
+}, on);
+
 async function dragMove(limb, holdId) {
   await settleHandle(limb);
   let s = await look(holdId, limb);
   if (!s || s.phase !== 'climbing' || !s.handle || !s.to) return 'skip';
   let finger = { ...s.handle };
+  if (fastFinger) await holdSim(true);
+  try {
+    return await dragMoveInner(limb, holdId, s, finger);
+  } finally {
+    if (fastFinger) await holdSim(false);
+  }
+}
+
+async function dragMoveInner(limb, holdId, s, finger) {
   await touch('touchStart', [finger]);
   await frames(1);
   s = await look(holdId, limb);
@@ -525,6 +552,105 @@ async function autoClimb({ until, maxMoves = 60, label, careful = false }) {
   return await until();
 }
 
+/** Chalk controls on the HUD right now (owner: boulders have none, lead keeps the chalk mechanic). */
+const chalkHud = () =>
+  page.evaluate(() => {
+    const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden' && +getComputedStyle(e).opacity > 0.05;
+    return {
+      chips: [...document.querySelectorAll('.scr-hud .fa-chalk')].filter(vis).length,
+      noChalk: !!document.querySelector('.scr-hud .no-chalk, .scr-hud.no-chalk'),
+      matters: window.__jgu.sim?.chalkMatters ?? null,
+    };
+  });
+
+/** Like a player who fell on a test climb: up to `tries` touch climbs, TRY AGAIN in between. */
+async function testClimbByTouch(label, tries = 3, { fast = false } = {}) {
+  let sent = false;
+  let ph = 'gone';
+  fastFinger = fast;
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    sent = await autoClimb({
+      label: `${label} #${attempt}`,
+      careful: attempt > 1,
+      until: async () => {
+        const p = await page.evaluate(() => window.__jgu.sim?.getState().phase ?? 'gone');
+        return p === 'topped' || p === 'falling' || p === 'landed' || p === 'gone';
+      },
+    });
+    ph = await page.evaluate(() => window.__jgu.sim?.getState().phase ?? 'gone');
+    if (ph === 'topped' || attempt === tries) break;
+    log(`${label} attempt ${attempt} ended ${ph}: try again`);
+    if (ph === 'climbing') await page.evaluate(() => window.__jgu.sim.forceFall());
+    await waitScreen('results', 90000);
+    await page.waitForTimeout(1200);
+    await tapText('TRY AGAIN');
+    await waitScreen('preview', 120000);
+    await veilClear();
+    await tap('.pv-hit', 'TAP TO START');
+    await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', `${label} climb start (again)`, 60000);
+    await page.waitForTimeout(600);
+  }
+  fastFinger = false;
+  const done = sent && ph === 'topped';
+  if (!done) {
+    // not sent: back to the editor through the results (a send returns there by itself)
+    if (ph === 'climbing') await page.evaluate(() => window.__jgu.sim.forceFall());
+    await waitScreen('results', 90000).catch(() => false);
+    if (await page.locator('#ui button', { hasText: 'EDITOR' }).count()) await tapText('EDITOR');
+  }
+  return { sent: done, phase: ph };
+}
+
+/**
+ * The sim's own climbing bot (src/game/bot.ts BetaBot) drives the live session's sim, in game time
+ * (it runs inside sim.step, so the session, HUD, results and editor hand-back are the real ones).
+ * Used for the cave test climb: a V6 roof by touch drags takes headless frames far too long.
+ */
+async function botClimb(label, tries = 2) {
+  let ph = 'gone';
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    const r0 = await page.evaluate(async () => {
+      const sim = window.__jgu.sim;
+      const { BetaBot } = await import('/src/game/bot.ts');
+      const bot = new BetaBot(sim);
+      const step = sim.step.bind(sim);
+      let ev = [];
+      sim.step = (d) => {
+        bot.update(d, ev);
+        ev = step(d);
+        return ev;
+      };
+      window.__e2eBot = bot;
+      return { failed: bot.failed };
+    });
+    log(`${label} #${attempt}: the climbing bot takes over${r0.failed ? ' (no plan)' : ''}`);
+    await waitFor(() => !['climbing', 'idle'].includes(window.__jgu.sim?.getState().phase ?? 'gone'), `${label} climb to end`, 900000).catch(() => false);
+    ph = await page.evaluate(() => window.__jgu.sim?.getState().phase ?? 'gone');
+    const moves = await page.evaluate(() => window.__e2eBot?.moves ?? 0);
+    log(`${label} #${attempt}: ${ph} after ${moves} moves`);
+    if (ph === 'topped' || attempt === tries) break;
+    await waitScreen('results', 90000);
+    await page.waitForTimeout(1200);
+    await tapText('TRY AGAIN');
+    await waitScreen('preview', 120000);
+    await veilClear();
+    await tap('.pv-hit', 'TAP TO START');
+    await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', `${label} climb start (again)`, 60000);
+    await page.waitForTimeout(600);
+  }
+  if (ph !== 'topped') {
+    await waitScreen('results', 90000).catch(() => false);
+    if (await page.locator('#ui button', { hasText: 'EDITOR' }).count()) await tapText('EDITOR');
+  }
+  return { sent: ph === 'topped', phase: ph };
+}
+
+/** The editor's problem check (the analyzer's beta reader) once it has settled: 'ok' / 'nobeta' / 'invalid'. */
+const editorChip = async () => {
+  await waitFor(() => ['ok', 'nobeta', 'invalid'].includes(document.querySelector('.ed-chip')?.dataset.status ?? ''), 'editor problem check', 90000);
+  return page.evaluate(() => ({ status: document.querySelector('.ed-chip').dataset.status, text: document.querySelector('.ed-chip').textContent }));
+};
+
 // ───────────────────────────── Send Train: climb + send ─────────────────────────────
 if (want('sendtrain')) {
   await tap('.title-play', 'PLAY');
@@ -540,6 +666,8 @@ if (want('sendtrain')) {
   await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'climb start', 60000);
   await page.waitForTimeout(600);
   await shot('climbing');
+  const ch = await chalkHud();
+  ok(ch.chips === 0 && ch.noChalk && ch.matters === false, `boulder HUD: no CHALK controls, chalk doesn't matter on a boulder (${JSON.stringify(ch)})`);
   const b = await page.evaluate(() => ({ id: window.__jgu.sim.boulder.id, name: window.__jgu.sim.boulder.name, grade: window.__jgu.sim.boulder.grade, angle: window.__jgu.sim.boulder.wallAngle }));
   log(`boulder ${b.name} V${b.grade} ${b.angle}°`);
   let midShot = false;
@@ -1110,6 +1238,267 @@ if (want('editor')) {
   await shot('title-after-editor');
 }
 
+// ───────────────────────────── Editor: a cave problem with a volume + a hold bolted onto it ─────────────────────────────
+/** A fixed CAVE sample for the editor (Math.random drives the sample seed): sent by touch in the e2e. */
+const CAVE_RANDOM = +opt('cave-random', 0.11);
+const CAVE_GRADE = +opt('cave-grade', 1);
+if (want('editorcave')) {
+  await tapText('CREATE');
+  await waitFor(() => window.__jgu.app.current === 'editor' && window.__jgu.editor.isOpen, 'editor open (cave)', 30000);
+  await veilClear();
+  await page.waitForTimeout(2000);
+  // the menu: style CAVE, the sample grade, LOAD (fixed seed), REPLACE when the wall has holds
+  await tap('.ed-tool-more', 'editor menu');
+  await page.evaluate(() => [...document.querySelectorAll('.ed-style')].find((b) => b.textContent === 'CAVE')?.click());
+  await frames(2);
+  const gradeNow = () => page.evaluate(() => +(document.querySelector('.ed-sample-v')?.textContent ?? 'V0').replace(/\D/g, ''));
+  for (let k = 0; k < 12 && (await gradeNow()) > CAVE_GRADE; k++) await tap('#ui button[aria-label="Easier"]', 'sample: easier');
+  for (let k = 0; k < 12 && (await gradeNow()) < CAVE_GRADE; k++) await tap('#ui button[aria-label="Harder"]', 'sample: harder');
+  await page.evaluate((r) => {
+    window.__e2eRandom = Math.random;
+    Math.random = () => r;
+  }, CAVE_RANDOM);
+  await tap('.ed-sample-go', 'LOAD sample');
+  if (await page.locator('.modal-ok').count()) await tap('.modal-ok', 'REPLACE');
+  await waitFor(() => window.__jgu.editor.getDraft().style === 'cave' && !document.querySelector('.ed-sample-go.is-busy'), 'cave sample', 120000);
+  await page.evaluate(() => {
+    Math.random = window.__e2eRandom;
+  });
+  await page.evaluate(() => [...document.querySelectorAll('.ed-style')].find((b) => b.textContent === 'ANY')?.click());
+  if (await page.locator('.ed-tool-more.is-on, .ed-drawer.is-open').count()) await tap('.ed-tool-more', 'close menu');
+  const cave = await page.evaluate(() => {
+    const d = window.__jgu.editor.getDraft();
+    return { name: d.name, style: d.style, panels: d.profile?.map((p) => p.angle) ?? [], holds: d.holds.length };
+  });
+  log(`cave sample: ${JSON.stringify(cave)}`);
+  ok(cave.style === 'cave' && cave.panels.length >= 3 && Math.max(...cave.panels) >= 60, `editor: a CAVE sample on a folded wall (${cave.name}: ${cave.panels.join('/')}°)`);
+  await page.waitForTimeout(1500);
+  await shot('editor-cave-sample');
+
+  // a clear patch of wall, away from the planned beta, for a volume from the library
+  const spot = await page.evaluate(async () => {
+    const j = window.__jgu;
+    const d = j.editor.getDraft();
+    const { planBeta } = await import('/src/game/solver.ts');
+    const used = new Set((planBeta(d, { maxMs: 1500 }) ?? []).map((m) => m.holdId));
+    let best = null;
+    for (let y = 0.7; y < Math.min(d.height - 0.6, 2.6); y += 0.1) {
+      for (let x = -d.width / 2 + 0.5; x <= d.width / 2 - 0.5; x += 0.1) {
+        const clear = Math.min(...d.holds.map((h) => Math.hypot(h.x - x, h.y - y) - (h.type === 'volume' ? h.size : 0.05)));
+        const near = Math.min(9, ...d.holds.filter((h) => used.has(h.id)).map((h) => Math.hypot(h.x - x, h.y - y)));
+        const sp = j.renderer.wallToScreen({ x, y }, 0);
+        if (!sp.visible || clear < 0.5) continue;
+        const score = Math.min(clear, 0.9) + Math.min(near, 1.2) * 0.6;
+        if (!best || score > best.score) best = { x: +x.toFixed(2), y: +y.toFixed(2), score };
+      }
+    }
+    return best;
+  });
+  log(`volume spot: ${JSON.stringify(spot)}`);
+  const surfaceTap = async (w, lift = 0) => {
+    const sp = await page.evaluate(([w, lift]) => {
+      const j = window.__jgu;
+      const s = j.renderer.wallToScreen(w, lift);
+      const g = j.renderer.canvas.getBoundingClientRect();
+      return { x: s.x + g.left, y: s.y + g.top };
+    }, [w, lift]);
+    await page.touchscreen.tap(sp.x, sp.y);
+    await page.waitForTimeout(600);
+    await frames(2);
+  };
+  const nBefore = await page.evaluate(() => window.__jgu.editor.getDraft().holds.length);
+  await tap('.ed-pal-tab-volumes', 'palette: VOLUMES');
+  await page.evaluate(() => document.querySelector('.ed-tile-v-wedge')?.click());
+  await frames(2);
+  if (spot) await surfaceTap(spot);
+  const vol = await page.evaluate(([n, sp]) => {
+    const d = window.__jgu.editor.getDraft();
+    const v = sp && d.holds.find((h) => h.type === 'volume' && Math.hypot(h.x - sp.x, h.y - sp.y) < 0.25);
+    return v ? { id: v.id, x: v.x, y: v.y, n: d.holds.length - n } : null;
+  }, [nBefore, spot]);
+  ok(!!vol && vol.n === 1, `editor: a WEDGE from the volume library set on the cave wall (${JSON.stringify(vol)})`);
+  // a crimp bolted onto its face
+  await page.evaluate(() => window.__jgu.editor['select'](null));
+  await tap('.ed-pal-tab-holds', 'palette: HOLDS');
+  await page.evaluate(() => document.querySelector('.ed-tile-crimp')?.click());
+  await frames(2);
+  if (vol) await surfaceTap({ x: vol.x + 0.08, y: vol.y + 0.02 }, 0.06);
+  const mount = await page.evaluate((vid) => {
+    const h = window.__jgu.editor.getDraft().holds.find((x) => vid && x.onVolume === vid);
+    return h ? { id: h.id, type: h.type, onVolume: h.onVolume } : null;
+  }, vol?.id ?? null);
+  ok(!!mount && mount.type === 'crimp', `editor: a crimp bolted onto the volume (${JSON.stringify(mount)})`);
+  await page.evaluate(() => window.__jgu.editor['select'](null));
+  await page.waitForTimeout(1200);
+  await shot('editor-cave-volume');
+  const chip = await editorChip();
+  ok(chip.status === 'ok', `editor problem check reads the cave + volume problem (${chip.text})`);
+
+  // TEST, sent by touch (the run carries the volume and its bolted-on crimp), then PUBLISH
+  await tap('.ed-test', 'TEST');
+  await waitScreen('preview', 120000);
+  await veilClear();
+  const tb = await page.evaluate((mid) => {
+    const b = window.__jgu.app.activeSession?.sim.boulder;
+    return { panels: b?.profile?.length ?? 0, mounted: !!b?.holds.some((h) => h.id === mid && h.onVolume) };
+  }, mount?.id ?? '');
+  ok(tb.panels >= 3 && tb.mounted, `the test climb is the cave with the bolted-on crimp (${JSON.stringify(tb)})`);
+  await page.waitForTimeout(1000);
+  await shot('editor-cave-test-preview');
+  await tap('.pv-hit', 'TAP TO START');
+  await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'cave test climb start', 60000);
+  await page.waitForTimeout(600);
+  await page.waitForTimeout(1200);
+  await shot('editor-cave-climbing');
+  const caveRun = await botClimb('editor-cave-test');
+  ok(caveRun.sent, `the cave problem is sent on its test climb (phase ${caveRun.phase})`);
+  await waitFor(() => window.__jgu.app.current === 'editor' && window.__jgu.editor.isOpen, 'editor back after the cave test', 90000);
+  await veilClear();
+  await waitFor(() => document.querySelector('.ed-pub')?.disabled === false, 'PUBLISH unlocked (cave)', 30000).catch(() => false);
+  await page.waitForTimeout(800);
+  if (ok(await page.evaluate(() => document.querySelector('.ed-pub')?.disabled === false), 'the cave test send unlocks PUBLISH')) {
+    const pre = await page.evaluate(() => window.__jgu.app.profile.myProblems.length);
+    await tap('.ed-pub', 'PUBLISH');
+    await tap('.modal-ok', 'confirm PUBLISH');
+    await waitFor((n) => window.__jgu.app.profile.myProblems.length > n, 'cave problem published', 30000, pre);
+    const pub = await page.evaluate(async () => {
+      const j = window.__jgu;
+      const mine = j.app.profile.myProblems;
+      const last = mine[mine.length - 1];
+      const list = await j.backend.listProblems({ sort: 'new', limit: 50 });
+      const row = list.find((p) => p.name === last?.name);
+      return { name: last?.name, listed: !!row, panels: row?.boulder.profile?.length ?? 0, mounted: !!row?.boulder.holds.some((h) => h.onVolume) };
+    });
+    ok(pub.listed && pub.panels >= 3 && pub.mounted, `PUBLISH puts the cave problem (folds + bolted-on hold) on the community wall (${JSON.stringify(pub)})`);
+    await page.waitForTimeout(1200);
+    await shot('editor-cave-published');
+  }
+  await tap('.ed-x', 'close editor');
+  await waitFor(() => window.__jgu.app.current === 'menu', 'editor closed (cave)', 30000);
+  await waitScreen('title');
+  await veilClear();
+}
+
+// ───────────────────────────── Photo → route: a generated wall photo through the editor's importer ─────────────────────────────
+if (want('photo')) {
+  // a procedurally generated phone photo of a yellow problem (src/photo/synth.ts; no real photos are bundled)
+  const sample = await page.evaluate(async () => {
+    const { synthPhoto } = await import('/src/photo/synth.ts');
+    const s = synthPhoto({ photoW: 900, photoH: 1200, ppm: 200, seed: 3, view: 'below', route: '#F2C230', wall: 'charcoal' });
+    const c = document.createElement('canvas');
+    c.width = s.photo.width;
+    c.height = s.photo.height;
+    c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(s.photo.data), s.photo.width, s.photo.height), 0, 0);
+    return { url: c.toDataURL('image/png'), quad: s.quad, w: s.photo.width, h: s.photo.height, route: s.holds.filter((h) => h.route).length };
+  });
+  log(`photo: ${sample.w}x${sample.h}, ${sample.route} route holds painted`);
+  await tapText('CREATE');
+  await waitFor(() => window.__jgu.app.current === 'editor' && window.__jgu.editor.isOpen, 'editor open (photo)', 30000);
+  await veilClear();
+  await page.waitForTimeout(1500);
+  const tapBox = async (sel) => {
+    const b = await page.locator(sel).first().boundingBox();
+    await page.touchscreen.tap(b.x + b.width / 2, b.y + b.height / 2);
+  };
+  await page.evaluate(() => document.querySelector('.ed-photo-go').click());
+  await page.waitForTimeout(600);
+  if (await page.locator('.modal-ok').count()) await tap('.modal-ok', 'IMPORT (replaces the draft)');
+  await page.waitForSelector('.ph', { timeout: 30000 });
+  await page.waitForTimeout(800);
+  await shot('photo-open');
+  await page.setInputFiles('.ph-file >> nth=1', { name: 'wall.png', mimeType: 'image/png', buffer: Buffer.from(sample.url.split(',')[1], 'base64') });
+  await waitFor(() => document.querySelector('.ph')?.dataset.step === 'frame', 'photo: corners step', 60000);
+  await page.waitForTimeout(600);
+  // the four corners onto the wall's corners (the FRAME view fits the photo into the stage, 28 px padding)
+  const st = await page.locator('.ph-stage').boundingBox();
+  const fit = Math.min((st.width - 56) / sample.w, (st.height - 56) / sample.h);
+  const toScr = (p) => ({ x: st.x + st.width / 2 + (p.x - sample.w / 2) * fit, y: st.y + st.height / 2 + (p.y - sample.h / 2) * fit });
+  for (let i = 0; i < 4; i++) {
+    const b = await page.locator('.ph-corner').nth(i).boundingBox();
+    const from = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+    const to = toScr(sample.quad[i]);
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    for (let k = 1; k <= 6; k++) await page.mouse.move(from.x + ((to.x - from.x) * k) / 6, from.y + ((to.y - from.y) * k) / 6);
+    await page.mouse.up();
+  }
+  await shot('photo-corners');
+  await tapBox('.ph-next');
+  await waitFor(() => document.querySelector('.ph')?.dataset.step === 'color', 'photo: colour step', 60000);
+  await page.waitForTimeout(800);
+  // tap the route colour: the most yellow patch of the straightened photo
+  const pick = await page.evaluate(() => {
+    const c = document.querySelector('.ph-canvas');
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let best = null;
+    let bs = 0;
+    for (let y = 4; y < c.height - 4; y += 3) {
+      for (let x = 4; x < c.width - 4; x += 3) {
+        let n = 0;
+        for (let j = -3; j <= 3; j += 3) for (let i = -3; i <= 3; i += 3) {
+          const o = ((y + j) * c.width + x + i) * 4;
+          if (d[o] > 170 && d[o + 1] > 120 && d[o + 2] < 90) n++;
+        }
+        if (n > bs) {
+          bs = n;
+          best = { x, y };
+        }
+      }
+    }
+    const r = c.getBoundingClientRect();
+    return best && { x: r.left + best.x / (c.width / r.width), y: r.top + best.y / (c.height / r.height) };
+  });
+  ok(!!pick, 'photo: a yellow hold to tap');
+  await page.touchscreen.tap(pick.x, pick.y);
+  await page.waitForTimeout(1500);
+  await tapBox('.ph-next');
+  await waitFor(() => document.querySelector('.ph')?.dataset.step === 'holds', 'photo: holds step', 60000);
+  await waitFor(() => !document.querySelector('.ph').classList.contains('is-detecting') && /holds? found/i.test(document.querySelector('.ph-title')?.textContent ?? ''), 'photo: holds found', 90000);
+  await page.waitForTimeout(600);
+  const found = await page.evaluate(() => document.querySelector('.ph-title').textContent);
+  ok(/^(1[2-9]|2\d) holds found/i.test(found), `photo: holds detected (${found}; ${sample.route} painted)`);
+  await shot('photo-holds');
+  await tapBox('.ph-next');
+  await waitFor(() => document.querySelector('.ph')?.dataset.step === 'roles', 'photo: start / top step', 30000);
+  await page.waitForTimeout(500);
+  await shot('photo-roles');
+  await tapBox('.ph-next');
+  await waitFor(() => document.querySelector('.ph')?.dataset.step === 'wall', 'photo: wall step', 30000);
+  await page.waitForTimeout(2500);
+  await shot('photo-wall');
+  await tapBox('.ph-make');
+  await waitFor(() => !document.querySelector('.ph'), 'photo importer closed', 30000);
+  await veilClear();
+  await page.waitForTimeout(1500);
+  const draft = await page.evaluate(() => {
+    const d = window.__jgu.editor.getDraft();
+    return { name: d.name, holds: d.holds.length, starts: d.holds.filter((h) => h.role === 'start').length, tops: d.holds.filter((h) => h.role === 'top').length, color: d.color };
+  });
+  ok(draft.holds >= 12 && draft.starts >= 1 && draft.tops === 1, `photo: the imported problem is the editor's draft (${JSON.stringify(draft)})`);
+  const pchip = await editorChip();
+  ok(pchip.status === 'ok', `photo: the editor's problem check finds a beta (${pchip.text})`);
+  await shot('photo-draft');
+  // playable: TEST it and climb it by touch
+  await tap('.ed-test', 'TEST');
+  await waitScreen('preview', 120000);
+  await veilClear();
+  await page.waitForTimeout(1000);
+  await shot('photo-test-preview');
+  await tap('.pv-hit', 'TAP TO START');
+  await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'photo test climb start', 60000);
+  await page.waitForTimeout(600);
+  const photoRun = await testClimbByTouch('photo-test');
+  ok(photoRun.sent, `photo: the imported problem is sent by touch (phase ${photoRun.phase})`);
+  await waitFor(() => window.__jgu.app.current === 'editor' && window.__jgu.editor.isOpen, 'editor back after the photo test', 90000);
+  await veilClear();
+  await page.waitForTimeout(800);
+  await shot('photo-after-test');
+  await tap('.ed-x', 'close editor');
+  await waitFor(() => window.__jgu.app.current === 'menu', 'editor closed (photo)', 30000);
+  await waitScreen('title');
+  await veilClear();
+}
+
 // ───────────────────────────── Daily + Community: start a climb, read the route, back out ─────────────────────────────
 if (want('daily')) {
   await tap('.title-play', 'PLAY');
@@ -1188,6 +1577,8 @@ if (want('lead')) {
   await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', 'lead climb start', 60000);
   await page.waitForTimeout(600);
   await shot('lead-climbing');
+  const lch = await chalkHud();
+  ok(lch.chips === 2 && !lch.noChalk && lch.matters === true, `lead HUD keeps the chalk mechanic: a CHALK chip per hand (${JSON.stringify(lch)})`);
   const clipped = await autoClimb({
     label: 'lead',
     maxMoves: 30,
