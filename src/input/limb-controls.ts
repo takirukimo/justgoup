@@ -561,8 +561,12 @@ export class LimbControls implements LimbControlsAPI {
     const show = this.enabled && !!sim && state.phase === 'climbing' && (mode === undefined || mode === 'follow');
     if (!show) {
       if (this.dragIdx !== NONE) this.finishDrag();
-      if (this.visible) this.setVisible(false);
-      if (this.drawn) this.clearCanvas();
+      if (this.visible) {
+        this.setVisible(false);
+        // hidden (session end, celebration, overview): wipe the whole overlay, so nothing drawn earlier
+        // can outlive the bounding-box clears into the next climb (a Pure climb then draws nothing at all)
+        this.clearAll();
+      } else if (this.drawn) this.clearCanvas();
       for (const h of this.handles) h.placed = false;
       return;
     }
@@ -692,6 +696,7 @@ export class LimbControls implements LimbControlsAPI {
     this.pure = v;
     this.root.classList.toggle('is-pure', v);
     if (v) {
+      this.clearAll();
       this.clearOwnHighlights();
       this.setTag(this.candTag, false);
       this.setTag(this.clipTag, false);
@@ -2152,6 +2157,16 @@ export class LimbControls implements LimbControlsAPI {
   }
 
   // ═══════════════════════════════ overlay canvas ═══════════════════════════════
+
+  /** The whole overlay canvas, not just the last drawn area (on hide and when Pure mode turns on). */
+  private clearAll(): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    ctx.restore();
+    this.drawn = false;
+  }
 
   private clearCanvas(): void {
     if (!this.drawn) return;

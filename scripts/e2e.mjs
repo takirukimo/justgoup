@@ -976,6 +976,14 @@ if (want('settings')) {
 
 // ───────────────────────────── Pure climbing: no HUD, the body is the feedback ─────────────────────────────
 if (want('pure')) {
+  /** What the overlay canvas still shows (Pure mode should leave it empty): its bounding box + a PNG. */
+  const dumpOverlay = async (name) => {
+    const o = await page.evaluate(() => window.__e2eOverlay ?? null);
+    if (!o) return;
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(`${out}/${name}.png`, Buffer.from(o.url.split(',')[1], 'base64'));
+    log(`overlay pixels left in ${JSON.stringify(o.box)} (device px) -> ${name}.png`);
+  };
   const hudVisible = () =>
     page.evaluate(() => {
       const vis = (sel) => [...document.querySelectorAll(sel)].some((e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden' && +getComputedStyle(e).opacity > 0.05);
@@ -990,8 +998,15 @@ if (want('pure')) {
           const c = document.querySelector('.jgl canvas');
           if (!c || !c.width) return false;
           const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-          for (let i = 3; i < d.length; i += 16) if (d[i] > 8) return true;
-          return false;
+          let box = null;
+          for (let i = 3; i < d.length; i += 16)
+            if (d[i] > 8) {
+              const px = ((i - 3) / 4) % c.width;
+              const py = Math.floor((i - 3) / 4 / c.width);
+              box = box ? [Math.min(box[0], px), Math.min(box[1], py), Math.max(box[2], px), Math.max(box[3], py)] : [px, py, px, py];
+            }
+          if (box) window.__e2eOverlay = { box, url: c.toDataURL('image/png') };
+          return !!box;
         })(),
       };
     });
@@ -1077,6 +1092,7 @@ if (want('pure')) {
   let hv = await hudVisible();
   ok(!hv.meters && !hv.hint && !hv.look && hv.pause, `Pure HUD: no meters, no hint, no LOOK, a faint pause stays (${JSON.stringify(hv)})`);
   ok(!hv.handles && !hv.canvas, `Pure controls: no handles, leaders or arcs until a finger lands (${JSON.stringify(hv)})`);
+  if (hv.canvas) await dumpOverlay('pure-overlay-left');
   // a finger on the right hand picks it: only a faint ring shows
   const ring = await page.evaluate(() => {
     const j = window.__jgu;
@@ -1094,6 +1110,7 @@ if (want('pure')) {
   ok(held.drag === 'RH' && held.ring === 1, `Pure: a finger on the hand picks it and shows one faint ring (${JSON.stringify(held)})`);
   hv = await hudVisible();
   ok(!hv.canvas, 'Pure drag: no reach arc, leader or grip tag drawn');
+  if (hv.canvas) await dumpOverlay('pure-overlay-drag');
   await touch('touchMove', [ring]);
   await frames(1);
   await touch('touchEnd', []);
