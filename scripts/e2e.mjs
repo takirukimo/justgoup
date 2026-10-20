@@ -658,6 +658,41 @@ async function botClimb(label, tries = 2) {
   return { sent: ph === 'topped', phase: ph };
 }
 
+/**
+ * The sim's climbing bot (as botClimb) drives the live sim until `until()` holds or the climb ends, then
+ * hands the climber back (the instance's step wrapper is removed, so the session's sim steps alone again).
+ */
+async function botUntil(label, until, timeout = 900000) {
+  await page.evaluate(async () => {
+    const sim = window.__jgu.sim;
+    const { BetaBot } = await import('/src/game/bot.ts');
+    const bot = new BetaBot(sim);
+    const step = Object.getPrototypeOf(sim).step.bind(sim);
+    let ev = [];
+    sim.step = (d) => {
+      bot.update(d, ev);
+      ev = step(d);
+      return ev;
+    };
+    window.__e2eBot = bot;
+  });
+  log(`${label}: the climbing bot takes over`);
+  const t = Date.now();
+  let done = false;
+  while (Date.now() - t < timeout) {
+    if ((done = await until())) break;
+    if ((await page.evaluate(() => window.__jgu.sim?.getState().phase)) !== 'climbing') break;
+    await page.waitForTimeout(400);
+  }
+  const r = await page.evaluate(() => {
+    const sim = window.__jgu.sim;
+    if (sim && Object.prototype.hasOwnProperty.call(sim, 'step')) delete sim.step;
+    return { moves: window.__e2eBot?.moves ?? 0, phase: sim?.getState().phase ?? 'gone' };
+  });
+  log(`${label}: ${done ? 'done' : r.phase} after ${r.moves} bot moves; the player has the climber back`);
+  return done;
+}
+
 /** The editor's problem check (the analyzer's beta reader) once it has settled: 'ok' / 'nobeta' / 'invalid'. */
 const editorChip = async () => {
   await waitFor(() => ['ok', 'nobeta', 'invalid'].includes(document.querySelector('.ed-chip')?.dataset.status ?? ''), 'editor problem check', 90000);
@@ -1615,6 +1650,7 @@ if (want('lead')) {
     });
   const leadId = await page.evaluate(() => window.__jgu.app.activeSession?.boulder.id ?? '');
   let high = false;
+  let leadUpBy = '';
   let clipChecked = false;
   // up to two attempts: the touch driver can miss where a planned hip path can't be followed live
   // and pump out low on the tower (a ground fall ends the run); then TRY AGAIN — the same route as a
@@ -1635,6 +1671,10 @@ if (want('lead')) {
         window.__e2eClips = [];
       });
     }
+    // the second go holds the sim still while the finger travels (fastFinger, as on the cave / photo
+    // test climbs): a headless drag spans seconds of game time, long enough for the one holding hand
+    // to pump off mid-clip on a long route; the release still goes through LimbControls
+    fastFinger = attempt > 1;
     await tap('.pv-hit', 'TAP TO START');
     await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing', `lead climb start${tag}`, 60000);
     await page.waitForTimeout(600);
@@ -1661,16 +1701,24 @@ if (want('lead')) {
       await page.evaluate(() => window.__jgu.sim.forceFall());
       continue;
     }
-    high = await autoClimb({
-      label: `lead-up${tag}`,
-      maxMoves: 24,
-      careful: attempt > 1,
-      until: async () => (await safe()) || (await page.evaluate(() => window.__jgu.sim?.getState().phase !== 'climbing')),
-    });
+    if (attempt === 1) {
+      high = await autoClimb({
+        label: `lead-up${tag}`,
+        maxMoves: 24,
+        until: async () => (await safe()) || (await page.evaluate(() => window.__jgu.sim?.getState().phase !== 'climbing')),
+      });
+    } else {
+      // the single-finger touch driver misses where a reach needs the hips held while the hand moves
+      // (a released hip handle settles back); the rope checks below need the climber above a clip, so
+      // the sim's own bot (hips and hand together, as with two thumbs) climbs there in the live session
+      high = await botUntil(`lead-up${tag}`, safe);
+    }
     high = high && (await safe());
+    if (high) leadUpBy = attempt === 1 ? 'by touch' : "by the sim's bot after a TRY AGAIN (the touch driver missed)";
   }
+  fastFinger = false;
   if (!clipChecked) ok(false, 'Lead Tower: clipped a quickdraw by touch (none)');
-  if (ok(high, 'Lead Tower: climbed above the clip to where a fall is caught')) {
+  if (ok(high, `Lead Tower: climbed above the clip to where a fall is caught ${leadUpBy}`.trim())) {
     // the touch driver may already have pumped off and been caught on the way up (each catch costs a life)
     const livesBefore = await page.evaluate(() => window.__jgu.app.activeSession?.cfg.lives?.left ?? -1);
     log(`lead: ${livesBefore} lives left before the whipper`);
