@@ -1671,6 +1671,9 @@ if (want('lead')) {
   }
   if (!clipChecked) ok(false, 'Lead Tower: clipped a quickdraw by touch (none)');
   if (ok(high, 'Lead Tower: climbed above the clip to where a fall is caught')) {
+    // the touch driver may already have pumped off and been caught on the way up (each catch costs a life)
+    const livesBefore = await page.evaluate(() => window.__jgu.app.activeSession?.cfg.lives?.left ?? -1);
+    log(`lead: ${livesBefore} lives left before the whipper`);
     await page.evaluate(() => {
       window.__e2eRope = [];
       window.__jgu.bus.on('sim:event', (e) => {
@@ -1683,11 +1686,20 @@ if (want('lead')) {
     await shot('lead-whipper');
     const kind = await page.evaluate(() => window.__e2eRope[0]);
     ok(kind === 'caught', `Lead Tower: the rope catches the fall (${kind})`);
-    await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing' && !document.querySelector('.jga-veil.on'), 'respawn on the wall', 90000);
-    await page.waitForTimeout(1200);
-    const lives = await page.evaluate(() => window.__jgu.app.activeSession?.cfg.lives?.left ?? -1);
-    ok(lives === 2, `Lead Tower: respawned after the catch with one life fewer (${lives} left)`);
-    await shot('lead-respawn');
+    if (livesBefore > 1) {
+      await waitFor(() => window.__jgu.sim?.getState().phase === 'climbing' && !document.querySelector('.jga-veil.on'), 'respawn on the wall', 90000);
+      await page.waitForTimeout(1200);
+      const lives = await page.evaluate(() => window.__jgu.app.activeSession?.cfg.lives?.left ?? -1);
+      ok(lives === livesBefore - 1, `Lead Tower: respawned after the catch with one life fewer (${livesBefore} -> ${lives} left)`);
+      await shot('lead-respawn');
+    } else {
+      // that catch took the last life: the run ends on the results instead of a respawn
+      await waitScreen('results', 90000);
+      await page.waitForTimeout(1500);
+      const res = await page.evaluate(() => document.querySelector('#ui .scr-results, #ui [data-screen=results], #ui')?.textContent ?? '');
+      ok(/TRY AGAIN/.test(res), 'Lead Tower: a catch on the last life ends the run (results with TRY AGAIN)');
+      await shot('lead-last-life-results');
+    }
   }
   const leadEnd = await waitFor(
     () => (document.getElementById('ui')?.dataset.screen === 'results' ? 'results' : window.__jgu.sim?.getState().phase === 'climbing' && !document.querySelector('.jga-veil.on') ? 'climbing' : false),
