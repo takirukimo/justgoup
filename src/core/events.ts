@@ -22,6 +22,8 @@ export interface AppEvents {
   'ui:retry': void;
   'ui:next': void; // next boulder in the run after a send
   'ui:quit': void; // back to menu from a run
+  'ui:new-run': void; // results after a run ends (Send Train / Lead Tower): a brand-new random run ('ui:retry' replays the problem it ended on)
+  'ui:menu': void; // results of a problem picked from a list (Community): to the main menu ('ui:quit' goes back to the list)
   'ui:hint': void;
   'ui:toggle-overview': void; // look at the whole route
   'ui:select-head': { head: HeadId };

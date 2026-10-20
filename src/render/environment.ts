@@ -325,15 +325,11 @@ export class GymEnvironment {
       structure(new THREE.BoxGeometry(len - 0.2, 0.006, 0.004), 0, f.height + 0.0, 0.036, PALETTE.signal);
       for (const side of [-1, 1]) structure(new RoundedBoxGeometry(0.07, f.height, 0.065, 2, 0.02), (side * len) / 2, f.height / 2, 0, '#1B1D21');
 
-      // tone-on-tone branding on the panels: the mark or the wordmark (official proportions)
+      // tone-on-tone branding on the panels: the mark only (owner: no CHIRAL SPORTS lettering on a
+      // climbing wall; a subtle tone-on-tone mark is fine; the wordmark lives on the sign, pads, banners)
       const frng = new Rng(f.seed * 977);
-      if (frng.chance(0.55)) {
-        const s = Math.min(1.7, f.height * 0.38);
-        decal(atlas.logo, s, s, localMat(frng.range(-len * 0.22, len * 0.22), f.height * 0.6, 0.003, 0, m4), '#ffffff', 0.055);
-      } else {
-        const w = Math.min(len * 0.82, 3.4);
-        decal(atlas.word, w, w / atlas.aspect.word, localMat(0, f.height * 0.72, 0.003, 0, m4), '#ffffff', 0.06);
-      }
+      const s = Math.min(1.7, f.height * 0.38);
+      decal(atlas.logo, s, s, localMat(frng.range(-len * 0.22, len * 0.22), f.height * 0.6, 0.003, 0, m4), '#ffffff', 0.055);
 
       // routes
       const hrng = new Rng(f.seed * 131 + 7);
