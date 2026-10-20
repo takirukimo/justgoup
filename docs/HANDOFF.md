@@ -14,10 +14,12 @@ All of these are branches on GitHub (`takirukimo/justgoup`), never rewritten:
 | `backup/2026-10-18-latest` | end of day 1: anatomy limits, self-collision, before the v0.1 feedback round |
 | `backup/v0.2-phone-link` | **v0.2**, the build published to the claude.ai artifact link the owner plays on the phone: STEIBOCK rebrand, CHIRAL pink, new ibex, human + cap, wall profiles, chalk, dynos, foot techniques |
 | `backup/v0.2-ios-app` | v0.2 + editor upgrades + Pure mode + photo-to-route + the native iPhone app, verified green (`tsc`, 410/410 unit tests, build, the full player e2e: 50 checks across onboarding, Send Train, leaderboard, locker, settings, Pure, profile, community, editor, daily and lead) |
-| `release/v0.2.1-ios` | **the branch to put on the iPhone today**: `backup/v0.2-ios-app` plus the brand fixes (gym CHIRAL SPORTS without "HQ", pink sign without the flicker, no lettering on the wall) and the key-art start screen. Checked: typecheck, unit tests, build, and a smoke run of the built app (start screen → onboarding → title → Send Train climb, no console errors) |
-| `main` | current work. While the v0.3 round runs it can be mid-change; build the phone from `release/v0.2.1-ios` until v0.3 is pushed |
+| `release/v0.2.1-ios` | the previous phone branch: `backup/v0.2-ios-app` plus the brand fixes (gym CHIRAL SPORTS without "HQ", pink sign without the flicker, no lettering on the wall) and the key-art start screen. Checked: typecheck, unit tests, build, and a smoke run of the built app (start screen → onboarding → title → Send Train climb, no console errors) |
+| `backup/v0.3` | **v0.3**: everything from the owner's v0.2 feedback, the heel-toe cam / bat hang / figure 4, legs + harness, photo import finished. Full e2e passed (every check), sandbox, soak, all unit tests and builds. Published to the claude.ai link as version 3 |
+| `release/v0.3-ios` | **the branch to put on the iPhone now** (same commit as `backup/v0.3`) |
+| `main` | current work. While the v0.3 round runs it can be mid-change; build the phone from `release/v0.3-ios` |
 
-For the phone today: `git switch release/v0.2.1-ios && npm install && npm run ios:sync && npm run ios:open`.
+For the phone today: `git switch release/v0.3-ios && npm install && npm run ios:sync && npm run ios:open`.
 To try an old version: `git switch backup/v0.2-phone-link && npm install && npm run dev`. Switch back
 with `git switch main`.
 
@@ -53,9 +55,9 @@ a session that runs on the Mac. That combines with Xcode and an attached iPhone.
   START.
 - **iPhone app:** the native app in `ios/` (see `docs/IOS.md`).
 
-## Where v0.3 stands (the owner's v0.2 feedback)
+## v0.3 (done, published 2026-10-20; the owner's v0.2 feedback)
 
-Being built when this was written; the items land on `main` as they finish:
+All of these landed and passed QA:
 
 - **Sticky contact:** hands and feet sit on the real hold geometry, not slapped on or floating.
   Contact points have normals and grip directions, and there are grab animations.
@@ -77,8 +79,14 @@ Being built when this was written; the items land on `main` as they finish:
 - **Photo import:** finish and polish the flow.
 - **QA:** full end-to-end and build checks.
 
-When v0.3 is done: publish it to the same claude.ai artifact link (capabilities `db`, `user`,
-`sample: {images: true}`), and the iPhone app picks it up with `git pull && npm run ios:sync`.
+Published to the same claude.ai artifact link (capabilities `db`, `user`, `sample: {images: true}`).
+Known leftovers:
+- On random lead routes the one-finger touch driver doesn't always reach the clip on the first go, so
+  the e2e falls back to the bot there.
+- The bot misses 1 of 180 generated boulders.
+- A heel-toe cam doesn't use roof or wall corners.
+- The bat hang has no floor check for custom roofs below about 1.4 m.
+- One crowded lead frame is 4% over the 250k triangle budget.
 
 ## Next: v0.4 moves (owner asked for "any other moves you can think of")
 
