@@ -205,9 +205,9 @@ const sendShortcut = () =>
 
 
 /** Snapshot of where things are on screen for the climbing bot. */
-async function look(holdId, limb) {
+async function look(holdId, limb, pt = null) {
   return page.evaluate(
-    async ({ holdId, limb }) => {
+    async ({ holdId, limb, pt }) => {
       const j = window.__jgu;
       const sim = j.sim;
       if (!sim) return null;
@@ -228,6 +228,7 @@ async function look(holdId, limb) {
       let to = null;
       if (h) to = contactPoint(h, idx, st.limbs[pair].holdId === h.id, { x: 0, y: 0 });
       else if (q) to = clipPoint(q, { x: 0, y: 0 });
+      else if (pt) to = pt; // a planned smear: a spot on the bare wall
       const target = j.controls.target;
       const dragging = j.controls.dragging === limb;
       return {
@@ -236,14 +237,23 @@ async function look(holdId, limb) {
         from: scr(st.limbs[limb].pos, st.limbs[limb].depth),
         to: to ? scr(to) : null,
         drag: dragging ? scr(target) : null,
-        candidate: dragging ? (q ? sim.clipCandidate(limb, target)?.id ?? null : sim.snapCandidate(limb, target)?.id ?? null) : null,
+        candidate: dragging
+          ? q
+            ? sim.clipCandidate(limb, target)?.id ?? null
+            : pt && !h
+              ? Math.hypot(target.x - pt.x, target.y - pt.y) < 0.025
+                ? holdId
+                : null
+              : sim.snapCandidate(limb, target)?.id ?? null
+          : null,
         on: st.limbs[limb].holdId,
+        smearing: !!st.limbs[limb].smearing,
         busy: st.limbs[limb].busy,
         clipped: st.clipped.slice(),
         camera: j.renderer.cameraMode,
       };
     },
-    { holdId, limb },
+    { holdId, limb, pt },
   );
 }
 
@@ -270,23 +280,24 @@ const holdSim = (on) => page.evaluate((on) => {
   if (s?.driver) s.driver.paused = on;
 }, on);
 
-async function dragMove(limb, holdId) {
+async function dragMove(limb, holdId, pt = null) {
   await settleHandle(limb);
-  let s = await look(holdId, limb);
+  let s = await look(holdId, limb, pt);
   if (!s || s.phase !== 'climbing' || !s.handle || !s.to) return 'skip';
   let finger = { ...s.handle };
   if (fastFinger) await holdSim(true);
   try {
-    return await dragMoveInner(limb, holdId, s, finger);
+    return await dragMoveInner(limb, holdId, s, finger, pt);
   } finally {
     if (fastFinger) await holdSim(false);
   }
 }
 
-async function dragMoveInner(limb, holdId, s, finger) {
+async function dragMoveInner(limb, holdId, s, finger, pt = null) {
+  const startOn = s.on;
   await touch('touchStart', [finger]);
   await frames(1);
-  s = await look(holdId, limb);
+  s = await look(holdId, limb, pt);
   if (!s.drag) {
     const why = await page.evaluate(
       ({ x, y, limb }) => {
@@ -312,7 +323,7 @@ async function dragMoveInner(limb, holdId, s, finger) {
   };
   await moveBy(s.to.x - s.from.x, s.to.y - s.from.y);
   for (let k = 0; k < 24; k++) {
-    s = await look(holdId, limb);
+    s = await look(holdId, limb, pt);
     if (!s || !s.drag || s.phase !== 'climbing') break;
     if (s.candidate === holdId) {
       await frames(1);
@@ -325,9 +336,11 @@ async function dragMoveInner(limb, holdId, s, finger) {
   }
   await touch('touchEnd', []);
   await frames(2);
-  const after = await look(holdId, limb);
+  const after = await look(holdId, limb, pt);
   if (!after) return 'gone';
   if (after.on === holdId || after.busy || after.clipped.includes(holdId)) return 'ok';
+  // a planned smear that smears, or lands on a foothold instead, is just as good (as the sim's bot takes it)
+  if (pt && (after.smearing || (after.on && after.on !== startOn))) return 'ok';
   const why = await page.evaluate(([l, id]) => {
     const sim = window.__jgu.sim;
     return sim && sim.getState().phase === 'climbing' ? (sim.reachableHolds(l).includes(id) ? 'in reach' : 'out of reach') : '';
@@ -503,6 +516,7 @@ async function autoClimb({ until, maxMoves = 60, label, careful = false }) {
         hips: s.reachPose ? { x: s.reachPose.px, y: s.reachPose.py } : null,
         stance: s.pose ? { x: s.pose.px, y: s.pose.py } : null,
         clip: s.clip ? { limb: s.clip.limb, id: s.clip.quickdrawId } : null,
+        smear: s.smear ? { x: s.smear.x, y: s.smear.y } : null,
       }));
     }, avoid);
     if (!plan || !plan.length) {
@@ -516,7 +530,8 @@ async function autoClimb({ until, maxMoves = 60, label, careful = false }) {
       if (await tryClip()) {
         if (await until()) return true;
       }
-      if (step.holdId === 'smear') continue;
+      // a planned smear: the foot onto that spot of bare wall (skipping it left the next reach short)
+      if (step.holdId === 'smear' && !step.smear) continue;
       if (careful && !step.dyno && step.hips) {
         // a careful climber sets the hips for the reach first (what the sim's own bot does)
         const far = await page.evaluate((t) => {
@@ -525,7 +540,7 @@ async function autoClimb({ until, maxMoves = 60, label, careful = false }) {
         }, step.hips);
         if (far > 0.08) await hipMove(step.hips);
       }
-      let r = step.dyno ? await throwMove(step.dyno, step.holdId) : await dragMove(step.limb, step.holdId);
+      let r = step.dyno ? await throwMove(step.dyno, step.holdId) : await dragMove(step.limb, step.holdId, step.smear);
       if (!step.dyno && r.startsWith('miss(') && step.hips) {
         // out of reach from where the hips are: shift the weight to the planned reach pose, try again
         const far = await page.evaluate((t) => {
@@ -534,10 +549,11 @@ async function autoClimb({ until, maxMoves = 60, label, careful = false }) {
         }, step.hips);
         if (far > 0.04 && (await hipMove(step.hips))) {
           log(`  ${step.limb}→${step.holdId}: ${r}; hips ${(far * 100).toFixed(0)} cm toward the reach pose, again`);
-          r = await dragMove(step.limb, step.holdId);
+          r = await dragMove(step.limb, step.holdId, step.smear);
         }
       }
       if (step.dyno) log(`  ${step.dyno === 'both' ? 'double dyno' : `deadpoint ${step.dyno}`} → ${step.holdId}: ${r}`);
+      if (step.smear) log(`  ${step.limb} smears at ${step.smear.x.toFixed(2)},${step.smear.y.toFixed(2)}: ${r}`);
       moves++;
       if (r === 'ok') avoid = [];
       if (r !== 'ok' && r !== 'skip') {
